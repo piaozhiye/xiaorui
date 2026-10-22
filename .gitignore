@@ -1,0 +1,61 @@
+*.rkllm
+*.onnx
+*.wav
+__pycache__/
+*.pyc
+wheels*/
+wheels314/
+miniforge*/
+tts-model/
+tts-model-full/
+tts-aishell3/
+tts-matcha/
+asr-small/
+brcm-firmware/
+board/xz_board_smoke
+board/xz_capture
+board/xiaorui_live
+board/backend_audio_probe
+*.so
+*.so.*
+board-server/pkg/config.yaml
+board-server/pkg/config_from_api.yaml
+board-server/data/
+*.mp3
+board-server/pkg/data/
+tmp/
+test-results/
+tests/audio/
+
+# 用户本地构建产物(原厂库 x86 版), 勿入库
+Linux_11.4.0_x86_64/
+# vendor 例外: 部署可复现需要补丁版插件二进制
+!vendor/rkaudio-vqe/*.so
+# 提示音例外: 板上提示音在仓库的唯一权威副本(部署可复现+可回溯 SHA)
+!board-server/cues/*.wav
+*.p3
+
+# 121MB 官方安装器不入库(PC 备份与上游可重取)
+board-server/miniforge.sh
+models/
+board-deploy-snapshot/20261020/
+
+# Local agent handoffs and private credentials must not enter public commits.
+HANDOFF*.md
+**/.auth_key
+**/ha_token.txt
+**/.env
+**/.env.local
+*.pem
+*.key
+*.rknn
+vendor/rkaudio-vqe/
+docs/PUBLICATION.md
+tools/vqe-oob-probe/README.md
+*.pdf
+board-server/config/AUDIO-NO-VQE.md
+ports/*/README.md
+ports/README.md
+patches/rkaudio-vqe-buffer-contract.patch
+board-server/base.py.patched-1012
+board/vqe_probe

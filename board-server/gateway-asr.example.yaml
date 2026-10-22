@@ -1,0 +1,9 @@
+# Merge these sections into the PC gateway's private data/.config.yaml.
+# Keep existing LLM/TTS/auth entries. Do not replace the full private config.
+selected_module:
+  ASR: GatewayASR
+ASR:
+  GatewayASR:
+    type: sherpa_gateway
+    model_dir: /absolute/path/to/stream-para-bilingual
+    output_dir: tmp/asr_gateway

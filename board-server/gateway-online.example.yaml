@@ -1,0 +1,56 @@
+# 板端联网网关私有配置模板 (部署到 /data/xiaorui-gateway/server/data/.config.yaml)
+# deploy-online-gateway.sh 会在板上:
+#   1. 把 api_key: INJECT_KEY 占位替换为真实 key (key 不入本仓库)
+#   2. 从 8000 运行时配置继承 prompt/exit_commands 等行为段, 保持人设一致
+# 运行位置标注: LLM=云(dashscope qwen-flash), ASR=云(dashscope qwen3-asr-flash),
+#              TTS=板端 Matcha, VAD=无(manual 模式不需要, 见 connection.py 路由)
+server:
+  ip: 127.0.0.1
+  port: 8001
+  http_port: 8004
+  auth:
+    enabled: false
+# 板模板默认关 JSON ping; 网关打开: 冒烟/验收客户端靠 pong 判活, C 前端忽略 pong 无副作用
+enable_websocket_ping: true
+# 唤醒词缓存回应不适用本设备(前端本地处理唤醒)
+enable_wakeup_words_response_cache: false
+selected_module:
+  ASR: Qwen3ASRFlash
+  LLM: AliLLM
+  TTS: SherpaLocal
+  Memory: nomem
+  Intent: function_call
+LLM:
+  AliLLM:
+    type: openai
+    model_name: qwen-flash
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key: INJECT_KEY
+    temperature: 0.7
+    max_tokens: 2048
+    # 连接 3s / 读 30s: 云首包实测 <2s, 30s 足够长回答; 重试由 openai SDK
+    # 默认 max_retries=2 有界兜底(401/403 不重试, 429/5xx 才退避)
+    timeout:
+      pool: 2
+      connect: 3
+      write: 5
+      read: 30
+ASR:
+  Qwen3ASRFlash:
+    type: qwen3_asr_flash
+    model_name: qwen3-asr-flash
+    api_key: INJECT_KEY
+    output_dir: tmp/asr
+    enable_lid: true
+    enable_itn: true
+    # 整句上传识别的总超时(秒); 超时返回空文本走降级
+    timeout: 20
+TTS:
+  SherpaLocal:
+    type: sherpa_local
+    engine: matcha
+    model_dir: /data/xiaorui-server/tts-matcha/matcha-icefall-zh-baker
+    sid: 14
+    num_threads: 4
+    speed: 1.0
+    output_dir: tmp/

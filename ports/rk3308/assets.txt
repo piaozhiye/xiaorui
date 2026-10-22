@@ -1,0 +1,8 @@
+# Place in XR_KWS_DIR. Download sources/checksums: tools/download-models.sh --list.
+encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx
+decoder-epoch-12-avg-2-chunk-16-left-64.onnx
+joiner-epoch-12-avg-2-chunk-16-left-64.onnx
+tokens.txt
+keywords.txt
+# Additional dependencies: compatible sherpa C API + ONNX runtime,
+# ALSA, frontend binary, audio config and optional prompt WAVs (not ASR/LLM models).

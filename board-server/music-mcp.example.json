@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "music-resolver": {
+      "command": "/data/miniforge/bin/python",
+      "args": ["-m", "music_mcp"],
+      "expose_tools": false,
+      "env": {
+        "PYTHONPATH": "/data/xiaorui-gateway/deps/music-mcp",
+        "MUSIC_SOURCES": "kuwo,netease",
+        "SOURCE_TIMEOUT": "2",
+        "MAX_RESOLVE_TRIES": "2",
+        "LOCAL_PLAYER": "none",
+        "AUTO_PLAY_LOCAL": "false"
+      }
+    }
+  }
+}

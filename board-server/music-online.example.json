@@ -1,0 +1,8 @@
+{
+  "_说明": "在线直链歌单。name=名字(建议纯中文); url=仅 .p3/.wav 直链; radio=true 为无限流电台(只在点名'电台/广播'时进入, 随机放歌不会选中)。mp3 用 PC 端 tools/music2p3.py 转换推板。改动 60s 内生效或重启网关。部署位: /data/xiaorui-gateway/server/music-online/playlist.json",
+  "entries": [
+    {"name": "轻音乐电台", "url": "http://ice1.somafm.com/groovesalad-128-mp3", "radio": true},
+    {"name": "电子音乐电台", "url": "http://ice1.somafm.com/beatblender-128-mp3", "radio": true},
+    {"name": "爵士电台", "url": "http://ice1.somafm.com/sonicuniverse-128-mp3", "radio": true}
+  ]
+}

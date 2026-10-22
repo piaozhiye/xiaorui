@@ -1,0 +1,478 @@
+{
+ "skv_configs": {
+  "drop_ref_chan": 0,
+  "ref_pos": 1,
+  "ref_pass_threshold": 30,
+  "aec": {
+   "status": "enable",
+   "delay_len": 0,
+   "look_ahead_array": 0,
+   "look_ahead_discrete": 0,
+   "num_array_mic": 2,
+   "filter_len": 4,
+   "auto_adapted": 1,
+   "adapt_rate_down": 0.05,
+   "adapt_rate_high": 0.25,
+   "filter_path": "NULL"
+  },
+  "array_reset": {
+   "status": "disable",
+   "Array_list": [
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    1,
+    2,
+    3,
+    4,
+    11,
+    0
+   ]
+  },
+  "delay": {
+   "status": "disable",
+   "MaxFrame": 32,
+   "LeastDelay": 0,
+   "JumpFrame": 12,
+   "DelayOffset": 1,
+   "MicAmpThr": 50,
+   "RefAmpThr": 50,
+   "StartFreq": 500,
+   "EndFreq": 4000,
+   "SmoothFactor": 0.99
+  },
+  "bf": {
+   "status": "enable",
+   "ainr_pos": 0,
+   "array_type": 1,
+   "out_channel": 1,
+   "en_winner": 1,
+   "en_weight": 0,
+   "en_gsc": 0,
+   "gsc_method": 0,
+   "en_fix": 0,
+   "targ1_len": 1,
+   "targ2_len": 1,
+   "targ1": [
+    0
+   ],
+   "targ2": [
+    4
+   ],
+   "bf_min_diff": 1,
+   "stability_threshold": 3,
+   "en_wind": 0,
+   "filter_size": 512,
+   "start_freq": 0,
+   "end_freq": 8000,
+   "input_beam_num": 5,
+   "output_beam_num": 5,
+   "T_MIU": 0.35,
+   "win_low_freq": 800,
+   "win_high_freq": 4000,
+   "win_apply_low_freq": 800,
+   "win_apply_high_freq": 4000,
+   "low_freq": 500,
+   "high_freq": 4000,
+   "num_array_mic": 2,
+   "num_discrete_mic": 0,
+   "output_mode": 0,
+   "chan_select_threshold": 2,
+   "param_path": "wopt_2mic_linear_60mm_5inputbeam_5outputbeam.bin",
+   "license_path": "license.lic"
+  },
+  "aibf": {
+   "status": "disable",
+   "mode": 1,
+   "pre_gain": 10,
+   "alpha_x_ascend": 0.1,
+   "alpha_x_descend": 0.3,
+   "alpha_n_ascend": 0.3,
+   "alpha_n_descend": 0.1,
+   "post_snr_ns_th": 0.5,
+   "post_snr_sp_th": 3,
+   "min_gain": 0.1,
+   "low_freq": 0,
+   "high_freq": 8000,
+   "model_path": "/usr/share/rkaudio/model_files/aibf_model_files_new/mnn_models/SCNet_ONNX_Mask_New_Bf_Cricle_67M_Eight_Input_20260226.bin"
+  },
+  "aiecbf": {
+   "status": "disable",
+   "mode": 1,
+   "pre_gain": 4,
+   "alpha_x_ascend": 0.1,
+   "alpha_x_descend": 0.3,
+   "alpha_n_ascend": 0.3,
+   "alpha_n_descend": 0.1,
+   "post_snr_ns_th": 0.5,
+   "post_snr_sp_th": 3,
+   "min_gain": 0.1,
+   "low_freq": 0,
+   "high_freq": 8000,
+   "model_path": "/usr/share/rkaudio/model_files/aiecbf_model_files/SCNet_ONNX_Mask_Aec_Bf_Linear_67M_Seven_Input_One_Ref_20260325_epoch010.bin"
+  },
+  "dereverb": {
+   "status": "disable",
+   "rlsLg": 4,
+   "curveLg": 20,
+   "delay": 2,
+   "Dmic": 0.035,
+   "forgetting": 0.98,
+   "T60": 0.5,
+   "coCoeff": 1
+  },
+  "aes": {
+   "status": "disable",
+   "Beta_Up": 0.002,
+   "Beta_Down": 0.001,
+   "Beta_Up_Low": 0.001,
+   "Beta_Down_Low": 0.002,
+   "aphta_PD": 0.2,
+   "aphta_PD_LOW": 0.12,
+   "low_freq": 600,
+   "high_freq": 2200,
+   "THD_Flag": 0,
+   "HARD_Flag": 0,
+   "LimitRatio": [
+    [
+     0.2,
+     0.4,
+     0.7
+    ],
+    [
+     0.2,
+     0.5,
+     0.8
+    ]
+   ],
+   "ThdSplitFreq": [
+    [
+     200,
+     2000
+    ],
+    [
+     2000,
+     4000
+    ],
+    [
+     0,
+     0
+    ],
+    [
+     0,
+     0
+    ]
+   ],
+   "ThdSupDegree": [
+    [
+     0.005,
+     0.005,
+     0.005,
+     0.005,
+     0.005,
+     0.005,
+     0.005,
+     0,
+     0,
+     0
+    ],
+    [
+     0.0,
+     0.01,
+     0.01,
+     0.01,
+     0.01,
+     0.01,
+     0.01,
+     0.01,
+     0.01,
+     0.01
+    ],
+    [
+     0.0,
+     0.005,
+     0.0005,
+     0.005,
+     0.005,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     0.0,
+     0.005,
+     0.005,
+     0.0005,
+     0.005,
+     0,
+     0,
+     0,
+     0,
+     0
+    ]
+   ],
+   "HardSplitFreq": [
+    [
+     50,
+     700
+    ],
+    [
+     0,
+     0
+    ],
+    [
+     0,
+     0
+    ],
+    [
+     0,
+     0
+    ],
+    [
+     600,
+     2500
+    ]
+   ],
+   "HardThreshold": [
+    0.15,
+    0.15,
+    0.25,
+    0.15
+   ]
+  },
+  "anr": {
+   "status": "enable",
+   "noiseFactor": 0.88,
+   "swU": 15,
+   "PsiMin": 0.02,
+   "PsiMax": 0.516,
+   "fGmin": 0.01,
+   "start_freq": -3588,
+   "end_freq": -3588,
+   "Sup_Freq1": -3588,
+   "Sup_Freq2": -3588,
+   "Sup_Energy1": 10000,
+   "Sup_Energy2": 10000,
+   "InterV": 10,
+   "BiasMin": 1.67,
+   "UpdateFrm": -1,
+   "NPreGammaThr": 4.6,
+   "NPreZetaThr": 1.67,
+   "SabsGammaThr0": 1,
+   "SabsGammaThr1": 3,
+   "InfSmooth": 0.8,
+   "ProbSmooth": 0.7,
+   "CompCoeff": 1.4,
+   "PrioriMin": 0.0316,
+   "PostMax": 40,
+   "PrioriRatio": 0.95,
+   "PrioriRatioLow": 0.95,
+   "SplitBand": 20,
+   "PrioriSmooth": 0.7,
+   "TranMode": 0,
+   "MotorBins": 8,
+   "MotorFactor": 0.8,
+   "MotorMute": 0
+  },
+  "agc": {
+   "status": "disable",
+   "attack_time": 200.0,
+   "release_time": 200.0,
+   "max_gain": 15.0,
+   "max_peak": -10.0,
+   "fRth0": -67.0,
+   "fRth1": -64.0,
+   "fRth2": -25.0,
+   "bits": 16.0,
+   "frm_num": 4.0,
+   "attenuate_time": 200.0,
+   "fRk0": 2.0,
+   "fRk1": 0.8,
+   "fRk2": 0.4,
+   "fLineGainDb": -50.0,
+   "swSmL0": 0.0,
+   "swSmL1": 80.0,
+   "swSmL2": 80.0
+  },
+  "howl": {
+   "status": "disable",
+   "howlMode": 16,
+   "ratio": 0.95,
+   "shift_freq": -10,
+   "alpha": 0.3
+  },
+  "fastaec": {
+   "status": "disable",
+   "filter_len": 2,
+   "alpha": 0.995
+  },
+  "wakeup": {
+   "status": "disable",
+   "consistent_flag": 1,
+   "asr_score_thresh": 0.15,
+   "asr_post_smooth_length": 3,
+   "average_state_frames": 7,
+   "is_run_agc": 1,
+   "model_path": "None"
+  },
+  "command": {
+   "status": "disable",
+   "consistent_flag": 1,
+   "asr_score_thresh": 0.15,
+   "asr_post_smooth_length": 3,
+   "average_state_frames": 7,
+   "is_run_agc": 1,
+   "model_path": "None"
+  },
+  "smpvp": {
+   "status": "disable",
+   "target_channel_id": 0,
+   "voice_print_threshold1": 9.5,
+   "voice_print_threshold2": 11.0,
+   "smpvp_bin_path": "/usr/share/rkaudio/model_files/smpvp_files/codebook.bin"
+  },
+  "unkws": {
+   "status": "disable",
+   "encoder_model_path": "/usr/share/rkaudio/model_files/unkws_encoder_mnn.bin",
+   "decoder_model_path": "/usr/share/rkaudio/model_files/unkws_decoder_mnn.bin",
+   "joiner_model_path": "/usr/share/rkaudio/model_files/unkws_joiner_mnn.bin",
+   "keywords_path": "/usr/share/rkaudio/keywords.txt"
+  },
+  "doa": {
+   "status": "disable",
+   "alpha": 0.95,
+   "start_freq": 500,
+   "end_freq": 3000,
+   "lg_num": 60,
+   "lg_pitch_num": 0,
+   "azimuth": 360,
+   "pitch": 180,
+   "fast_search": 0,
+   "search_mic1": 3,
+   "search_mic2": 4,
+   "X_coord": [
+    0.035,
+    0.0247,
+    0,
+    -0.0247,
+    -0.035,
+    -0.0247,
+    0,
+    0.0247
+   ],
+   "Y_coord": [
+    0,
+    0.0247,
+    0.035,
+    0.0247,
+    0,
+    -0.0247,
+    -0.035,
+    -0.0247
+   ],
+   "Z_coord": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  "ainr": {
+   "status": "disable",
+   "mode": 0,
+   "datrs_optm": 0,
+   "pregain": 5,
+   "mini_gain": 0.1,
+   "alpha1": 0.2,
+   "alpha2": 0.2,
+   "noise_threshold": 0.9,
+   "speech_threshold": 5.0,
+   "noise_ascend_alpha": 0.2,
+   "noise_descend_alpha": 0.2,
+   "sfs_enable": 0,
+   "Sup_Freq1": -3588,
+   "Sup_Freq2": -3588,
+   "Sup_Energy1": 10000,
+   "Sup_Energy2": 10000,
+   "eq_enable": 0,
+   "speech_eq": 0,
+   "eq_frqs_hz": [
+    0,
+    1000,
+    2400,
+    4000,
+    6000,
+    7500,
+    8000,
+    -1,
+    -1,
+    -1,
+    -1
+   ],
+   "eq_gains": [
+    0.6,
+    0.8,
+    0.8,
+    1.25,
+    1.25,
+    1.0,
+    1.0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "model_path": "/usr/share/rkaudio/model_files/ainr_model_files/mnn_models/120M/DPCRNbs_120M_2frm_2511041622_E070_fp.bin"
+  },
+  "aiec": {
+   "status": "disable",
+   "pre_gain": 5,
+   "parallel_mode": 0,
+   "aiec_first": 0,
+   "select_chan": 0,
+   "post_process": 1,
+   "continue_count": 25,
+   "aphta_PA": 1.0,
+   "aphta_PD": 1.0,
+   "aphta_PD_LOW": 0.5,
+   "aphta_GA": 0.5,
+   "aphta_GD": 1.0,
+   "low_freq": 1000,
+   "high_freq": 5000,
+   "Ratio": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "model_path": "/usr/share/rkaudio/model_files/aiec_model_files/mnn_models/SCNet_Aec_54M_NonlinearEcho_RirInit_20260728_epoch27.bin"
+  },
+  "EQDRC": {
+   "status": "disable",
+   "para_path": "/usr/share/rkaudio/vqefiles/rkaudio_effect_eqdrc_48000hz_2ch.bin"
+  },
+  "filter": {
+   "status": "disable",
+   "type": 2,
+   "mode": 0,
+   "fc": 600,
+   "bw": 2,
+   "gain": 0,
+   "slope": 0,
+   "mode1": 0,
+   "fc1": 0,
+   "bw1": 0,
+   "gain1": 0,
+   "slope1": 0,
+   "post_gain": 0
+  }
+ }
+}

@@ -1,0 +1,29 @@
+From c133fb11ee690315084aa7e23ea280081b1e3d1f Mon Sep 17 00:00:00 2001
+From: piaozhiye <piaozhiye@users.noreply.github.com>
+Date: Mon, 14 Sep 2026 18:10:52 +0800
+Subject: [PATCH] es8323: capture channels_max 2 -> 16 (SAI loopback 4ch prerequisite)
+
+RK3576 SDK 内核补丁(导出自构建机 8388-aec 分支 @ c133fb11):
+codec DAI 原只报 2 通道, SAI1 SDI1 回环参考的 4ch 采集(麦+空位+refL+refR)
+会被 ALSA 拒。ES8323 编进内核, 只需重编 boot.img 单分区烧写。
+
+---
+ sound/soc/codecs/es8323.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/sound/soc/codecs/es8323.c b/sound/soc/codecs/es8323.c
+index 3506add7ba6e..caae29540803 100644
+--- a/sound/soc/codecs/es8323.c
++++ b/sound/soc/codecs/es8323.c
+@@ -713,7 +713,7 @@ static struct snd_soc_dai_driver es8323_dai = {
+ 	.capture = {
+ 		    .stream_name = "Capture",
+ 		    .channels_min = 1,
+-		    .channels_max = 2,
++		    .channels_max = 16,
+ 		    .rates = es8323_RATES,
+ 		    .formats = es8323_FORMATS,
+ 		    },
+-- 
+2.34.1
+

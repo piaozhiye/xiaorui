@@ -1,0 +1,46 @@
+# 最小自托管配置( detect+text 端侧 ASR 路线, 无任何云 key ):
+#  - 不选 VAD / 不选流式 ASR: 客户端不发音频, 全走 listen detect+text
+#  - LLM 指向本机桩( llm_stub.py ), 免 API key
+#  - TTS 用 EdgeTTS( 免费, 需联网 ); 换真模型时在这里替换
+server:
+  ip: 127.0.0.1
+  port: 8000
+  http_port: 8003
+  auth:
+    enabled: false
+
+selected_module:
+  ASR: BaiduASR        # 占位, detect 路径不会调用; 选纯 REST 厂商免本地模型
+  LLM: StubLLM
+  TTS: EdgeTTS
+  Memory: nomem
+  Intent: nointent
+
+LLM:
+  StubLLM:
+    type: openai
+    model_name: stub-1
+    base_url: http://127.0.0.1:8111/v1
+    api_key: stub
+    temperature: 0.7
+    max_tokens: 500
+
+TTS:
+  EdgeTTS:
+    type: edge
+    voice: zh-CN-XiaoxiaoNeural
+    output_dir: tmp/
+
+ASR:
+  BaiduASR:
+    type: baidu
+    appid: dummy
+    api_key: dummy
+    secret_key: dummy
+
+# 自定义唤醒词(服务端只认这个列表里的原文, 去标点后全字匹配)
+wakeup_words:
+  - "小瑞小瑞"
+  - "你好小瑞"
+
+enable_websocket_ping: true

@@ -1,0 +1,62 @@
+# Overlay on the base server config in a NEW LAN gateway instance, not production 8001.
+# Intentionally unusable until private bind address, auth key and API keys are supplied.
+# 板外网关(PC/LAN 主机)上跑, 给 RK3308 前端用; 启动方式见 ports/pc-gateway/README.md。
+# 本文件只是配置, 不含网关源码; 网关源码仍是 board-server/(与板端同一份)。
+server:
+  ip: REPLACE_WITH_GATEWAY_LAN_IP
+  port: 8001
+  http_port: 8004
+  auth_key: null  # REQUIRED: private random signing key; never commit it
+  auth:
+    enabled: true
+    allowed_devices: []  # nonempty list BYPASSES token verification in current server
+enable_websocket_ping: true
+enable_wakeup_words_response_cache: false
+wakeup_words: 小瑞小瑞,小瑞
+selected_module:
+  ASR: Qwen3ASRFlash
+  LLM: AliLLM
+  # 两选一: SherpaLocal(Matcha, 已验证) 或 EdgeTTS(见文末说明)
+  TTS: SherpaLocal
+  Memory: nomem
+  Intent: function_call
+ASR:
+  Qwen3ASRFlash:
+    type: qwen3_asr_flash
+    model_name: qwen3-asr-flash
+    api_key: null  # supply privately
+    output_dir: tmp/asr
+    # 转写偏置(context)默认关闭: 2026-10-21 实测它会被 ASR 原样复述成转写
+    # (短音频时识别结果就是偏置原文), 且前端触发帧重复修复后裸转写已能转对。
+    # 需要时再加回, 但记住它只影响转写, 不放宽唤醒判定(唤醒门在前端 KWS +
+    # intentHandler.match_wake_shape), 两者分开配置、分开验收。
+    # context: '唤醒词是“小瑞小瑞”。'
+    timeout: 20
+LLM:
+  AliLLM:
+    type: openai
+    model_name: qwen-flash
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key: null  # supply privately
+TTS:
+  SherpaLocal:
+    type: sherpa_local
+    engine: matcha
+    # 模型跑在**网关主机**上, 不在 3308 板内(3308 只做采集/KWS/播放)。
+    # 路径必须写成网关主机上的路径, 别写成板内 /data/... 让人误以为要往 3308 部署 TTS。
+    # 来源示例: adb pull /data/xiaorui-server/tts-matcha/matcha-icefall-zh-baker <网关主机目录>
+    model_dir: REPLACE_WITH_GATEWAY_HOST_MATCHA_DIR
+    # 说话人编号随模型包/运行环境不同: 3576 板端用的是 14, 而把同一个包拷到
+    # 网关主机(PC)后实测要用 0(本仓 ports/pc-gateway/ 覆盖层用的就是 0)。
+    # 这里是**网关主机**上的实例 -> 填 0; 无声/报错先查这里。
+    sid: 0
+    num_threads: 4
+    speed: 1.0
+    output_dir: tmp/
+  # EdgeTTS 备选(把 selected_module.TTS 改成 EdgeTTS 即可):
+  # 2026-10-21 在本次 PC 环境实测返回 403, 故当前默认走 SherpaLocal。
+  # 这只说明本环境失败, 不能推断 EdgeTTS 全面不可用; 回退前先单独验证可达性。
+  EdgeTTS:
+    type: edge
+    voice: zh-CN-XiaoxiaoNeural
+    output_dir: tmp/

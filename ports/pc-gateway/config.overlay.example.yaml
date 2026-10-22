@@ -1,0 +1,58 @@
+# PC 网关实例的**覆盖层** —— 只写与共用模板不同的部分。
+#
+# 共用模板(board-server/gateway-online.example.yaml, 板端 8001 用的同一份)
+# 与本覆盖层由 start.sh 深合并成 $XR_CONFIG_FILE, 平台目录不复制网关源码、
+# 也不复制整份配置, 避免两边各自演进后漂移。
+#
+# 本文件只应出现三类差异: 端口、模型路径、启动/联调相关开关。
+# 不要在这里改 selected_module / LLM 的 type / ASR 的重试与超时策略 /
+# TTS 的 engine —— 那些属于共用模板。
+
+server:
+  # 与板端 8001/8004 错开: adb reverse tcp:8001 → tcp:8101 可在同一台 PC 上
+  # 同时跑板端网关和 PC 网关, 互不打架。
+  port: 8101
+  http_port: 8104
+  auth:
+    enabled: true
+    # 非空列表会绕过 token 校验(当前服务端行为), 这里保持空 = 必须校验。
+    # 前端用 HMAC(auth_key, "client_id|device_id|ts") 换 token。
+    allowed_devices: []
+
+# 板端实例的私有配置里带着 prompt / wakeup_words 等行为段(8000 栈已于 2026-10-17
+# 退役, 现在是 /data/xiaorui-gateway/instances/8001/data/.config.yaml);
+# PC 侧没有板端实例, 由 start.sh 二选一:
+#   XR_PC_BEHAVIOR_CONFIG=<板端实例的 .config.yaml>  直接复用行为段(推荐)
+#   XR_PC_PROMPT_FILE=<人设文本文件>                   只给 prompt
+# 两者都不给时, 行为段为共用模板的默认值 —— 能跑通, 但人设/唤醒词表可能与
+# 板端不一致, 验收时要用日志里的 wakeup_words 确认。
+enable_greeting: false
+
+# 以下为纯说明, 不写任何键:
+#
+# ASR 转写偏置(context)默认**关闭**(2026-10-21 实测):
+#   1) 它确实能修正转写: 同一段音频从「小睿小睿，现在几点啦？」变成
+#      「小瑞小瑞。现在几点了？」;
+#   2) 但前端触发帧重复 bug 修好后, 不挂偏置也能转对(「小瑞，现在几点？」);
+#   3) 偏置会被 ASR 原样复述成转写 —— 16:41 一条短音频的识别结果就是
+#      「唤醒词是“小瑞小瑞”。用户常用指令：…」, 唤醒门按"未含唤醒词"拒识。
+# 需要时在私有覆盖层里加回:
+#   ASR:
+#     Qwen3ASRFlash:
+#       context: '唤醒词是“小瑞小瑞”。'
+# 它只影响转写, 不放宽唤醒判定 —— 唤醒门在 core/handle/intentHandler.py 的
+# match_wake_shape(加前端 KWS), 两者分开配置、分开验收。
+#
+# 注意: 覆盖层里某个键写成空值(YAML 的 `key:` = null)会被当作"未设置"跳过,
+# 不会把共用模板里的整段配置清空。
+
+TTS:
+  SherpaLocal:
+    # 模型在**网关主机**上, 不在 3308 板内(3308 只做采集/KWS/播放)。
+    # 来源: adb pull /data/xiaorui-server/tts-matcha/matcha-icefall-zh-baker
+    # 放持久目录, 不要留在 /tmp:
+    #   ~/.local/share/xiaorui-gateway/matcha-icefall-zh-baker
+    model_dir: REPLACE_WITH_GATEWAY_HOST_MATCHA_DIR
+    # 说话人编号随模型包不同: 3576 板端包用 14, 2026-10-21 拷到 PC 的同一
+    # 模型包用 0。起服务后听一句, 报错/无声先查这里。
+    sid: 0

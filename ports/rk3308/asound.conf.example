@@ -1,0 +1,15 @@
+# Independent mic input ONLY; replace card IDs. Array/ref capture needs its own mapping.
+pcm.asr_mic {
+    type plug
+    slave.pcm "hw:CARD=YOUR_CAPTURE_CARD,DEV=0"
+}
+
+# Client PCM is converted by plug to 48k/stereo hardware playback.
+pcm.xr_spk {
+    type plug
+    slave {
+        pcm "hw:CARD=YOUR_PLAYBACK_CARD,DEV=0"
+        rate 48000
+        channels 2
+    }
+}
