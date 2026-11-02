@@ -28,7 +28,7 @@ play_music_function_desc = {
             "properties": {
                 "song_name": {
                     "type": "string",
-                    "description": "歌曲名称，如果用户没有指定具体歌名则为'random', 明确指定的时返回音乐的名字 示例: ```用户:播放两只老虎\n参数：两只老虎``` ```用户:播放音乐 \n参数：random ```",
+                    "description": "歌曲名称，如果用户没有指定具体歌名则为'random', 明确指定的时返回音乐的名字 示例: ```用户:播放两只老虎\n参数：两只老虎``` ```用户:播放音乐 \n参数：random ``` 用户说的是类别/风格/心情时(如轻音乐、古典、摇滚、助眠)必须原样返回该词, 不要归为random 示例: ```用户:播放轻音乐\n参数：轻音乐```",
                 }
             },
             "required": ["song_name"],
@@ -40,6 +40,14 @@ play_music_function_desc = {
 @register_function("play_music", play_music_function_desc, ToolType.SYSTEM_CTL)
 async def play_music(conn: "ConnectionHandler", song_name: str):
     try:
+        # 掉字修复(2026-11-02): "播放轻音乐电台"被 ASR/LLM 掉成"播放轻音乐"时
+        # song_name=轻音乐 是台类词不是歌名 —— 硬搜歌名会拿到 VIP 短预览
+        # (实测: 酷我「カーテンコール」放 11s 即断, 还报"只能会员播放")。
+        # 补"电台"二字重走原文电台匹配; 无该台时返回 False 落回歌曲链路。
+        if song_name != "random" and _genre_like(song_name):
+            if await try_radio_intent(conn, f"播放{song_name}电台"):
+                return ActionResponse(action=Action.RECORD, result="指令已接收",
+                                      response="正在为您播放电台")
         music_intent = (
             f"播放音乐 {song_name}" if song_name != "random" else "随机播放音乐"
         )
@@ -64,6 +72,21 @@ def _extract_song_name(text):
             if len(parts) > 1:
                 return parts[1].strip()
     return None
+
+
+# 台类/分类词: 说"播放轻音乐/古典音乐"指的是一类内容, 不是叫这个名字的歌。
+# 误伤代价=点名电台而非搜歌, 可接受; 命中后走 try_radio_intent 的无限流。
+_GENRE_WORDS = {
+    "轻音乐", "纯音乐", "流行", "流行音乐", "古典", "古典音乐", "摇滚", "摇滚音乐",
+    "爵士", "爵士乐", "民谣", "电子", "电子音乐", "儿歌", "助眠", "白噪音", "白噪声",
+    "相声", "新闻", "故事", "小说", "脱口秀", "红歌", "老歌", "劲爆", "伤感",
+}
+
+
+def _genre_like(song_name):
+    """歌名是台类词则 True(掉字的"播放轻音乐"不该进歌名搜索)。"""
+    n = (song_name or "").strip()
+    return n in _GENRE_WORDS or n.endswith(("音乐", "电台", "广播", "歌单"))
 
 
 def _find_best_match(potential_song, music_files):
@@ -161,30 +184,36 @@ async def _resolve_mcp(conn, song_name):
     if not manager.is_mcp_tool(tool) and not internal:
         return None
     query = "轻音乐" if song_name == "random" else song_name
-    try:
-        result = await asyncio.wait_for(manager.execute_tool(tool, {"query": query}), timeout=6)
-        data = result if isinstance(result, dict) else result.model_dump()
-        if data.get("isError"):
+    # 音源回退(2026-11-02): 首查(auto=kuwo 优先)返回 isError/无 URL 时强制
+    # netease 再试一次(实测部分歌在酷我 VIP/下架, netease 有正常源)。
+    # 超时/异常直接认败 —— MCP 不健康时重试只是白等。
+    for params in ({"query": query}, {"query": query, "source": "netease"}):
+        try:
+            result = await asyncio.wait_for(manager.execute_tool(tool, params), timeout=6)
+            data = result if isinstance(result, dict) else result.model_dump()
+            if data.get("isError"):
+                continue
+            structured = data.get("structuredContent") or {}
+            if not structured.get("play_url"):
+                for item in data.get("content", []):
+                    if item.get("type") == "text":
+                        try:
+                            candidate = json.loads(item.get("text", ""))
+                            if isinstance(candidate, dict) and candidate.get("play_url"):
+                                structured = candidate
+                                break
+                        except (ValueError, TypeError):
+                            continue
+            url = structured.get("play_url")
+            if not isinstance(url, str) or not url.startswith(("https://", "http://")):
+                continue
+            song = structured.get("song") or {}
+            return {"name": song.get("title") or structured.get("title") or query, "url": url}
+        except Exception as error:
+            conn.logger.bind(tag=TAG).warning(
+                f"MCP音乐搜索失败({params.get('source', 'auto')}): {type(error).__name__}")
             return None
-        structured = data.get("structuredContent") or {}
-        if not structured.get("play_url"):
-            for item in data.get("content", []):
-                if item.get("type") == "text":
-                    try:
-                        candidate = json.loads(item.get("text", ""))
-                        if isinstance(candidate, dict) and candidate.get("play_url"):
-                            structured = candidate
-                            break
-                    except (ValueError, TypeError):
-                        continue
-        url = structured.get("play_url")
-        if not isinstance(url, str) or not url.startswith(("https://", "http://")):
-            return None
-        song = structured.get("song") or {}
-        return {"name": song.get("title") or structured.get("title") or query, "url": url}
-    except Exception as error:
-        conn.logger.bind(tag=TAG).warning(f"MCP音乐搜索失败: {type(error).__name__}")
-        return None
+    return None
 
 
 # 最近播放(2026-10-16): "下一首/换台"需要知道刚才放的是什么
