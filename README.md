@@ -131,15 +131,14 @@ tests/                  单测 + 声学套件（audio/ 语料不入库，gen 脚
 
 ## 3. 板端环境与模型资源
 
-### 3.1 /data 目录布局（合计 ~4.9G，全部可从仓内/备份重建）
+### 3.1 /data 目录布局（合计 ~4.3G，全部可从仓内/备份重建）
 
 | 目录 | 大小 | 内容 | 谁在用 |
 |---|---|---|---|
 | `xiaorui-server/` | 1.6G | 前端二进制（board-scripts/）、RKLLM 模型、matcha、start-all.sh、xiaorui.env、ha_token.txt、mdns-ha.py、llm_rkllm.py | 前端 + RKLLM + mdns |
 | `ha-env/` | 1.4G | HA 2026.10.2 的 Python 3.14 venv（含 pymicro-vad/pyspeex-noise 交叉编译 wheel） | Home Assistant |
 | `miniforge/` | 630M | 双网关 Python 3.14 运行时（conda，已去重精简：版本别名硬链合一+去包管理器/头文件） | 8001/8002 网关 + RKLLM 启动器 + HA 借 libstdc++ |
-| `xiaorui-gateway/` | 119M | instances/（双实例 profile）、releases/（当前版+回滚版，测试候选用毕即清）、deps/（MCP 音乐）、声纹库、定时 sqlite；模型经软链共享 `/data/xiaorui-server/server/models`，不再每实例复制 | 双网关 |
-| `xiaorui-ffmpeg/` | 588M | ffmpeg 9.0.2 束（conda 无头版，硬链 openvino 107M 删不得） | 音乐/电台拉流转码、HA |
+| `xiaorui-gateway/` | 123M | instances/（双实例 profile）、releases/（当前版+回滚版，测试候选用毕即清）、deps/（MCP 音乐 + ffmpeg-min：最小化自建 ffmpeg 7.1.1 共 4M，`tools/build-ffmpeg-min.sh` 产物）、声纹库、定时 sqlite；模型经软链共享 `/data/xiaorui-server/server/models`，不再每实例复制 | 双网关 |
 | `rknn-test/sherpa/` | 566M | KWS/ASR/声纹三模型 + sherpa-onnx v1.13.8 运行库 | 前端（内嵌路径）+ 网关声纹 |
 | `kws-corp/` | 14M | 唤醒正负语料（100+100，转写地面真值） | 声学回归 |
 | `ha-config/` | 7.7M | HA 配置 + .storage（米家 OAuth 绑定存于此目录） | Home Assistant |
@@ -150,7 +149,7 @@ tests/                  单测 + 声学套件（audio/ 语料不入库，gen 脚
 |---|---|---|---|
 | `miniforge` | Python 3.14.7 | 双网关 app.py + llm_rkllm.py（RKLLM 守护） | — |
 | `ha-env` | Python 3.14.7 venv | homeassistant + mdns-ha.py | **启动必须 `LD_LIBRARY_PATH=/data/miniforge/lib`**（系统 libstdc++ 缺 CXXABI_1.3.15） |
-| `xiaorui-ffmpeg` | ffmpeg 9.0.2 | 音乐链路拉流解码→PCM→opus | 软链 `/usr/bin/ffmpeg`；openvino 是二进制 NEEDED 硬依赖 |
+| ffmpeg-min | ffmpeg 7.1.1（最小化自建） | 音乐链路拉流解码→PCM→opus | 位于 `xiaorui-gateway/deps/ffmpeg-min/`；网关经 `XR_FFMPEG` 显式指定 + 软链 `/usr/bin/ffmpeg`（HA 共用）；动态链系统 libssl（https 走系统 CA，直连 https 源可用） |
 | VQE 库 | 瑞芯微 VQE 四件套库 | 采集增强 | `librkaudio_{vqe,common,nn}.so`→`/usr/lib/`；插件修复版→`/usr/lib/alsa-lib/`；json+wopt→`/usr/share/rkaudio/` |
 
 ### 3.3 常驻进程与端口
@@ -280,7 +279,8 @@ tools/download-models.sh            # 公开件自动下载+sha256 核对; --lis
 | Qwen2.5-1.5B rkllm | 1.4G | 脚本可自动下载 **HF 预转换件**（`RKNNAI/RK3576-LLM-Qwen2.5-1.5B-Instruct`，文件名运行时发现、HF 不通自动走 hf-mirror，仓页面附 SHA-256 可手工核；**该组织官方性未核实**——Rockchip 官方分发渠道是 [airockchip/rknn-llm](https://github.com/airockchip/rknn-llm) README 所引 rkllm_model_zoo 网盘，取码 rkllm；此件与本项目精确件**非同字节**——实测 1.08G vs 1.4G，不同转换变体，换用需对齐 llm_rkllm.py 参数）；逐字节复现本项目则自备精确件（sha 见脚本）；工具链+runtime 见 [airockchip/rknn-llm](https://github.com/airockchip/rknn-llm) |
 | sherpa-onnx RKNN 运行库 | 47M | **脚本自动下载**（姊妹仓 vendored 三件套直链） |
 | wopt bf 权重 + VQE 库/插件 | ~1M+26M | **向瑞芯微申请 .so 即可**（仅路线 B 需要，全部二进制件，不随本仓分发） |
-| miniforge / ha-env / ffmpeg 束 | 2.6G+588M | 板端备份恢复（conda 环境，无法由脚本重建） |
+| ffmpeg-min | 4M | **脚本可重建**（`tools/build-ffmpeg-min.sh` 在 SDK 主机交叉编译，产物 4M 动态链接板上系统库） |
+| miniforge / ha-env | 2.6G | 板端备份恢复（conda 环境，无法由脚本重建） |
 
 原则：**能公开下载的都给了 sha256 锚点自动核验**；自制/专有件在脚本里标 SELF
 并写明指纹与来源，缺件时退出码非零，不会静默装一半。各组件许可与商用状态
@@ -292,6 +292,8 @@ tools/download-models.sh            # 公开件自动下载+sha256 核对; --lis
 ./build-board-live.sh        # → board/xiaorui_live（buildroot aarch64 工具链,
                              #   -march=armv8-a 防 LSE，file-prefix-map 保 SHA 稳定）
 tools/check-no-lse.sh        # LSE 门禁必须绿
+tools/build-ffmpeg-min.sh    # → ffmpeg-min（SDK 主机一键：源码自动下载+sha256 校验,
+                             #   工具链/sysroot 自动发现；SDK 同 VQE 件走瑞芯微申请渠道）
 ```
 
 ### 5.5 板端铺板（从仓内件逐件推送，无预打包）
@@ -357,7 +359,8 @@ adb shell '(crontab -l 2>/dev/null; echo "*/5 * * * * /data/xiaorui-gateway/watc
 `/usr/lib/alsa-lib/`，wopt 权重 → `/usr/share/rkaudio/`。
 可选组件：Home Assistant（8123，设备控制用；需自装 venv，**启动须
 `LD_LIBRARY_PATH` 指向新 libstdc++ 所在目录**，且不要起第二个实例写同一 .storage）、
-ffmpeg 束 → 软链 `/usr/bin/ffmpeg`（在线音乐/电台链路）。
+ffmpeg → `tools/install-board-music-runtime.sh` 推送最小化 ffmpeg-min、写
+`XR_FFMPEG` 并软链 `/usr/bin/ffmpeg`（在线音乐/电台链路，含 MCP 音乐解析器）。
 
 ### 5.6 启动与验证
 
@@ -392,8 +395,8 @@ clock(raw)`。LLM 之前三道门：单字气口噪声门 → 唤醒词/形状�
 1. **LSE**：工具链默认架构产 `casal`，ARMv8.0 板上 SIGILL——交叉构建一律
    `-march=armv8-a`，`check-no-lse.sh` 门禁。
 2. **前端 period EXACT 语义**：VQE 插件 slave period 必须 4800（=1600×3）。
-3. **busybox ldd 静默失灵**：ffmpeg 实链 openvino 而 ldd 报 0，按 ldd 删库必炸
-   （openvino 107M 删不得）。
+3. **busybox ldd 静默失灵**：曾见 ffmpeg 实链 openvino 而 ldd 报 0，按 ldd 输出清库
+   必炸——判依赖用 `readelf -d`，别信板上 ldd。
 4. **HA venv**：必须 `LD_LIBRARY_PATH=/data/miniforge/lib`（系统 libstdc++ 缺
    CXXABI_1.3.15）；**双 HA 实例写同一 .storage 会抹密码哈希**，单实例铁律。
 5. **进程管理**：`pkill -x` 超 15 字符截断失配（判活读 /proc/*/exe）；杀网关只认
