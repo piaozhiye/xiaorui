@@ -1,0 +1,61 @@
+diff --git a/sound/soc/codecs/rk817_codec.c b/sound/soc/codecs/rk817_codec.c
+index 5b21ab051ccd..244e2ee65350 100644
+--- a/sound/soc/codecs/rk817_codec.c
++++ b/sound/soc/codecs/rk817_codec.c
+@@ -532,6 +532,14 @@ static int rk817_codec_power_up(struct snd_soc_component *component, int type)
+ 						      PDM_EN_MASK,
+ 						      PDM_EN_ENABLE);
+ 
++		/*
++		 * When the ADC is used as the AEC/loopback reference the
++		 * digital volume must not mute the reference path, so keep
++		 * it at 0dB (0xff) instead of the muted default (0x00).
++		 */
++		if (rk817->adc_for_loopback)
++			rk817->capture_volume = 0xff;
++
+ 		snd_soc_component_write(component, RK817_CODEC_DADC_VOLL,
+ 					rk817->capture_volume);
+ 		snd_soc_component_write(component, RK817_CODEC_DADC_VOLR,
+@@ -860,12 +868,18 @@ static int rk817_capture_path_config(struct snd_soc_component *component,
+ 			snd_soc_component_write(component,
+ 						RK817_CODEC_DMIC_PGA_GAIN,
+ 						0x66);
++			/*
++			 * The ADC is used as the AEC reference source here.
++			 * Keep the digital volume at 0dB(0xff), otherwise the
++			 * loopback reference is muted(-95dB) and AEC has
++			 * nothing to work with.
++			 */
+ 			snd_soc_component_write(component,
+ 						RK817_CODEC_DADC_VOLL,
+-						0x00);
++						0xff);
+ 			snd_soc_component_write(component,
+ 						RK817_CODEC_DADC_VOLR,
+-						0x00);
++						0xff);
+ 			break;
+ 		}
+ 		if (!rk817->mic_in_differential) {
+@@ -895,12 +909,18 @@ static int rk817_capture_path_config(struct snd_soc_component *component,
+ 			snd_soc_component_write(component,
+ 						RK817_CODEC_DMIC_PGA_GAIN,
+ 						0x66);
++			/*
++			 * The ADC is used as the AEC reference source here.
++			 * Keep the digital volume at 0dB(0xff), otherwise the
++			 * loopback reference is muted(-95dB) and AEC has
++			 * nothing to work with.
++			 */
+ 			snd_soc_component_write(component,
+ 						RK817_CODEC_DADC_VOLL,
+-						0x00);
++						0xff);
+ 			snd_soc_component_write(component,
+ 						RK817_CODEC_DADC_VOLR,
+-						0x00);
++						0xff);
+ 			break;
+ 		}
+ 		if (!rk817->mic_in_differential) {

@@ -1,0 +1,81 @@
+# RK3562 板内网关配置（板端全离线形态）
+#
+# 与 ports/rk3562/gateway-local.example.yaml（PC 侧）同一套 provider 选型，
+# 差别只有路径与端口: 全部指向板内资源，LLM 走板内 NPU 上的 RKLLM(:8112)。
+#
+# 部署位置:
+#   /data/xiaorui-gateway/server/          网关代码(pkg/)
+#   /data/xiaorui-gateway/work/            cwd (core/models 软链)
+#   /data/xiaorui-gateway/data/.config.yaml 本文件
+#   /data/xiaorui-gateway/models/           snakers4_silero-vad
+#   /data/xiaorui-server/                  RKLLM 运行时/模型, ASR/TTS 模型
+server:
+  ip: 127.0.0.1
+  port: 8001
+  http_port: 8004
+  auth:
+    enabled: false
+    allowed_devices: []
+
+enable_websocket_ping: true
+enable_wakeup_words_response_cache: false
+enable_greeting: true
+
+# >>> wakeup_words <<<
+# 这一段由 deploy-board-gateway.sh 从 board-server/config/wakeup_words.xiaorui.yaml
+# 注入(那个文件是唯一真源, 见 tests/test_wakeup_config.py)。
+# 别在这里手写副本: 2026-11-11 实测, 漏了 wakeup_words 时板子的唤醒词门只剩
+# "小X小Y"形状兜底, 词表枚举完全没生效。
+
+selected_module:
+  VAD: SileroVAD
+  ASR: LocalSenseVoice
+  LLM: LocalQwen
+  TTS: SherpaLocal
+  Memory: nomem
+  Intent: function_call
+
+LLM:
+  LocalQwen:
+    # 板内 NPU 上的 RKLLM 服务 (llm_rkllm.py, OpenAI 兼容 SSE)
+    type: openai
+    model_name: qwen2.5-0.5b-instruct
+    base_url: http://127.0.0.1:8112/v1
+    api_key: local
+    temperature: 0.7
+    max_tokens: 256
+    timeout:
+      pool: 2
+      connect: 3
+      write: 5
+      read: 60
+
+ASR:
+  LocalSenseVoice:
+    type: sherpa_onnx_local
+    model_type: sense_voice
+    model_dir: /data/xiaorui-server/asr-sense-voice
+    output_dir: tmp/asr
+    api_key: local
+
+TTS:
+  SherpaLocal:
+    type: sherpa_local
+    engine: matcha
+    model_dir: /data/xiaorui-server/tts-matcha/matcha-icefall-zh-baker
+    sid: 0
+    # 4 线程 + 1.1 语速(2026-11-12 调优): 板子 4xA53@2GHz, 原 2 线程合成是
+    # 响应延迟的瓶颈段; speed 1.1 听感仍自然。调优数据见 HANDOFF-GLM-RK3562。
+    num_threads: 4
+    speed: 1.1
+    output_dir: tmp/
+
+# VAD 用网关自带的 SileroVAD provider (core/providers/vad/silero.py):
+# 只依赖 numpy + onnxruntime, 直接跑 snakers4_silero-vad 的 onnx, **不需要 torch**。
+VAD:
+  SileroVAD:
+    type: silero
+    threshold: 0.5
+    threshold_low: 0.3
+    model_dir: models/snakers4_silero-vad
+    min_silence_duration_ms: 200

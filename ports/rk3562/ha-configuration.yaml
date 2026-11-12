@@ -1,0 +1,38 @@
+# RK3562 板上 Home Assistant —— 只作 xiaorui 语音的设备控制面。
+#
+# 刻意不用 default_config: 其中的 assist_pipeline 依赖 pymicro-vad,
+# 无 aarch64 轮子且板上无 g++ 编译不了(老板形态同款取舍, 注释见
+# board-server/start-all.sh)。语音管线由 xiaorui 前端承担, HA 只管
+# 灯/插座等实体的状态与控制。
+homeassistant:
+  name: RK3562
+  unit_system: metric
+  time_zone: Asia/Shanghai
+frontend:
+api:
+websocket_api:
+config:
+logger:
+  default: warn
+http:
+  server_port: 8123
+
+# 一盏模板虚拟灯: 语音开关的验证靶子。entity_id 由 name slugify 而来,
+# template light 不支持 id 字段(实测 2026.11 报 'id' is an invalid option),
+# 所以 name 必须是英文才能得到稳定的 light.test_light。
+# 接真硬件(米家/继电器)后可删。
+input_boolean:
+  test_light:
+    name: 测试灯
+    initial: off
+
+template:
+  - light:
+      - name: "Test Light"
+        state: "{{ is_state('input_boolean.test_light', 'on') }}"
+        turn_on:
+          - action: input_boolean.turn_on
+            target: {entity_id: input_boolean.test_light}
+        turn_off:
+          - action: input_boolean.turn_off
+            target: {entity_id: input_boolean.test_light}

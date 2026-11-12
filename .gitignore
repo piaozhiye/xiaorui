@@ -59,3 +59,22 @@ ports/README.md
 patches/rkaudio-vqe-buffer-contract.patch
 board-server/base.py.patched-1012
 board/vqe_probe
+
+# 本机 LLM/模型转换 venv (RK3562 移植新增, 不入库)
+.venv-qwen/
+.venv-rkllm/
+
+# RK3562 本地调试/分析工具: 硬件 bring-up 一次性脚本, 不入公开仓(本地保留)
+ports/rk3562/adc-ref-sweep.sh
+ports/rk3562/analyze-pdm.py
+ports/rk3562/analyze-pdm-spectrum.py
+ports/rk3562/analyze-vqe-dump.py
+ports/rk3562/aec-echo-test.sh
+ports/rk3562/sample-resources.sh
+ports/rk3562/keep-alive.sh
+ports/rk3562/e2e-test.sh
+ports/rk3562/measure-llm-latency.py
+ports/rk3562/resmon.sh
+ports/rk3562/ha-ab.sh
+ports/rk3562/say-tests.sh
+ports/rk3562/to48k-stereo.py

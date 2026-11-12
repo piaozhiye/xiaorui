@@ -3,7 +3,7 @@
 # 职责: ①网关服务端没起就 start ②板子在线而 adb reverse 隧道缺失就重建
 # 服务端本体在独立单元 pc-xiaozhi.service(Restart=always) -- 停本守护不会杀服务端
 # 用法(systemd 已配): systemctl --user {start|stop|status} pc-gateway
-REPO="$HOME/rk/xiaozhi-edge-client"
+REPO="$HOME/rk/xiaorui-edge-client"
 
 while true; do
     # 1) 服务端健康: 按监听端口判断; 缺则 start 独立单元(幂等)

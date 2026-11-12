@@ -1,0 +1,112 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * RK3562 EVB2 DDR4 V10 + 外接 6 路 PDM 麦克风阵列板(6mic+2ref) + RK809
+ *
+ * 硬件连接(依据 3562_EBV2 原理图 sheet 35 "Audio-MIC Array Interface"):
+ *
+ *   SoC GPIO3_A6 = PDM_CLK0_M0  -> 扩展板 AUD_PDM_CLK0 (R7711) + RK809 pin19(PDM_CLK)
+ *   SoC GPIO3_A2 = PDM_CLK1_M0  -> 扩展板 AUD_PDM_CLK1 (R7709)
+ *        ※ pdmm0_clk1 与 rk809_codec 的 i2s0_mclk 同一个 ball -> 只能使能 pdmm0_clk0
+ *   SoC GPIO3_B0 = PDM_SDI1_M0  -> 扩展板 AUD_PDM_SDI1 (R7715)
+ *   SoC GPIO3_A7 = PDM_SDI2_M0  -> 扩展板 AUD_PDM_SDI2 (R7706)
+ *   SoC GPIO3_A0 = PDM_SDI3_M0  -> 扩展板 AUD_PDM_SDI3 (R7716)
+ *   SoC GPIO3_B1 = PDM_SDI0_M0 == I2S0_SDI0_M0 == RK809 pin20 (SDO/PDMDATA)
+ *        -> 扩展板**没有**引出 SDI0; RK809 走 pdmdata-out-enable 后由 RK809 驱动这条线
+ *
+ * 通道分配(rockchip,path-map = <1>,<2>,<3>,<0>):
+ *   ch0-1 = PDM_SDI1 (阵列麦 1-2)   ch2-3 = PDM_SDI2 (阵列麦 3-4)
+ *   ch4-5 = PDM_SDI3 (阵列麦 5-6)   ch6-7 = PDM_SDI0 (RK809 播放回采 ref)
+ *   => 6mic+2ref, 正好喂给 rkaudio_vqe 插件(6mic_2ref 配置)做 AEC/波束/降噪
+ *
+ * RK809 侧(RK817_RK809_Codec 开发说明 V3.2 §3.1):
+ *   pdmdata-out-enable : 录音数据用 PDM 数字接口输出(用 I2S 时不要配此项)
+ *   adc-for-loopback   : ADC 用于回采 —— 采的是 DAC 播放信号, 即 AEC 的参考信号
+ *
+ * 为什么要合并成一张卡:
+ *   ASoC 一个 component 只能绑一张卡(dmesg: "Trying to bind component to card
+ *   ... but is already bound to card ...")。原来的 multicodecs 卡要用 rk809_codec,
+ *   PDM 卡也要用 rk809_codec(DAI1), 所以必须合成一张 simple-audio-card 两个 dai-link
+ *   (与 RK809 开发说明 §3.4 指向的 rk3326-evb-ai-va-v11.dts 同款做法)。
+ */
+
+#include "rk3562-evb2-ddr4-v10.dtsi"
+#include "rk3562-linux.dtsi"
+#include "rk3562-rk809.dtsi"
+#include "rk3562-evb2-cam.dtsi"
+
+/ {
+	/* 一张卡两个 dai-link:
+	 *   link0 I2S <-> sai0 : 播放(SPK/HP), codec 用 rk809 的 hifi DAI
+	 *   link1 PDM <-> pdm  : 采集 8ch = 阵列 6 麦 + RK809 回采 2ch, codec 用 rk809 的 voice DAI
+	 * 名字沿用原卡(rockchip,rk809-codec), 前端/脚本不用改设备名。 */
+	rk809_sound_pdm: rk809-sound-pdm {
+		status = "okay";
+		compatible = "simple-audio-card";
+		simple-audio-card,name = "rockchip,rk809-codec";
+		simple-audio-card,mclk-fs = <256>;
+
+		simple-audio-card,dai-link@0 {
+			format = "i2s";
+			cpu {
+				sound-dai = <&sai0>;
+			};
+			codec {
+				sound-dai = <&rk809_codec 0>;
+			};
+		};
+
+		simple-audio-card,dai-link@1 {
+			format = "pdm";
+			cpu {
+				sound-dai = <&pdm>;
+			};
+			codec {
+				sound-dai = <&rk809_codec 1>;
+			};
+		};
+	};
+};
+
+/* 原 multicodecs 卡停用: 它也要 rk809_codec, 与上面的卡抢组件 */
+&rk809_sound {
+	status = "disabled";
+};
+
+&pdm {
+	/* pdmm0_clk1 与 rk809_codec 用的 i2s0_mclk 冲突, 只能用 pdmm0_clk0 */
+	pinctrl-0 = <&pdmm0_clk0
+		     &pdmm0_sdi0
+		     &pdmm0_sdi1
+		     &pdmm0_sdi2
+		     &pdmm0_sdi3>;
+	rockchip,path-map = <1>, <2>, <3>, <0>;
+	status = "okay";
+};
+
+/* SAI0 与 PDM 控制器在 M0 bank 上大面积撞 ball:
+ *   i2s0m0_sdi0 = PB1 = pdmm0_sdi0
+ *   i2s0m0_sdo1 = PA6 = pdmm0_clk0
+ *   i2s0m0_sdo2 = PA7 = pdmm0_sdi2
+ *   i2s0m0_sdo3 = PB0 = pdmm0_sdi1
+ * 给 PDM 控制器后, SAI0 只保留播放必需的 3 根: lrck/sclk/sdo0
+ * (2ch 播放: sdo0 送 codec 的 SDI, lrck/sclk 是 SoC 侧 I2S 时钟)
+ * 录音统一走 PDM 控制器。 */
+&sai0 {
+	pinctrl-0 = <&i2s0m0_lrck
+		     &i2s0m0_sclk
+		     &i2s0m0_sdo0>;
+};
+
+&rk809_codec {
+	/* 录音数据改用 PDM 数字接口输出 + ADC 用于回采(= AEC 参考信号) */
+	pdmdata-out-enable;
+	adc-for-loopback;
+	/*
+	 * 差分麦输入。RK809 的 AMIC_CFG0.MIC_DIFF 置位后, ADC 采 (MICxP - MICxN)。
+	 * 差分回采时只有一路 ref 有数据(实测: ch6 ≈ -83 dBFS 基本是空的,
+	 * ch7 才是有效回采), 这是差分输入的正常表现, 不是 bug。
+	 * 注: base dtsi(rk3562-rk809.dtsi) 里本来就有这一项, 这里显式写出来
+	 * 是为了自解释 + 防止以后 dtsi 改动时被无声去掉。
+	 */
+	mic-in-differential;
+};

@@ -1,0 +1,116 @@
+#!/bin/sh
+# RK3562 板端: 开机自启小瑞全栈 (板内网关 + 板内 NPU 大模型 + 前端)
+#
+# 顺序: start-board-stack.sh 起 RKLLM(:8112) 和网关(:8001), 再起前端。
+# 前端自带重连: 网关没起来时每 10s 重试一次 WS, 所以不必判断网关可达性。
+#
+# buildroot busybox init: /etc/init.d/rcS 会跑 /etc/init.d/S*
+case "$1" in
+    start)
+        # 0) 定频: CPU/DDR/NPU 全部 performance
+        #    出厂默认是 schedutil + dmc_ondemand: CPU 动态降频、DDR 空闲只有 324MHz。
+        #    NPU 本来就满频(1GHz), 但 CPU 侧的 ASR/TTS 受影响 —— 实测同一句 Matcha:
+        #      动态   RTF 1.15 (DDR 324MHz)
+        #      定频   RTF 0.97 (DDR 1332MHz)   -> 快约 16%
+        #    NPU 推理本身不变(NPU 本来就满频)。
+        for c in 0 1 2 3; do
+            echo performance > /sys/devices/system/cpu/cpu$c/cpufreq/scaling_governor 2>/dev/null
+        done
+        echo performance > /sys/class/devfreq/dmc/governor 2>/dev/null
+        echo performance > /sys/class/devfreq/ff300000.npu/governor 2>/dev/null
+
+        # 1) 时间与时区
+        #    板子没网(eth0/wlan0 都 NO-CARRIER), chronyd 校不上; RTC 出厂值是
+        #    2017-08-04 -> 日志时间戳全错。board-time.sh 按 RTC -> last-good-epoch
+        #    的顺序恢复时间, 并把时区固定成 Asia/Shanghai(网关报时走本地时区)。
+        if [ -x /data/xiaorui/board-time.sh ]; then
+            sh /data/xiaorui/board-time.sh setup
+        fi
+
+        # 2) 板内栈 (NPU 大模型 + 网关)
+        if [ -x /data/xiaorui-gateway/start-board-stack.sh ]; then
+            setsid sh /data/xiaorui-gateway/start-board-stack.sh \
+                >>/data/xiaorui-gateway/data/stack.log 2>&1 </dev/null &
+            # 等网关就绪再拉前端(前端自己也会重连, 这里只是让顺序好看)
+            i=0
+            while [ $i -lt 30 ]; do
+                (echo > /dev/tcp/127.0.0.1/8001) 2>/dev/null && break
+                sleep 2
+                i=$((i + 1))
+            done
+        fi
+        # 2b) 板上 Home Assistant(设备控制面, 语音灯/插座走它) + crond 看护。
+        #     start-ha.sh 幂等: zram swap -> HA(--skip-pip) -> OOM 优先级
+        #     (2GB 板四进程共存必须有 swap 和牺牲顺序, 详见脚本头注释)。
+        #     HA 启动 ~40s 且不阻塞语音链路, 所以放后台不等就绪。
+        if [ -x /data/xiaorui-server/start-ha.sh ]; then
+            (setsid sh /data/xiaorui-server/start-ha.sh >/dev/null 2>&1 </dev/null &)
+        fi
+        if [ -x /usr/sbin/crond ]; then
+            (crontab -l 2>/dev/null | grep -v 'xiaorui-server/start-ha.sh'; \
+             echo '*/2 * * * * /data/xiaorui-server/start-ha.sh >/dev/null 2>&1') \
+                | crontab - 2>/dev/null
+            pgrep -x crond >/dev/null 2>&1 || \
+                (setsid /usr/sbin/crond >/dev/null 2>&1 </dev/null &)
+        fi
+        # 3) 前端
+        if [ -x /data/xiaorui/start-frontend.sh ] \
+            && ! pgrep -x xiaorui_live >/dev/null 2>&1; then
+            # RK809 混音设置。
+            # ★ 卡号必须是 1(rockchiprk809co); card 0 是 spdif 卡, 没有这些控件,
+            #   amixer -c 0 会报 "Unable to find simple control" 然后静默失败。
+            #   2026-11-11 实测: 原来的 -c 0 写法是空操作, 下面三条从没生效过。
+            #
+            # 1) Playback Path = SPK: 不开这个板载喇叭完全不出声(默认 OFF,
+            #    实测 1kHz 测试音在麦克风里 -97dBFS; 开成 SPK 后 -16dBFS)。
+            # 2) Capture MIC Path = Main Mic: ★ AEC 的命门。
+            #    RK809 的 PDM 回采(ch6/ch7)装的是 ADC 数据; 驱动里 capture_path
+            #    默认是 MIC_OFF, ADC 不上电 -> 回采通道整路是 0 -> AEC 拿不到参考
+            #    信号, 回声一点都消不掉(实测回采全 0, 而开成 Main Mic 后同一路
+            #    拿到播放信号)。
+            # 3) ADC Capture Volume = 255: 回采(ADC)的数字音量 = 0dB。
+            #    2026-11-11: 驱动在 adc_for_loopback 分支里原来写的是 0x00
+            #    (-95dB 静音), 回采 ref 一点信号都没有, AEC 拿不到参考;
+            #    已改成 0xff(0dB), 实测 ch7 回采到播放音 -17dBFS。
+            #
+            #    ★ 控件名: 新内核(develop-6.1 的 rk817_codec.c)里叫
+            #      "ADC Capture Volume", 老内核里叫 "ADC"; 两个都试,
+            #      免得换内核后这行静默失败。
+            #
+            #    ★ 顺序: "Capture MIC Path" 要先 MIC OFF 再 Main Mic。
+            #      驱动记住的是上次 capture_path; 如果本来就是 Main Mic 而
+            #      硬件已经 power_down 过(前端被杀/崩溃), 再设一次 Main Mic
+            #      会被当成"没变化"直接返回, ADC 不会重新上电,
+            #      回采 ref 整路是死的(实测 DADC_VOLL=0x00)。
+            amixer -c 1 set "Playback Path" "SPK" >/dev/null 2>&1
+            amixer -c 1 set "Capture MIC Path" "MIC OFF" >/dev/null 2>&1
+            sleep 0.2
+            amixer -c 1 set "Capture MIC Path" "Main Mic" >/dev/null 2>&1
+            amixer -c 1 set "ADC Capture Volume" 255 >/dev/null 2>&1 \
+                || amixer -c 1 set "ADC" 255 >/dev/null 2>&1
+            # 麦克风增益: RK809 默认(ADC PGA 10 / MIC Boost 2 / ADC 255)在近场
+            # 会把喇叭串进来的声音削波(实测 42.27% 样本削顶); 把 boost 降到 0
+            # 后实测 0% 削波(peak -17.4 dBFS), 且 KWS 唤醒照常触发。
+            amixer -c 1 set "ADC PGA Gain" 10 >/dev/null 2>&1
+            amixer -c 1 set "MIC Boost Gain" 0 >/dev/null 2>&1
+            mkdir -p /data/xiaorui
+            setsid sh /data/xiaorui/start-frontend.sh \
+                >>/data/xiaorui/frontend.log 2>&1 </dev/null &
+        fi
+        ;;
+    stop)
+        pkill -x xiaorui_live
+        pkill -f "llm_rkllm.py"
+        pkill -f "server/app.py"
+        ;;
+    restart)
+        "$0" stop
+        sleep 2
+        "$0" start
+        ;;
+    *)
+        echo "用法: $0 {start|stop|restart}" >&2
+        exit 1
+        ;;
+esac
+exit 0

@@ -21,6 +21,46 @@ OVERLAY = ROOT / "board-server" / "config" / "wakeup_words.xiaorui.yaml"
 # config.yaml 含 API 密钥, 在 .gitignore 里不入库 —— 所以真源是上面的 overlay
 LOCAL_CONFIG = ROOT / "board-server" / "pkg" / "config.yaml"
 WAKE_HEADER = ROOT / "board" / "xr_wake.h"
+# 前端 KWS 词表(sherpa-onnx 拼音格式), 是仓根那一份
+KWS_KEYWORDS = ROOT / "keywords.txt"
+# 板内网关配置的基线, wakeup_words 由 deploy 脚本注入
+BOARD_GATEWAY_YAML = ROOT / "ports" / "rk3562" / "gateway-board.yaml"
+# 前端 KWS 的部署脚本: 必须推仓根的 keywords.txt
+FRONTEND_DEPLOY = ROOT / "ports" / "rk3562" / "deploy-and-run.sh"
+
+# sherpa-onnx 词表的音节 token -> 不带调拼音音节。
+# 只收本仓实际用到的音节: 出现表外的音节要 FAIL(拼错的音节不许静默放过)。
+SYLLABLE_TO_PINYIN = {
+    "x": "x", "iǎo": "iao", "r": "r", "uì": "ui",
+    "n": "n", "ǐ": "i", "h": "h", "ǎo": "ao",
+}
+
+# 标签汉字 -> 不带调拼音音节(用于校验"音节 == 标签")
+HANZI_TO_PINYIN = {
+    "小": "xiao", "瑞": "rui", "你": "ni", "好": "hao",
+}
+
+
+def kws_entries():
+    """解析仓根 keywords.txt -> [(音节token列表, 标签)]。
+
+    格式: "<音节> <音节> ... @标签" (标签可省, 但本仓必须带)。
+    """
+    entries = []
+    for lineno, raw in enumerate(KWS_KEYWORDS.read_text(encoding="utf-8").splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        assert "@" in line, f"keywords.txt 第 {lineno} 行缺 @标签: {raw!r}"
+        tokens, _, label = line.partition("@")
+        syllables = tokens.split()
+        assert syllables, f"keywords.txt 第 {lineno} 行没有音节: {raw!r}"
+        entries.append((syllables, label.strip()))
+    return entries
+
+
+def kws_labels():
+    return [label for _, label in kws_entries()]
 
 
 def frontend_variants():
@@ -103,6 +143,78 @@ class WakeupConfigTests(unittest.TestCase):
                                       "LOCAL_CONFIG", bogus):
                         with self.assertRaises(AssertionError):
                             local_config_wakeup_words()
+
+
+class FrontendKwsTests(unittest.TestCase):
+    """前端 KWS 词表(sherpa-onnx keywords.txt) vs 服务端唤醒词表。
+
+    2026-11-11 实测踩坑: 仓根 keywords.txt 里
+      1) 有一行 "x iǎo z i x iǎo z i @小瑞小瑞" —— 音节是"小智小智",
+         标签却写成"小瑞小瑞"(sherpa 按音节匹配, 这行实际是个"小智小智"关键词);
+      2) 还有一行 "@小爱同学" —— 服务端词表明确不许有它(前端 KWS 醒了,
+         服务端"小X小Y"形状兜底匹配不上, 板子一声不吭)。
+    """
+
+    def test_phoneme_tokens_are_known(self):
+        for syllables, label in kws_entries():
+            for tok in syllables:
+                self.assertIn(tok, SYLLABLE_TO_PINYIN,
+                              f"keywords.txt 音节 {tok!r} 不在已知音节表里(标签 {label})")
+
+    def test_phonemes_match_the_label(self):
+        """音节必须真的拼出标签 —— 抓住"标签写错"的行。"""
+        for syllables, label in kws_entries():
+            # 用 .get 兜住未知音节: 报清晰的断言失败, 而不是 KeyError
+            decoded = "".join(SYLLABLE_TO_PINYIN.get(t, f"?{t}") for t in syllables)
+            for ch in label:
+                self.assertIn(ch, HANZI_TO_PINYIN,
+                              f"keywords.txt 标签 {label!r} 里的 {ch!r} 没有拼音映射")
+            expected = "".join(HANZI_TO_PINYIN[ch] for ch in label)
+            self.assertEqual(decoded, expected,
+                             f"keywords.txt 音节拼出 {decoded!r}, 与标签 {label!r} 不符")
+
+    def test_no_duplicate_phoneme_lines(self):
+        seen = set()
+        for syllables, label in kws_entries():
+            key = " ".join(syllables)
+            self.assertNotIn(key, seen, f"keywords.txt 音节行重复: {key} ({label})")
+            seen.add(key)
+
+    def test_labels_are_registered_server_side(self):
+        """前端能唤醒的词, 服务端词表必须都认 —— 否则前端醒了服务端不理。"""
+        words = set(overlay_wakeup_words())
+        for label in kws_labels():
+            self.assertIn(label, words, f"前端 KWS 词 {label!r} 不在服务端 wakeup_words 里")
+
+    def test_no_stale_upstream_words(self):
+        """上游小智的唤醒词不许出现在前端词表里(前端醒了服务端不认)。"""
+        for label in kws_labels():
+            for stale in ("小爱同学", "小智", "小龙", "你好小智"):
+                self.assertNotIn(stale, label,
+                                 f"前端 KWS 词表里有上游遗留词 {label!r}")
+
+    def test_board_gateway_config_gets_wakeup_words_injected(self):
+        """板内网关配置必须有 wakeup_words, 且来自同一个真源。
+
+        2026-11-11 实测: 推上板的 .config.yaml 压根没有 wakeup_words,
+        服务端的唤醒词门只剩"小X小Y"形状兜底。
+        """
+        base = BOARD_GATEWAY_YAML.read_text(encoding="utf-8")
+        self.assertIn("# >>> wakeup_words <<<", base,
+                      "gateway-board.yaml 缺注入标记, 部署脚本没法注入词表")
+        words = overlay_wakeup_words()
+        block = "wakeup_words:\n" + "".join(f'  - "{w}"\n' for w in words)
+        merged = base.replace("# >>> wakeup_words <<<", block, 1)
+        import yaml as _yaml
+        data = _yaml.safe_load(merged)
+        self.assertIsNotNone(data)
+        self.assertEqual(data["wakeup_words"], words)
+
+    def test_frontend_deploy_pushes_the_repo_keyword_file(self):
+        """前端部署必须推仓根 keywords.txt, 不能推别处的一份。"""
+        text = FRONTEND_DEPLOY.read_text(encoding="utf-8")
+        self.assertIn('"$REPO/keywords.txt"', text,
+                      "deploy-and-run.sh 没有推仓根 keywords.txt")
 
 
 if __name__ == "__main__":

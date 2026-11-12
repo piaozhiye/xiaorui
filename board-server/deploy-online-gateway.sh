@@ -23,6 +23,9 @@ while [ $# -gt 0 ]; do
     case "$1" in
         -s) SERIAL="$2"; shift 2 ;;
         --key-file) KEY_FILE="$2"; KEY_FROM_PC=0; shift 2 ;;
+        # usage 里承诺了 --key-from-pc-config, 但 case 没实现 -> 传它直接
+        # "未知参数" 退出(2026-11-11 实测)。它本就是默认行为, 收下即可。
+        --key-from-pc-config) KEY_FROM_PC=1; shift ;;
         --skip-smoke) SKIP_SMOKE=1; shift ;;
         --allow-auth-fail) ALLOW_AUTH_FAIL=1; shift ;;
         *) die "未知参数 $1" ;;

@@ -1,0 +1,324 @@
+{
+  "schema_version": 1,
+  "baseline": {
+    "board": "RK3562 EVB2 DDR4 V10, 2GB",
+    "kernel": "6.1.141",
+    "rknpu": "0.9.8",
+    "python": "3.14.7",
+    "gateway_sherpa_onnx": "1.13.8",
+    "frontend_sherpa_commit": "0bdca37ac0695a873bcb553f6b60f6d744d2bafd",
+    "rkllm_toolkit": "1.3.1",
+    "miniforge": "26.7.2-0",
+    "hf_revision": "Original conversion revision was not recorded; converted model SHA256 is pinned"
+  },
+  "sources": {
+    "miniforge-26.7.2-0": "https://github.com/conda-forge/miniforge/releases/tag/26.7.2-0",
+    "rkllm-1.3.1": "https://github.com/airockchip/rknn-llm/releases/tag/release-v1.3.1",
+    "self-converted-qwen": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct; convert_rk3562.py; output is not distributed",
+    "sensevoice-2024-07-17": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17.tar.bz2",
+    "matcha-baker": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/matcha-icefall-zh-baker.tar.bz2; Baker dataset is non-commercial",
+    "silero-vad": "https://github.com/snakers4/silero-vad; exact original revision was not recorded; compare the pinned file SHA256",
+    "kws-pkufool": "https://www.modelscope.cn/models/pkufool/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01; existing tools/download-models.sh has verified per-file URLs",
+    "sherpa-c-api": "https://github.com/k2-fsa/sherpa-onnx/tree/0bdca37ac0695a873bcb553f6b60f6d744d2bafd; CPU C API build, not RKNN runtime",
+    "rockchip-vqe-package": "User-supplied Rockchip rkaudio_vqe_plugin-20261110 package; not redistributed",
+    "rockchip-vqe-libs": "User-supplied Linux_8.3.0_aarch64 libraries; licensing and availability must be confirmed with Rockchip; not redistributed"
+  },
+  "files": [
+    {
+      "group": "gateway",
+      "root": "repo",
+      "path": "board-server/miniforge.sh",
+      "bytes": 126511108,
+      "sha256": "89b786c8d2c8b0fda7553914c1314ae4ddaa094503802f279377b19ac4463cb2",
+      "source": "miniforge-26.7.2-0"
+    },
+    {
+      "group": "gateway",
+      "root": "repo",
+      "path": "board-server/librkllmrt.so",
+      "bytes": 7674816,
+      "sha256": "f25e9b099db08aaacd0a3ac62b4697d3951d6ae61ae41ea09f6702cfa89eb32c",
+      "source": "rkllm-1.3.1"
+    },
+    {
+      "group": "gateway",
+      "root": "repo",
+      "path": "models/qwen2.5-0.5b-instruct-rk3562-w8a8.rkllm",
+      "bytes": 787421372,
+      "sha256": "68be412e00d54af1ca3b685b82b89f37a9af6745f537acade1b4defeb6945f00",
+      "source": "self-converted-qwen"
+    },
+    {
+      "group": "gateway",
+      "root": "repo",
+      "path": "models/sherpa-onnx-sense-voice-zh/model.int8.onnx",
+      "bytes": 239233841,
+      "sha256": "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
+      "source": "sensevoice-2024-07-17"
+    },
+    {
+      "group": "gateway",
+      "root": "repo",
+      "path": "models/sherpa-onnx-sense-voice-zh/tokens.txt",
+      "bytes": 315894,
+      "sha256": "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc",
+      "source": "sensevoice-2024-07-17"
+    },
+    {
+      "group": "gateway",
+      "root": "repo",
+      "path": "tts-matcha/matcha-icefall-zh-baker/README.md",
+      "bytes": 370,
+      "sha256": "d47ef70781df15845b6f28c6c071dee9e51b52c36797a8130a620c5c8895929c",
+      "source": "matcha-baker"
+    },
+    {
+      "group": "gateway",
+      "root": "repo",
+      "path": "tts-matcha/matcha-icefall-zh-baker/date.fst",
+      "bytes": 59154,
+      "sha256": "eb8aa079ae3cb81d8f4404992f39d61a0cb990947512b5b8d1e54d1f6980e718",
+      "source": "matcha-baker"
+    },
+    {
+      "group": "gateway",
+      "root": "repo",
+      "path": "tts-matcha/matcha-icefall-zh-baker/dict/README.md",
+      "bytes": 683,
+      "sha256": "8bcc7c2ed7dff082d9a99c09de0bfd72249bf3b5c4298a3af328da40cbd8cfd1",
+      "source": "matcha-baker"
+    },
+    {
+      "group": "gateway",
+      "root": "repo",
+      "path": "tts-matcha/matcha-icefall-zh-baker/dict/generate_user_dict.py",
+      "bytes": 545,
+      "sha256": "24541017b4b60d8e1ad94a5165f7097d2fd107d4ceecbf13583dd37682fdd2a7",
+      "source": "matcha-baker"
+    },
+    {
+      "group": "gateway",
+      "root": "repo",
+      "path": "tts-matcha/matcha-icefall-zh-baker/dict/hmm_model.utf8",
+      "bytes": 519739,
+      "sha256": "f17790586ac86dd048c8adffed052c4bd2b28ed0682972c1275e59040c0589a7",
+      "source": "matcha-baker"
+    },
+    {
+      "group": "gateway",
+      "root": "repo",
+      "path": "tts-matcha/matcha-icefall-zh-baker/dict/idf.utf8",
+      "bytes": 5998717,
+      "sha256": "dbd1e03d72b2263cc8d84a4304ed77677eed9e7deaf43a1a5133bbba9733b535",
+      "source": "matcha-baker"
+    },
+    {
+      "group": "gateway",
+      "root": "repo",
+      "path": "tts-matcha/matcha-icefall-zh-baker/dict/jieba.dict.utf8",
+      "bytes": 5071204,
+      "sha256": "3043b77068e09c9904f27cad82f12b6ebe9dbdb5aeff3b25e45ab7f9c1122b55",
+      "source": "matcha-baker"
+    },
+    {
+      "group": "gateway",
+      "root": "repo",
+      "path": "tts-matcha/matcha-icefall-zh-baker/dict/pos_dict/char_state_tab.utf8",
+      "bytes": 327139,
+      "sha256": "28b7be1dd7369766a51445af4d42e9a2ba4bf374c13be5bc1ca7721e27271dbb",
+      "source": "matcha-baker"
+    },
+    {
+      "group": "gateway",
+      "root": "repo",
+      "path": "tts-matcha/matcha-icefall-zh-baker/dict/pos_dict/prob_emit.utf8",
+      "bytes": 1687686,
+      "sha256": "c33c4cb7edf3b3a5947df7209b6e9f267eae1f21335d9e2bd2521ea07105457a",
+      "source": "matcha-baker"
+    },
+    {
+      "group": "gateway",
+      "root": "repo",
+      "path": "tts-matcha/matcha-icefall-zh-baker/dict/pos_dict/prob_start.utf8",
+      "bytes": 4347,
+      "sha256": "13623ea0e9300bdb597cb2da28770b7b385d6c0098d66e516083fb01b6bd5d96",
+      "source": "matcha-baker"
+    },
+    {
+      "group": "gateway",
+      "root": "repo",
+      "path": "tts-matcha/matcha-icefall-zh-baker/dict/pos_dict/prob_trans.utf8",
+      "bytes": 124159,
+      "sha256": "f22363e2307408293d180c6f9f6b5cb75879d52f722f7764fa2d3d0ae2400236",
+      "source": "matcha-baker"
+    },
+    {
+      "group": "gateway",
+      "root": "repo",
+      "path": "tts-matcha/matcha-icefall-zh-baker/dict/stop_words.utf8",
+      "bytes": 8974,
+      "sha256": "b788b8a939d2e2fe079abd579ea98f12f9fb84370bfd0dddd81bb9381f7ab42c",
+      "source": "matcha-baker"
+    },
+    {
+      "group": "gateway",
+      "root": "repo",
+      "path": "tts-matcha/matcha-icefall-zh-baker/dict/user.dict.utf8",
+      "bytes": 829194,
+      "sha256": "5faabcd0c52adf512de77fd7eee3d556da8c98b50f493b47c66a981b3a24959c",
+      "source": "matcha-baker"
+    },
+    {
+      "group": "gateway",
+      "root": "repo",
+      "path": "tts-matcha/matcha-icefall-zh-baker/hifigan_v2.onnx",
+      "bytes": 3749714,
+      "sha256": "a41d404cce7924493540238da5b30a4bc14b6ddaf1a37f3c79fa4f59548c19f0",
+      "source": "matcha-baker"
+    },
+    {
+      "group": "gateway",
+      "root": "repo",
+      "path": "tts-matcha/matcha-icefall-zh-baker/lexicon.txt",
+      "bytes": 1363705,
+      "sha256": "38b886d46aefa50da6322a64d72fd595d5f4fae1051adb160d647541b1e0a4a2",
+      "source": "matcha-baker"
+    },
+    {
+      "group": "gateway",
+      "root": "repo",
+      "path": "tts-matcha/matcha-icefall-zh-baker/model-steps-3.onnx",
+      "bytes": 75624188,
+      "sha256": "ff1cc7f7abdedc4eeec668a4a0dc2e72a0c314c5637d5fce885345b490bd08de",
+      "source": "matcha-baker"
+    },
+    {
+      "group": "gateway",
+      "root": "repo",
+      "path": "tts-matcha/matcha-icefall-zh-baker/number.fst",
+      "bytes": 64482,
+      "sha256": "743f402181fcfebf76cc2f0546b71fa26476e626fbe4e460fb7b4c3a7a8bd5bd",
+      "source": "matcha-baker"
+    },
+    {
+      "group": "gateway",
+      "root": "repo",
+      "path": "tts-matcha/matcha-icefall-zh-baker/phone.fst",
+      "bytes": 88630,
+      "sha256": "1ac2b6fa56b1442320c4de7db08353bab8963a2b57f365eebcdd3a2d3562f8d7",
+      "source": "matcha-baker"
+    },
+    {
+      "group": "gateway",
+      "root": "repo",
+      "path": "tts-matcha/matcha-icefall-zh-baker/tokens.txt",
+      "bytes": 19591,
+      "sha256": "56209b2bf609d5ac1d66ede6dae7bf5254bd3f8aa24c4a6823713d5b884d87ba",
+      "source": "matcha-baker"
+    },
+    {
+      "group": "gateway",
+      "root": "repo",
+      "path": "models/snakers4_silero-vad/src/silero_vad/data/silero_vad.onnx",
+      "bytes": 2327524,
+      "sha256": "2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f",
+      "source": "silero-vad"
+    },
+    {
+      "group": "frontend",
+      "root": "repo",
+      "path": "models/model-kws/encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+      "bytes": 4807159,
+      "sha256": "017af32f2c0138f931d05fbc009ee864295e910aff304f77d2f563815fc834fb",
+      "source": "kws-pkufool"
+    },
+    {
+      "group": "frontend",
+      "root": "repo",
+      "path": "models/model-kws/decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
+      "bytes": 675349,
+      "sha256": "bb3d8640cc6a495088707173bc1707a8a4ffe014594fc9adcba8389e27d0339f",
+      "source": "kws-pkufool"
+    },
+    {
+      "group": "frontend",
+      "root": "repo",
+      "path": "models/model-kws/joiner-epoch-12-avg-2-chunk-16-left-64.onnx",
+      "bytes": 253410,
+      "sha256": "d990f5b67ae9d740048709f5d5f3e777af442061896a8322d5c3ab3ec480f3cb",
+      "source": "kws-pkufool"
+    },
+    {
+      "group": "frontend",
+      "root": "repo",
+      "path": "models/model-kws/tokens.txt",
+      "bytes": 1627,
+      "sha256": "72316508d9119696145abc6f1f8cdc46287535c34e5ce7e595f845cb1499cf2e",
+      "source": "kws-pkufool"
+    },
+    {
+      "group": "frontend",
+      "root": "sherpa",
+      "path": "libsherpa-onnx-c-api.so",
+      "bytes": 4347496,
+      "sha256": "2930cb96888f2e2599da90c68c30c8958d670377c85443947cc2f45c7d0107ce",
+      "source": "sherpa-c-api"
+    },
+    {
+      "group": "frontend",
+      "root": "sherpa",
+      "path": "libonnxruntime.so",
+      "bytes": 34606912,
+      "sha256": "cfc800d4438f15e8d9017521326776ca7117d8783cb847ccccc2fc61ac4d540f",
+      "source": "sherpa-c-api"
+    },
+    {
+      "group": "vqe",
+      "root": "vqe-package",
+      "path": "lib/linux-aarch64/libasound_module_pcm_rkaudio_vqe.so",
+      "bytes": 125120,
+      "sha256": "4701f68b222a31bbbbbfeb11188ca98b3820e50819d6c9104974b820253b6101",
+      "source": "rockchip-vqe-package"
+    },
+    {
+      "group": "vqe",
+      "root": "vqe-package",
+      "path": "config/6mic_2ref/config_aivqe_new.json",
+      "bytes": 8113,
+      "sha256": "86ef5667c1c3de83ceaf217b5fc674598775351dc235efd58a9bcec7ac011762",
+      "source": "rockchip-vqe-package"
+    },
+    {
+      "group": "vqe",
+      "root": "vqe-package",
+      "path": "config/6mic_2ref/wopt_6mic_ring_35mm_8input_8output.bin",
+      "bytes": 393216,
+      "sha256": "d8168b9b6816c30b78aee38da57022a2a96dbe1f83d6d242538d8ae891a8ba6c",
+      "source": "rockchip-vqe-package"
+    },
+    {
+      "group": "vqe",
+      "root": "vqe-libs",
+      "path": "librkaudio_vqe.so",
+      "bytes": 17323776,
+      "sha256": "69127c1ab697f2ddeb2e1a119e3fa45dbda2e0b05aa1da3ec80b9bfffd288cb5",
+      "source": "rockchip-vqe-libs"
+    },
+    {
+      "group": "vqe",
+      "root": "vqe-libs",
+      "path": "librkaudio_common.so",
+      "bytes": 872504,
+      "sha256": "2f65157c9b62237f4666deb29aebdc1c68263086292bb04fa1d31336d5cde922",
+      "source": "rockchip-vqe-libs"
+    },
+    {
+      "group": "vqe",
+      "root": "vqe-libs",
+      "path": "librkaudio_nn.so",
+      "bytes": 2463264,
+      "sha256": "fb9e4fdf0377d66a7dbd871ab32d8685921c5d257fcf9d9739b8f73cd1cdddc4",
+      "source": "rockchip-vqe-libs"
+    }
+  ]
+}

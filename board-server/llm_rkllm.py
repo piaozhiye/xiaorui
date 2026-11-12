@@ -10,6 +10,7 @@
 import argparse
 import ctypes
 import json
+import os
 import queue
 import threading
 import time
@@ -197,7 +198,7 @@ class RkLlm:
             raise RuntimeError(f"rkllm_run failed: {run_err[0]}")
 
 
-PERSONA = (
+PERSONA = os.environ.get("XR_RKLLM_PERSONA") or (
     "你是小瑞，运行在 RK3576 开发板上的端侧语音助手，大脑在本机 NPU 上本地推理。"
     "回答控制在两三句话内，适合语音播报，不要用列表。"
 )

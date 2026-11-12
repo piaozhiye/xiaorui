@@ -1,0 +1,68 @@
+# PC 网关覆盖层（RK3562 + 全本地模型）
+#
+# 与 ports/pc-gateway/config.overlay.example.yaml 的区别：那一版仍走云端
+# dashscope(qwen-flash + qwen3-asr-flash)，要求 DASHSCOPE_API_KEY；本版把
+# LLM/ASR/TTS 三件套全部换成本机模型，**不需要任何云端 key**：
+#   LLM → 本机 llama.cpp server(OpenAI 兼容, 127.0.0.1:8113) 跑 Qwen2.5-1.5B
+#   ASR → 本机 sherpa-onnx SenseVoice(中文) 模型
+#   TTS → 本机 sherpa-onnx Matcha(冰糖) 模型
+#
+# 路径按本机实际位置写死；换机器时改这三行即可。
+server:
+  # 只监听回环: 板子通过 adb reverse(tcp:8101) 走 USB 隧道进来, 不暴露到 LAN。
+  # 因此这里关掉 token 校验(前端只有静态 Bearer 头, 不支持 HMAC 动态 token)。
+  ip: 127.0.0.1
+  port: 8101
+  http_port: 8104
+  auth:
+    enabled: false
+    allowed_devices: []
+
+enable_greeting: false
+
+selected_module:
+  ASR: LocalSenseVoice
+  LLM: LocalQwen
+  TTS: SherpaLocal
+  Memory: nomem
+  Intent: function_call
+
+LLM:
+  # 基类模板里的云端实例: 本配置不选它, 但 start.sh 要求每个 LLM 块的 api_key 非空,
+  # 所以给个占位值(不会被调用)。
+  AliLLM:
+    api_key: unused-cloud-placeholder
+  # 本机 Qwen: llama_cpp.server 提供的 OpenAI 兼容端点
+  LocalQwen:
+    type: openai
+    model_name: qwen2.5-1.5b-instruct
+    base_url: http://127.0.0.1:8113/v1
+    api_key: local
+    temperature: 0.7
+    max_tokens: 512
+    timeout:
+      pool: 2
+      connect: 3
+      write: 5
+      read: 60
+
+ASR:
+  Qwen3ASRFlash:
+    api_key: unused-cloud-placeholder
+  LocalSenseVoice:
+    type: sherpa_onnx_local
+    model_type: sense_voice
+    model_dir: /path/to/sherpa-onnx-sense-voice-zh
+    output_dir: tmp/asr
+    # 本地识别不需要 key; 这里给个占位值只为满足 start.sh 的非空校验
+    api_key: local
+
+TTS:
+  SherpaLocal:
+    type: sherpa_local
+    engine: matcha
+    model_dir: /path/to/matcha-icefall-zh-baker
+    sid: 0
+    num_threads: 4
+    speed: 1.0
+    output_dir: tmp/

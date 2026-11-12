@@ -1,0 +1,50 @@
+server:
+  ip: 127.0.0.1
+  port: 8001
+  http_port: 8004
+  auth_key: ""
+  auth:
+    enabled: false
+    allowed_devices: []
+
+log:
+  log_level: INFO
+  log_dir: /data/xiaorui-gateway/data
+  log_file: gateway.log
+  data_dir: /data/xiaorui-gateway/data
+
+selected_module:
+  VAD: SileroVAD
+  ASR: LocalSenseVoice
+  LLM: LocalQwen
+  TTS: SherpaLocal
+  Memory: nomem
+  Intent: function_call
+
+Memory:
+  nomem:
+    type: nomem
+
+Intent:
+  function_call:
+    type: function_call
+    functions: []
+
+xiaorui:
+  type: hello
+  version: 1
+  transport: websocket
+  audio_params:
+    format: opus
+    sample_rate: 24000
+    channels: 1
+    frame_duration: 60
+
+exit_commands:
+  - 退出
+  - 关闭
+delete_audio: true
+close_connection_no_voice_time: 120
+enable_websocket_ping: true
+enable_wakeup_words_response_cache: false
+prompt: 你是小瑞，运行在 RK3562 开发板上的端侧语音助手。请用简短自然的中文回答，不要编造实时信息。
