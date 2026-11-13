@@ -8,6 +8,18 @@ xdg-shell 和 wl_shm 显示，触摸通过 Wayland seat 接收。
 没有复制其 Rockchip SDK 专有端口或独占 DRM 驱动。
 LVGL 依赖的头文件、库及其许可应由使用者保留；这些二进制不随本仓分发。
 
+## 界面截图
+
+板端 1080×1920 实拍（`XR_UI_DUMP` 导出，缩到 540 宽）：
+
+| 对话页（真实问答） | 待机（静音微光） | 设置页 |
+| --- | --- | --- |
+| <img src="screenshots/conversation.png" width="270"> | <img src="screenshots/idle.png" width="270"> | <img src="screenshots/settings.png" width="270"> |
+
+对话页来自 `XR_TEXT_INJECT=介绍一下你自己` 的真实一轮：问句卡片、分句字幕、随电平
+变亮的眼睛都在；待机图是安静环境下的微光；设置页的连接状态、界面内存、运行时长
+都是实时读出来的，音量条带 10/50/100 刻度。
+
 ## 功能边界
 
 - 表情、时间、对话字幕卡片、对话/设置页、触摸导航。
