@@ -59,6 +59,7 @@ extern long syscall(long, ...);   /* -std=c11 下 glibc 不声明, reboot 子进
 #include "playback_control.h"
 #include "audio_cue.h"
 #include "ui_server.h"
+#include "ui_level.h"
 
 /* 提示音: ack=唤醒确认("哎我在请说"), hmm=指令应答("嗯", 350ms, 预留未用),
    fail=弃轮反馈("没听清"), 让干等一轮的用户知道设备还在、可以重说。 */
@@ -1058,8 +1059,7 @@ inject_wait:
             int level = (int)((level_db - reference) * 3.0);
             if (level < 0) level = 0;
             if (level > 100) level = 100;
-            if (level > ui.level) ui.level = level;
-            else ui.level -= (ui.level - level) / 16;
+            ui.level = xr_ui_level_next(ui.level, level);
             xr_ui_server_level(ui.server, (unsigned int)ui.level);
         }
         /* 调试(XR_UTT_DUMP=<dir>): 落原始帧 + 上传前的句子, 用于现场比对

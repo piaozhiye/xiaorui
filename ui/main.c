@@ -464,7 +464,15 @@ static void refresh(lv_timer_t *timer) {
     }
     /* 麦克风电平: 眼睛和光圈跟着人说话亮起来 */
     int target_level = connected ? (int)status->level : 0;
-    ui_level += (target_level - ui_level) / 4;
+    /* 整数除法在差值 <4 时得 0, 直接加会停在离目标 3 的地方(和前端同款坑),
+       保证每次至少走 1, 静音时才能真的回到全暗 */
+    int level_delta = target_level - ui_level;
+    if (level_delta)
+    {
+        int step = level_delta / 4;
+        if (step == 0) step = level_delta > 0 ? 1 : -1;
+        ui_level += step;
+    }
     if (ui_level < 0) ui_level = 0;
     if (ui_level > 100) ui_level = 100;
     uint32_t eye_color = mix_color(0x2c6a60, 0x8fe3c3, ui_level);
