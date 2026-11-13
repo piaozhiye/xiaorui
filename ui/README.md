@@ -6,7 +6,8 @@ xdg-shell 和 wl_shm 显示，触摸通过 Wayland seat 接收。
 
 参考 `eqdrc` 的 LVGL 8.4/32-bit 色深、中文 FreeType 字体及布局经验。
 没有复制其 Rockchip SDK 专有端口或独占 DRM 驱动。
-LVGL 依赖的头文件、库及其许可应由使用者保留；这些二进制不随本仓分发。
+LVGL 配套头文件与预编译库已随仓分发；它们的来源、许可和重建限制见
+[`third_party/lvgl/README.md`](third_party/lvgl/README.md)。
 具体清单见根目录 [THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md)。
 
 ## 界面截图
@@ -53,8 +54,9 @@ LVGL 依赖的头文件、库及其许可应由使用者保留；这些二进制
 
 ## 构建
 
-LVGL 8.4 的头文件与预编译库已随仓放在 `ui/third_party/lvgl/`（上游 8.4.0，
-32-bit 色深 + FreeType，MIT，许可证原文同目录），`ui/build.sh` 默认就用它，
+LVGL 8.4 的厂商分支头文件与 eqdrc 来源预编译库已随仓放在 `ui/third_party/lvgl/`
+（头文件自报 8.4.0，32-bit 色深 + FreeType，许可及来源限制见同目录 README），
+`ui/build.sh` 默认就用它，
 不需要额外准备 SDK。要换别的同版本 SDK 时设 `XR_LVGL_ROOT`——库和 `lv_conf.h`
 必须配套，不能只换库。PC 需要 wayland-scanner、Wayland 客户端开发头，交叉工具链
 见 RK3562 复现说明。

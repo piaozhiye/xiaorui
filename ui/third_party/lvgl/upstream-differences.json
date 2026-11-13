@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "upstream_reference": {
+    "repository": "https://github.com/lvgl/lvgl",
+    "commit": "4495f428630cc1741bd8bfd977f080e8460e8e8d",
+    "role": "comparison and candidate source only; original binary source is not recorded"
+  },
+  "binary_copy_reference": {
+    "repository": "https://github.com/piaozhiye/rk-eqdrc-tuner",
+    "commit": "0281a1b976de100e0aa11f0b84e04779c13b66b4"
+  },
+  "binary_sha256": {
+    "lib/aarch64/liblvgl.so": "8354745c500487e5151c2a674fc0dc95219d7921502e8e7672f2c96312cd8164",
+    "lib/x86/liblvgl.so": "950be0dd7a1dc2b9b566462cd1bc48f338e11c16296929c8bad3b74252848070"
+  },
+  "config_sha256": "d2a3e5469846f571adc1bd139b6213d008084212c3b948ce0c347a57ef9cfedd",
+  "header_source_observation": "Rockchip SDK rkaudio_vqe/examples/vqe_display/include/lvgl; current tick adapter is a project modification",
+  "differences": [
+    {
+      "path": "src/core/lv_obj.h",
+      "status": "modified",
+      "reference_sha256": "f12f8d145954cea44cdf9290537c9b0231cbecce56c28f93902000f535d293d3",
+      "vendored_sha256": "36373bc3635f47f3837728e97a17af9d23b2f9526f5c4d702fd292c6018a3080"
+    },
+    {
+      "path": "src/draw/lv_img_buf.h",
+      "status": "modified",
+      "reference_sha256": "70118b2b271e42c28aa1892fc3dcafb08ab7644b2440f44f56ba24aede0cd696",
+      "vendored_sha256": "20692bd05f1a1b6870aad834eb896339921f6599dc0a79c3722be16a7f78e56a"
+    },
+    {
+      "path": "src/draw/lv_img_cache.h",
+      "status": "modified",
+      "reference_sha256": "62a6f7c9ca83e9150b9395f6e2a8462ba1fd82f4918f7b1eafe4e0f09bc28601",
+      "vendored_sha256": "d06a38b23990a9a7cd8fbb8d9847eef35a6261f2d0c3e78d9aee1c769e2ef334"
+    },
+    {
+      "path": "src/draw/sdl/lv_draw_sdl_texture_cache.h",
+      "status": "modified",
+      "reference_sha256": "97c0d1837dd645aee9b923dcd1809574720221230afe7a41547d462469e33bf6",
+      "vendored_sha256": "9144a1bd5b0914547c5c34b82090198aea8a57b84e9bde74754b9abe43f529a2"
+    },
+    {
+      "path": "src/extra/libs/bmp/lv_bmp.h",
+      "status": "modified",
+      "reference_sha256": "8356654bae055bea9ab4b8ef0408aa93bcae4423fc585029dd2ff50a887e2154",
+      "vendored_sha256": "5a984a37c812e6343e9ecc3e2c845e15f6e7ea3566a82b8b60c7ecbc4421cf06"
+    },
+    {
+      "path": "src/extra/libs/gif/lv_gif.h",
+      "status": "modified",
+      "reference_sha256": "3a03cc3b17e8874b7cc76054e8bc7d6d7f6ac89df02ee85db800cd6dc9463a91",
+      "vendored_sha256": "bdafee1abb3c59e1bceb0b727ea7a43b7f02fd306cbdd3565819360ecd66b47a"
+    },
+    {
+      "path": "src/extra/libs/png/lv_png.h",
+      "status": "modified",
+      "reference_sha256": "b1462d8d3733e56f6a5563fbad4bec3eeedd2fec8c8307361cb1b79a32d1245e",
+      "vendored_sha256": "b264410ae2dfe182d14c590f24a2a0afe5ced7eb4a51802a8cc8c3afc9c8a07c"
+    },
+    {
+      "path": "src/extra/libs/sjpg/lv_sjpg.h",
+      "status": "modified",
+      "reference_sha256": "b0806c7f350bca0a313f40b23ef48557086ab634ae4ec68b487f013f23c5da49",
+      "vendored_sha256": "ae7ec53e4bd5a9f91d6dc1f744ed8ed23a39af1a1abf070e43f06aa1bf9c26d7"
+    },
+    {
+      "path": "src/extra/lv_extra.h",
+      "status": "modified",
+      "reference_sha256": "080683f4a3a538f42f61d4cb8725f4d9515ed08a7d1314c3be63dbad355dede4",
+      "vendored_sha256": "078cd69b93134c8e2e6699a8609c0472a3a9e9cf32512940b97ecf1949afe61a"
+    },
+    {
+      "path": "src/extra/widgets/inputbox/lv_inputbox.h",
+      "status": "added",
+      "reference_sha256": null,
+      "vendored_sha256": "7e2e4bbeb0ef79e8515eab9ef883a7bfe91784e303fbc9aa2067e823658793f5"
+    },
+    {
+      "path": "src/extra/widgets/lv_widgets.h",
+      "status": "modified",
+      "reference_sha256": "c43f5f1e085f572b7c11f2f9a061e5fc1a19614e82f7999469d7b4f1e5005634",
+      "vendored_sha256": "8721e6c6eb773c224320ff7509c168175c98d547cc950e892dfac7f31accf4bb"
+    },
+    {
+      "path": "src/extra/widgets/stiker_matrix/lv_stiker_matrix.h",
+      "status": "added",
+      "reference_sha256": null,
+      "vendored_sha256": "05fbfbd448a0633cebeff6f448f97ddaf89a6fa646505b6b492073cebd512346"
+    },
+    {
+      "path": "src/font/lv_font.h",
+      "status": "modified",
+      "reference_sha256": "1c29529613fc27d8b72d21016b1298ff828ea098069319beb60cb3c6ed90a982",
+      "vendored_sha256": "4817109908299660f322f0edca22eb52b8ba86420b4e3b7acf9b4c9bfc6a6e4c"
+    },
+    {
+      "path": "src/hal/lv_hal_indev.h",
+      "status": "modified",
+      "reference_sha256": "5f71df9d70292a8d816f0ac4a57cd4069e7522e3e70f3348816271c2f079b400",
+      "vendored_sha256": "ea61439f589a7ba0729ef25650520d06ffd1e6e69f761de57c0e6713c2873218"
+    },
+    {
+      "path": "src/lv_conf_kconfig.h",
+      "status": "modified",
+      "reference_sha256": "d7419d46f8a45156f7cc3fc3bf3bf7c399de98e3b78003e84d49443913b7c15c",
+      "vendored_sha256": "08fbba2b05210815cc54db8c09211e48fde43e079407a21b7f278d3853adbbbe"
+    },
+    {
+      "path": "src/misc/lv_fs.h",
+      "status": "modified",
+      "reference_sha256": "8bfd04a93f2f360adb50702588931555006ac78095d5c74c32bd865ab0709d07",
+      "vendored_sha256": "f45cb43badc541939931072ae450a30152b831de221de9bb30da6bfb84103079"
+    },
+    {
+      "path": "src/misc/lv_systick.h",
+      "status": "added",
+      "reference_sha256": null,
+      "vendored_sha256": "2959c75fabc6366991f5d33bef52e1abda6339238d7c9b888a20a4d203cab10c"
+    },
+    {
+      "path": "src/widgets/lv_table.h",
+      "status": "modified",
+      "reference_sha256": "37bca2cc04801f64672db4408654723110e62c2145f0b0aba7538b539eb6f0f5",
+      "vendored_sha256": "ae4bb7cf2131cb839ce97efbf334f765f528c651d667fe4a75bf62bc62764d05"
+    }
+  ]
+}
