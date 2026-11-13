@@ -35,6 +35,8 @@ fi
     "$DIR/board/xr_vad.c" \
     "$DIR/board/xr_mic4.c" \
     "$DIR/board/xr_volume.c" \
+    "$DIR/board/ui_server.c" \
+    "$DIR/board/ui_json.c" \
     "$DIR/board/backend_local.c" \
     "$DIR/board/backend_cloud.c" \
     "$DIR/board/backend_hybrid.c" \

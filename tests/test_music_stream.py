@@ -328,6 +328,7 @@ class StreamTests(unittest.TestCase):
             websocket=SimpleNamespace(send=AsyncMock()))
         asyncio.run(handleAbortMessage(conn))
         self.assertTrue(conn.client_abort)
+        self.assertIsNone(conn.sentence_id)
         self.assertIsNone(tts.music_resume)
         self.assertFalse(tts._music_resume_content_seen)
 

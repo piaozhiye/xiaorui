@@ -25,7 +25,7 @@ class CaptureCadenceTests(unittest.TestCase):
             self.assertIn("xr_session_end_turn_silent(&ses", path)
             self.assertNotIn("xr_session_end_turn(&ses", path)
         stop = source.split("if (ev == EV_TTS_STOP) {", 1)[1].split("else if (ev == EV_STT)", 1)[0]
-        self.assertRegex(stop, r"int answered = ses\.pkt_n > 0;")
+        self.assertRegex(stop, r"int answered = ses\.pkt_n > 0 && !cancelled;")
         self.assertRegex(stop, r"if \(answered\)\s+xr_session_end_turn\([^;]+;\s+else\s+xr_session_end_turn_silent\(")
         self.assertIn("xr_session_awake(&ses", noise)  # pure wake still opens a window
 

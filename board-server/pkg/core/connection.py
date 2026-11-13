@@ -1071,7 +1071,9 @@ class ConnectionHandler:
         # 更新系统prompt至上下文
         self.dialogue.update_system_message(self.prompt)
 
-    def chat(self, query, depth=0):
+    def chat(self, query, depth=0, *, sentence_id=None):
+        if sentence_id is not None and (self.client_abort or sentence_id != self.sentence_id):
+            return None
         # 保存当前任务的sentence_id到局部变量，避免被新任务覆盖
         current_sentence_id = None
 
@@ -1092,7 +1094,7 @@ class ConnectionHandler:
             )
         else:
             # 递归调用时，使用当前的sentence_id
-            current_sentence_id = self.sentence_id
+            current_sentence_id = sentence_id or self.sentence_id
 
         # 设置最大递归深度，避免无限循环，可根据实际需求调整
         MAX_DEPTH = 5
@@ -1173,8 +1175,8 @@ class ConnectionHandler:
         emotion_flag = True
         try:
             for response in llm_responses:
-                if self.client_abort:
-                    break
+                if self.client_abort or current_sentence_id != self.sentence_id:
+                    return None
                 if self.intent_type == "function_call" and functions is not None:
                     content, tools_call = response
                     if "content" in response:
@@ -1256,6 +1258,8 @@ class ConnectionHandler:
                     )
                 )
             return
+        if self.client_abort or current_sentence_id != self.sentence_id:
+            return None
         # 处理function call
         if tool_call_flag:
             bHasError = False
@@ -1346,6 +1350,8 @@ class ConnectionHandler:
                 # 收集所有工具调用的 Future
                 futures_with_data = []
                 for tool_call_data in tool_calls_list:
+                    if self.client_abort or current_sentence_id != self.sentence_id:
+                        return None
                     self.logger.bind(tag=TAG).debug(
                         f"function_name={tool_call_data['name']}, function_id={tool_call_data['id']}, function_arguments={tool_call_data['arguments']}"
                     )
@@ -1387,8 +1393,12 @@ class ConnectionHandler:
                         enqueue_tool_report(self, tool_call_data['name'], tool_input, str(e), report_tool_call=False)
 
                 # 统一处理工具调用结果
+                if self.client_abort or current_sentence_id != self.sentence_id:
+                    return None
                 if tool_results:
-                    self._handle_function_result(tool_results, depth=depth, streamed_text=streamed_text)
+                    self._handle_function_result(tool_results, depth=depth,
+                                                 streamed_text=streamed_text,
+                                                 sentence_id=current_sentence_id)
 
         # 存储对话内容
         if len(response_message) > 0:
@@ -1413,11 +1423,15 @@ class ConnectionHandler:
 
         return True
 
-    def _handle_function_result(self, tool_results, depth, streamed_text=""):
+    def _handle_function_result(self, tool_results, depth, streamed_text="", *, sentence_id):
+        if self.client_abort or sentence_id != self.sentence_id:
+            return
         need_llm_tools = []
         record_tools = []
 
         for result, tool_call_data in tool_results:
+            if self.client_abort or sentence_id != self.sentence_id:
+                return
             if result.action in [
                 Action.RESPONSE,
                 Action.NOTFOUND,
@@ -1429,8 +1443,9 @@ class ConnectionHandler:
                         f"Skipping duplicate TTS for tool {tool_call_data['name']}, already streamed"
                     )
                 else:
-                    self.tts.tts_one_sentence(self, ContentType.TEXT, content_detail=text)
-                    self.tts.store_tts_text(self.sentence_id, text)
+                    self.tts.tts_one_sentence(self, ContentType.TEXT, content_detail=text,
+                                              sentence_id=sentence_id)
+                    self.tts.store_tts_text(sentence_id, text)
                 self.dialogue.put(Message(role="assistant", content=text))
             elif result.action == Action.REQLLM:
                 need_llm_tools.append((result, tool_call_data))
@@ -1519,7 +1534,7 @@ class ConnectionHandler:
                         )
                     )
 
-            self.chat(None, depth=depth + 1)
+            self.chat(None, depth=depth + 1, sentence_id=sentence_id)
 
     def _report_worker(self):
         """聊天记录上报工作线程"""

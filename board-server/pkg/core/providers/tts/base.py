@@ -749,7 +749,21 @@ def _get_synth_pool(self):
         _tts_synth_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts-synth")
     return _tts_synth_pool
 
-def _synth_one(self, text, original_text, opus_handler):
+def _synth_one(self, text, original_text, opus_handler, sentence_id):
+    def cancelled():
+        return (self.conn.client_abort or self.conn.stop_event.is_set()
+                or sentence_id != self.conn.sentence_id)
+
+    def deliver(packet):
+        if cancelled():
+            return
+        if opus_handler == self.handle_opus:
+            self.tts_audio_queue.put((SentenceType.MIDDLE, packet, None, sentence_id))
+        elif opus_handler is not None:
+            opus_handler(packet)
+
+    if cancelled():
+        return
     # 流式 delta 可能把 ** 对拆在两段, 分段级清洗漏网; 句级再兜底清一次
     import re as _re
     text = _re.sub(r'(\*\*|__)(.*?)\1', r'\2', text)
@@ -758,15 +772,19 @@ def _synth_one(self, text, original_text, opus_handler):
     text = _re.sub(r'^\s*[-*+]\s+', '', text)
     max_repeat_time = 5
     while max_repeat_time > 0:
+        if cancelled():
+            return
         try:
             audio_bytes = asyncio.run(self.text_to_speak(text, None))
+            if cancelled():
+                return
             if audio_bytes:
-                self.tts_audio_queue.put((SentenceType.FIRST, None, original_text, getattr(self, "current_sentence_id", None)))
+                self.tts_audio_queue.put((SentenceType.FIRST, None, original_text, sentence_id))
                 audio_bytes_to_data_stream(
                     audio_bytes,
                     file_type=self.audio_file_type,
                     is_opus=True,
-                    callback=opus_handler,
+                    callback=deliver,
                     sample_rate=self.conn.sample_rate,
                     opus_encoder=self.opus_encoder,
                 )
@@ -783,4 +801,5 @@ def to_tts_stream_pipelined(self, text, opus_handler=None):
     text = MarkdownCleaner.clean_markdown(text)
     if self._correct_words_pattern:
         text = self._correct_words_pattern.sub(lambda m: self.correct_words[m.group(0)], text)
-    _get_synth_pool(self).submit(_synth_one, self, text, original_text, opus_handler)
+    sentence_id = getattr(self, "current_sentence_id", None)
+    _get_synth_pool(self).submit(_synth_one, self, text, original_text, opus_handler, sentence_id)

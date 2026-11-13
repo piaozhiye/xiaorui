@@ -39,6 +39,7 @@ int  xr_session_echo_guarded(const xr_session_t *s, double now);
 /* Only known short residue words, in both follow and guard windows, are suppressed. */
 int  xr_session_drop_echo(const xr_session_t *s, double now, const char *text, int min_chars);
 void xr_session_set_cool(xr_session_t *s, double now, double cooldown_s);
+void xr_session_note_ack(xr_session_t *session, double now, double duration_s, double cooldown_s);
 int  xr_session_in_window(const xr_session_t *s, double now);
 int  xr_session_cooling(const xr_session_t *s, double now);
 int  xr_session_ping_due(const xr_session_t *s, double now);

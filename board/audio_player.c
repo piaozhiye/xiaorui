@@ -9,6 +9,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 typedef long snd_pcm_sframes_t;
 #define A_RW 3
 #define A_S16 2
@@ -201,15 +202,30 @@ int xr_player_start(void) {
 }
 /* 排干收尾 (句尾不截字): 标记 eof, 等线程 drain 完退出 */
 void xr_player_finish(void) {
-    if (!player_active) return;   /* 以 player_active 判活: 线程可能已因 writei 错自杀,
+    (void)xr_player_finish_with_poll(NULL, NULL);
+}
+
+int xr_player_finish_with_poll(int (*poll_callback)(void *), void *context) {
+    if (!player_active) return 0;   /* 以 player_active 判活: 线程可能已因 writei 错自杀,
                                       此时仍需语义复位(player_running 由线程自己清了) */
     ring_eof = 1;
     pthread_mutex_lock(&ring_mu);
     pthread_cond_broadcast(&ring_cv);
     pthread_mutex_unlock(&ring_mu);
+    int cancelled = 0;
+    while (poll_callback && atomic_load(&player_running)) {
+        if (poll_callback(context)) {
+            player_running = 0;
+            cancelled = 1;
+            break;
+        }
+        struct timespec delay = {.tv_nsec = 10000000};
+        nanosleep(&delay, NULL);
+    }
     pthread_join(player_tid, NULL);   /* join 僵尸线程, 防资源泄漏 */
     player_active = 0; player_running = 0;
     fprintf(stderr, "[xr] 播放线程收尾 ok\n");
+    return cancelled;
 }
 /* 立即停 (打断/重连): 清 eof 让线程下一轮退出, drop 丢余音 */
 void xr_player_drop(void) {

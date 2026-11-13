@@ -27,6 +27,7 @@ typedef struct {
 int xr_player_init(const xr_audio_output_ops_t *ops);
 int xr_player_start(void);
 void xr_player_finish(void);
+int xr_player_finish_with_poll(int (*poll_callback)(void *), void *context);
 void xr_player_drop(void);
 void xr_player_push_pcm(const int16_t *pcm, size_t samples);
 int xr_player_push_opus(const unsigned char *packet, size_t size);

@@ -67,6 +67,12 @@ int xr_session_drop_echo(const xr_session_t *s, double now, const char *text, in
 void xr_session_set_cool(xr_session_t *s, double now, double cooldown_s) {
     s->cool_until = now + cooldown_s;
 }
+void xr_session_note_ack(xr_session_t *session, double now, double duration_s, double cooldown_s) {
+    if (!session || duration_s < 0.0 || cooldown_s < 0.0)
+        return;
+    session->cool_until = now + duration_s + cooldown_s;
+    session->echo_guard_until = session->cool_until;
+}
 int xr_session_in_window(const xr_session_t *s, double now) { return now < s->awake_until; }
 int xr_session_cooling(const xr_session_t *s, double now) { return now < s->cool_until; }
 

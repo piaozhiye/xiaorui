@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "voice_session.h"
+#include "speech_route.h"
 
 static int failures;
 #define CHECK(cond, msg) do { \
@@ -131,6 +132,17 @@ int main(void) {
     xr_session_awake(&s, 100.0);
     xr_session_set_echo_guard(&s, 100.0);
     CHECK(!xr_session_drop_echo(&s, 101.0, "好", 3), "关闭护栏时放行");
+
+    xr_session_init(&s);
+    xr_session_awake(&s, 200.0);
+    xr_session_note_ack(&s, 200.0, 0.4, 0.8);
+    CHECK(xr_session_cooling(&s, 201.1), "确认音及其余音仍应冷却");
+    CHECK(xr_session_echo_guarded(&s, 201.1), "确认音余音仍应受保护");
+    CHECK(!xr_session_echo_guarded(&s, 201.3), "确认音冷却后不应继续丢指令");
+    CHECK(xr_speech_route(0, 1, 0, xr_session_echo_guarded(&s, 201.3)) == XR_SPEECH_UPLOAD,
+          "纯云识别的跟随指令应上传，而非要求再次唤醒");
+    xr_session_set_echo_guard(&s, 205.0);
+    CHECK(xr_session_echo_guarded(&s, 204.0), "正常回答的回声保护不能被移除");
 
     fprintf(stderr, failures ? "voice_session_test: %d FAILED\n" : "voice_session_test: OK\n",
             failures);

@@ -91,7 +91,7 @@ async def startToChat(conn: "ConnectionHandler", text):
         # ("收到打断信息，终止TTS文本处理线程"), 本轮回答永远出不来。
         # 音频路径本来就在 receiveAudioHandle 里清(准备开始新会话), 文本路径
         # 经 startToChat 进来, 缺这一步 —— 2026-10-21 音乐让位实测踩到。
-        conn.client_abort = False
+    conn.client_abort = False
 
     # 首先进行意图分析，使用实际文本内容
     intent_handled = await handle_user_intent(conn, actual_text)

@@ -1,0 +1,392 @@
+#define _POSIX_C_SOURCE 200809L
+#include <signal.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+
+#include <lvgl/src/extra/libs/freetype/lv_freetype.h>
+
+#include "ui_client.h"
+#include "wayland_port.h"
+
+static volatile sig_atomic_t interrupted;
+static volatile sig_atomic_t dump_requested;
+static lv_ft_info_t body_font;
+static lv_ft_info_t title_font;
+static lv_ft_info_t large_font;
+static lv_obj_t *conversation_page;
+static lv_obj_t *settings_page;
+static lv_obj_t *state_label;
+static lv_obj_t *connection_label;
+static lv_obj_t *question_label;
+static lv_obj_t *answer_label;
+static lv_obj_t *clock_label;
+static lv_obj_t *volume_slider;
+static lv_obj_t *volume_label;
+static lv_obj_t *stop_button;
+static lv_obj_t *eyes[2];
+static bool settings_visible;
+static bool demo;
+static bool connected;
+static uint32_t displayed_state = UINT32_MAX;
+static int displayed_volume = -1;
+static char displayed_question[256];
+static char displayed_answer[768];
+
+static uint64_t monotonic_ms(void) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return 0;
+    return (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
+}
+
+static void on_signal(int number) {
+    if (number == SIGUSR1)
+        dump_requested = 1;
+    else
+        interrupted = 1;
+}
+
+static lv_obj_t *panel(lv_obj_t *parent, int position_x, int position_y,
+                        int width, int height, uint32_t color, int radius) {
+    lv_obj_t *object = lv_obj_create(parent);
+    lv_obj_remove_style_all(object);
+    lv_obj_set_pos(object, position_x, position_y);
+    lv_obj_set_size(object, width, height);
+    lv_obj_set_style_bg_color(object, lv_color_hex(color), 0);
+    lv_obj_set_style_bg_opa(object, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(object, radius, 0);
+    lv_obj_clear_flag(object, LV_OBJ_FLAG_SCROLLABLE);
+    return object;
+}
+
+static lv_obj_t *label(lv_obj_t *parent, const char *text, int position_x, int position_y,
+                        int width, const lv_font_t *font, uint32_t color) {
+    lv_obj_t *object = lv_label_create(parent);
+    lv_obj_set_pos(object, position_x, position_y);
+    lv_obj_set_width(object, width);
+    lv_obj_set_style_text_font(object, font, 0);
+    lv_obj_set_style_text_color(object, lv_color_hex(color), 0);
+    lv_label_set_long_mode(object, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(object, text);
+    return object;
+}
+
+static void navigation(lv_event_t *event) {
+    settings_visible = lv_event_get_user_data(event) != NULL;
+    if (settings_visible)
+    {
+        lv_obj_add_flag(conversation_page, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(settings_page, LV_OBJ_FLAG_HIDDEN);
+    }
+    else
+    {
+        lv_obj_clear_flag(conversation_page, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(settings_page, LV_OBJ_FLAG_HIDDEN);
+    }
+    fprintf(stderr, "[ui] page=%s\n", settings_visible ? "settings" : "conversation");
+}
+
+static lv_obj_t *button(lv_obj_t *parent, const char *text, int position_x, int position_y,
+                         int width, lv_event_cb_t callback, void *user_data) {
+    lv_obj_t *object = lv_btn_create(parent);
+    lv_obj_set_pos(object, position_x, position_y);
+    lv_obj_set_size(object, width, 94);
+    lv_obj_set_style_radius(object, 25, 0);
+    lv_obj_set_style_bg_color(object, lv_color_hex(0x1c3034), 0);
+    lv_obj_set_style_shadow_width(object, 0, 0);
+    lv_obj_set_style_bg_color(object, lv_color_hex(0x284c50), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(object, LV_OPA_40, LV_STATE_DISABLED);
+    lv_obj_t *caption = label(object, text, 0, 0, width - 20, title_font.font, 0xd9e9e7);
+    lv_obj_set_style_text_align(caption, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_center(caption);
+    lv_obj_add_event_cb(object, callback, LV_EVENT_CLICKED, user_data);
+    return object;
+}
+
+static void stop_answer(lv_event_t *event) {
+    (void)event;
+    if (connected && !demo && xr_ui_client_command(XR_UI_STOP, 0) != 0)
+        lv_label_set_text(connection_label, "停止请求未发送，请稍后重试");
+}
+
+static void volume_changed(lv_event_t *event) {
+    (void)event;
+    unsigned int value = (unsigned int)lv_slider_get_value(volume_slider);
+    if (connected && !demo && xr_ui_client_command(XR_UI_VOLUME, value) != 0)
+        lv_label_set_text(connection_label, "音量请求未发送，请稍后重试");
+}
+
+static void exit_ui(lv_event_t *event) {
+    (void)event;
+    interrupted = 1;
+    fprintf(stderr, "[ui] exit requested\n");
+}
+
+static void build_conversation(lv_obj_t *screen) {
+    conversation_page = panel(screen, 0, 185, 1080, 1450, 0x0c171b, 0);
+    label(conversation_page, "很高兴见到你", 74, 16, 900, large_font.font, 0xf2f0e8);
+    label(conversation_page, "一句「小瑞小瑞」，开始我们的对话", 76, 101, 920,
+          body_font.font, 0x8ca5aa);
+    lv_obj_t *halo = panel(conversation_page, 259, 258, 562, 562, 0x10272b, LV_RADIUS_CIRCLE);
+    lv_obj_set_style_border_width(halo, 2, 0);
+    lv_obj_set_style_border_color(halo, lv_color_hex(0x294548), 0);
+    lv_obj_t *face = panel(halo, 59, 59, 440, 440, 0x17383b, LV_RADIUS_CIRCLE);
+    for (int index = 0; index < 2; index++)
+        eyes[index] = panel(face, 112 + index * 145, 163, 42, 86, 0x8fe3c3, 21);
+    panel(face, 194, 280, 52, 8, 0x8fe3c3, 4);
+    state_label = label(conversation_page, "等待语音服务连接", 80, 868, 920,
+                        title_font.font, 0xc8e8dc);
+    lv_obj_set_style_text_align(state_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_t *question = panel(conversation_page, 64, 980, 952, 170, 0x122327, 28);
+    label(question, "你说", 30, 22, 800, body_font.font, 0x6a9499);
+    question_label = label(question, "识别后的文字会显示在这里", 30, 77, 884,
+                           title_font.font, 0xdce5e4);
+    lv_obj_t *answer = panel(conversation_page, 64, 1172, 952, 255, 0x152b2d, 28);
+    label(answer, "小瑞", 30, 22, 800, body_font.font, 0x82c6b0);
+    answer_label = label(answer, "界面已就绪。语音连接后，"
+                         "这里将同步显示真实回答。",
+                         30, 77, 884, title_font.font, 0xe6eeea);
+    lv_obj_set_height(answer_label, 160);
+    lv_label_set_long_mode(answer_label, LV_LABEL_LONG_DOT);
+}
+
+static void build_settings(lv_obj_t *screen) {
+    settings_page = panel(screen, 0, 185, 1080, 1450, 0x0c171b, 0);
+    label(settings_page, "把小瑞调到刚刚好", 74, 16, 950, large_font.font, 0xf2f0e8);
+    label(settings_page, "触摸控制与语音主链路相互独立",
+          76, 105, 920, body_font.font, 0x8ca5aa);
+    lv_obj_t *card = panel(settings_page, 64, 240, 952, 350, 0x122327, 28);
+    label(card, "播放音量", 40, 38, 700, title_font.font, 0xdce5e4);
+    volume_label = label(card, "等待连接", 40, 110, 800, body_font.font, 0x82c6b0);
+    volume_slider = lv_slider_create(card);
+    lv_obj_set_pos(volume_slider, 55, 240);
+    lv_obj_set_size(volume_slider, 835, 22);
+    lv_slider_set_range(volume_slider, 10, 100);
+    lv_obj_set_style_bg_color(volume_slider, lv_color_hex(0x274346), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(volume_slider, lv_color_hex(0x8fe3c3), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(volume_slider, lv_color_hex(0xc9f7e7), LV_PART_KNOB);
+    lv_obj_add_event_cb(volume_slider, volume_changed, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_state(volume_slider, LV_STATE_DISABLED);
+    lv_obj_t *details = panel(settings_page, 64, 640, 952, 470, 0x122327, 28);
+    label(details, "设备与连接", 40, 38, 800, title_font.font, 0xdce5e4);
+    label(details, "RK3562 EVB2\n1080 × 1920 触摸屏\n"
+          "LVGL 8.4 / Wayland\n语音状态：由本机 IPC 上报",
+          40, 120, 860, body_font.font, 0x8ca5aa);
+    label(settings_page, "连接中断时控制会自动禁用，"
+          "不影响语音程序继续运行。",
+          76, 1180, 900, body_font.font, 0x8ca5aa);
+    button(settings_page, "退出界面", 64, 1250, 952, exit_ui, NULL);
+    label(settings_page, "退出后回到系统界面，语音继续运行。",
+          76, 1370, 900, body_font.font, 0x8ca5aa);
+    lv_obj_add_flag(settings_page, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void build_ui(void) {
+    lv_obj_t *screen = lv_scr_act();
+    lv_obj_set_style_bg_color(screen, lv_color_hex(0x0c171b), 0);
+    lv_obj_clear_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+    label(screen, "X I A O R U I", 74, 57, 500, &lv_font_montserrat_28, 0x8fe3c3);
+    clock_label = label(screen, "--:--", 814, 49, 200, &lv_font_montserrat_32, 0xf2f0e8);
+    label(screen, "小瑞 · 你的端侧语音伙伴", 74, 109, 900, body_font.font, 0x64838a);
+    build_conversation(screen);
+    build_settings(screen);
+    connection_label = label(screen, "语音 IPC 未连接，控制暂不可用", 76, 1660, 930,
+                             body_font.font, 0x7b989e);
+    button(screen, "对话", 64, 1750, 285, navigation, NULL);
+    stop_button = button(screen, "停止回答", 369, 1750, 342, stop_answer, NULL);
+    lv_obj_add_state(stop_button, LV_STATE_DISABLED);
+    button(screen, "设置", 731, 1750, 285, navigation, (void *)1);
+    label(screen, "ON DEVICE / PRIVATE BY DESIGN", 76, 1870, 900,
+          &lv_font_montserrat_16, 0x4a6970);
+}
+
+static void refresh(lv_timer_t *timer) {
+    (void)timer;
+    uint64_t now_ms = monotonic_ms();
+    xr_ui_client_tick(now_ms);
+    bool available = !demo && xr_ui_client_connected(now_ms);
+    if (available != connected)
+    {
+        connected = available;
+        displayed_state = UINT32_MAX;
+        const char *connection = connected ? "语音已连接 · 本机实时状态" :
+                                            "语音 IPC 未连接 · 控制暂不可用";
+        lv_label_set_text(connection_label, connection);
+        if (connected)
+        {
+            lv_obj_clear_state(volume_slider, LV_STATE_DISABLED);
+            lv_obj_clear_state(stop_button, LV_STATE_DISABLED);
+        }
+        else
+        {
+            lv_obj_add_state(volume_slider, LV_STATE_DISABLED);
+            lv_obj_add_state(stop_button, LV_STATE_DISABLED);
+            lv_label_set_text(state_label, "等待语音服务连接");
+            lv_label_set_text(volume_label, "等待连接");
+            displayed_volume = -1;
+        }
+    }
+    const xr_ui_message_t *status = xr_ui_client_status();
+    uint32_t state = demo ? (uint32_t)((now_ms / 5000) % 4) : status->state;
+    if ((connected || demo) && state != displayed_state)
+    {
+        static const char *states[] = {
+            "等你说一句「小瑞小瑞」", "我在听，请说",
+            "让我想一想", "正在回答你",
+        };
+        lv_label_set_text(state_label, states[state]);
+        displayed_state = state;
+    }
+    if (connected)
+    {
+        if (strcmp(displayed_question, status->question))
+        {
+            memcpy(displayed_question, status->question, sizeof(displayed_question));
+            lv_label_set_text(question_label, displayed_question);
+        }
+        if (strcmp(displayed_answer, status->answer))
+        {
+            memcpy(displayed_answer, status->answer, sizeof(displayed_answer));
+            lv_label_set_text(answer_label, displayed_answer);
+        }
+        if (((int)status->volume != displayed_volume ||
+             lv_slider_get_value(volume_slider) != (int)status->volume) &&
+            !lv_obj_has_state(volume_slider, LV_STATE_PRESSED))
+        {
+            char value[32];
+            displayed_volume = (int)status->volume;
+            snprintf(value, sizeof(value), "%d%%", displayed_volume);
+            lv_label_set_text(volume_label, value);
+            lv_slider_set_value(volume_slider, displayed_volume, LV_ANIM_OFF);
+        }
+    }
+    int eye_height = now_ms % 5000 < 180 ? 12 : 86;
+    for (int index = 0; index < 2; index++)
+    {
+        if (lv_obj_get_height(eyes[index]) != eye_height)
+        {
+            lv_obj_set_height(eyes[index], eye_height);
+            lv_obj_set_y(eyes[index], 163 + (86 - eye_height) / 2);
+        }
+    }
+    time_t timestamp = time(NULL);
+    struct tm local;
+    char clock_text[16];
+    if (localtime_r(&timestamp, &local) &&
+        strftime(clock_text, sizeof(clock_text), "%H:%M", &local))
+    {
+        if (strcmp(lv_label_get_text(clock_label), clock_text))
+            lv_label_set_text(clock_label, clock_text);
+    }
+}
+
+static int load_font(lv_ft_info_t *font, const char *path, unsigned int size) {
+    font->name = path;
+    font->weight = (uint16_t)size;
+    font->style = FT_FONT_STYLE_NORMAL;
+    return lv_ft_font_init(font) ? 0 : -1;
+}
+
+int main(int argc, char **argv) {
+    const char *snapshot = NULL;
+    const char *font_path = getenv("XR_UI_FONT");
+    const char *socket_path = getenv("XR_UI_SOCKET");
+    if (!font_path)
+        font_path = "/usr/share/fonts/source-han-sans-cn/SourceHanSansCN-Regular.otf";
+    if (!socket_path)
+        socket_path = "/run/xiaorui/frontend.sock";
+    for (int index = 1; index < argc; index++)
+    {
+        if (!strcmp(argv[index], "--demo"))
+            demo = true;
+        else if (!strcmp(argv[index], "--settings"))
+            settings_visible = true;
+        else if (!strcmp(argv[index], "--snapshot") && index + 1 < argc)
+            snapshot = argv[++index];
+        else
+        {
+            fprintf(stderr, "usage: %s [--demo] [--settings] [--snapshot output.ppm]\n", argv[0]);
+            return 2;
+        }
+    }
+    if (access(font_path, R_OK) != 0)
+    {
+        fprintf(stderr, "[ui] Chinese font unavailable: %s\n", font_path);
+        return 1;
+    }
+    if (xr_display_open(snapshot != NULL) != 0)
+    {
+        fprintf(stderr, "[ui] cannot initialize Wayland/LVGL display\n");
+        return 1;
+    }
+    int result = 1;
+    if (!lv_freetype_init(4, 4, 4 * 1024 * 1024) || load_font(&body_font, font_path, 28) ||
+        load_font(&title_font, font_path, 34) || load_font(&large_font, font_path, 58))
+    {
+        fprintf(stderr, "[ui] cannot initialize Chinese fonts\n");
+        goto cleanup;
+    }
+    if (!snapshot && !demo && xr_ui_client_open(socket_path) != 0)
+    {
+        fprintf(stderr, "[ui] cannot initialize IPC client\n");
+        goto cleanup;
+    }
+    struct sigaction action = {.sa_handler = on_signal};
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGINT, &action, NULL) != 0 ||
+        sigaction(SIGTERM, &action, NULL) != 0 ||
+        sigaction(SIGUSR1, &action, NULL) != 0)
+        goto cleanup;
+    build_ui();
+    if (settings_visible)
+    {
+        lv_obj_add_flag(conversation_page, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(settings_page, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (demo)
+    {
+        lv_label_set_text(connection_label,
+                          "界面预览模式 · 非真实语音状态 · 控制已禁用");
+        lv_label_set_text(question_label, "你叫什么名字？");
+        lv_label_set_text(answer_label,
+                          "我叫小瑞，是运行在开发板上的语音助手。"
+                          "很高兴认识你。");
+    }
+    lv_timer_create(refresh, 100, NULL);
+    refresh(NULL);
+    lv_refr_now(NULL);
+    if (snapshot)
+    {
+        result = xr_display_dump(snapshot) == 0 ? 0 : 1;
+        goto cleanup;
+    }
+    fprintf(stderr, "[ui] ready: 1080x1920, Wayland touch, demo=%d\n", demo);
+    result = 0;
+    while (!interrupted)
+    {
+        if (xr_display_pump() != 0)
+        {
+            result = 1;
+            break;
+        }
+        lv_timer_handler();
+        if (dump_requested)
+        {
+            dump_requested = 0;
+            const char *dump_path = getenv("XR_UI_DUMP");
+            if (dump_path && xr_display_dump(dump_path) != 0)
+                fprintf(stderr, "[ui] screenshot write failed\n");
+        }
+        struct timespec delay = {.tv_nsec = 10000000};
+        nanosleep(&delay, NULL);
+    }
+cleanup:
+    xr_ui_client_close();
+    xr_display_close();
+    return result;
+}

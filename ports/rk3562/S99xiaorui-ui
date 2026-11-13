@@ -1,0 +1,91 @@
+#!/bin/sh
+set -eu
+
+directory="${XR_UI_DIRECTORY:-/data/xiaorui-ui}"
+runtime="${XDG_RUNTIME_DIR:-/run}"
+display="${WAYLAND_DISPLAY:-wayland-0}"
+lock="${XR_UI_LOCK_FILE:-/run/xiaorui-ui.lock}"
+case "$display" in
+    /*) wayland_socket="$display" ;;
+    *) wayland_socket="$runtime/$display" ;;
+esac
+
+exec 9>"$lock"
+if ! flock -n 9; then
+    echo 'xiaorui-ui: another service operation is running' >&2
+    exit 1
+fi
+
+running_pids() {
+    for candidate in $(pgrep -x xiaorui_ui || :); do
+        executable="$(readlink "/proc/$candidate/exe" 2>/dev/null || :)"
+        if [ "$executable" = "$directory/xiaorui_ui" ]; then
+            echo "$candidate"
+        fi
+    done
+}
+
+start_ui() {
+    if [ -n "$(running_pids)" ]; then
+        echo 'xiaorui-ui: already running'
+        return 0
+    fi
+    if [ ! -x "$directory/xiaorui_ui" ] || [ ! -r "$directory/run.sh" ]; then
+        echo 'xiaorui-ui: executable or launcher missing' >&2
+        return 1
+    fi
+    attempts=0
+    while [ ! -S "$wayland_socket" ]; do
+        if [ "$attempts" -ge 20 ]; then
+            echo "xiaorui-ui: Wayland unavailable: $wayland_socket" >&2
+            return 1
+        fi
+        attempts=$((attempts + 1))
+        sleep 1
+    done
+    (setsid env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$display" \
+        XR_UI_DUMP="${XR_UI_DUMP:-/tmp/xiaorui-ui.ppm}" \
+        sh "$directory/run.sh" 9>&- >>"$directory/ui.log" 2>&1 </dev/null &)
+    attempts=0
+    while [ "$attempts" -lt 20 ]; do
+        if [ -n "$(running_pids)" ]; then
+            echo 'xiaorui-ui: started'
+            return 0
+        fi
+        attempts=$((attempts + 1))
+        sleep 0.1
+    done
+    echo "xiaorui-ui: failed to start; see $directory/ui.log" >&2
+    return 1
+}
+
+stop_ui() {
+    for candidate in $(running_pids); do
+        kill -TERM "$candidate"
+    done
+    attempts=0
+    while [ -n "$(running_pids)" ]; do
+        if [ "$attempts" -ge 5 ]; then
+            echo 'xiaorui-ui: graceful shutdown timed out' >&2
+            return 1
+        fi
+        attempts=$((attempts + 1))
+        sleep 1
+    done
+    echo 'xiaorui-ui: stopped'
+}
+
+case "${1:-}" in
+    start) start_ui ;;
+    stop) stop_ui ;;
+    restart) stop_ui; start_ui ;;
+    status)
+        if [ -n "$(running_pids)" ]; then
+            echo 'xiaorui-ui: running'
+        else
+            echo 'xiaorui-ui: stopped'
+            exit 1
+        fi
+        ;;
+    *) echo "usage: $0 {start|stop|restart|status}" >&2; exit 2 ;;
+esac

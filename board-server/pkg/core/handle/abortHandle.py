@@ -19,6 +19,7 @@ async def handleAbortMessage(conn: "ConnectionHandler"):
     owner = getattr(conn, "session_coordinator", None)
     if owner:
         owner.complete(conn.sentence_id, False)
+    conn.sentence_id = None
     conn.clear_queues()
     # 打断客户端说话状态
     await conn.websocket.send(

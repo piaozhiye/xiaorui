@@ -58,6 +58,7 @@ extern long syscall(long, ...);   /* -std=c11 下 glibc 不声明, reboot 子进
 #include "speech_route.h"
 #include "playback_control.h"
 #include "audio_cue.h"
+#include "ui_server.h"
 
 /* 提示音: ack=唤醒确认("哎我在请说"), hmm=指令应答("嗯", 350ms, 预留未用),
    fail=弃轮反馈("没听清"), 让干等一轮的用户知道设备还在、可以重说。 */
@@ -122,6 +123,50 @@ static int is_reboot_command(const char *cmd) {
 static const char *volume_state_path(void) {
     const char *p = getenv("XR_VOLUME_FILE");
     return (p && *p) ? p : "/data/xiaorui-server/xiaorui_volume";
+}
+
+typedef struct {
+    xr_ui_server_t *server;
+    backend_t *backend;
+    xr_session_t *session;
+    xr_vad_t *vad;
+    const xr_runtime_config_t *config;
+    int was_responding;
+    int abort_failed;
+} xr_ui_context_t;
+
+static double now_s(void);
+static void xr_tick(void);
+
+static int service_ui(xr_ui_context_t *context) {
+    if (!context->server) return 0;
+    int responding = context->session->state == XR_SESSION_RESPOND;
+    if (responding && !context->was_responding)
+        xr_ui_server_begin_turn(context->server);
+    context->was_responding = responding;
+    enum xr_ui_state state = responding ?
+        (context->session->pkt_n ? XR_UI_SPEAKING : XR_UI_THINKING) :
+        (context->vad->in_utt || xr_session_in_window(context->session, now_s()) ?
+         XR_UI_LISTENING : XR_UI_READY);
+    xr_ui_server_state(context->server, state, (unsigned int)g_vol_pct);
+    unsigned int volume = 0;
+    int command = xr_ui_server_poll(context->server, &volume);
+    if (command == XR_UI_VOLUME && context->config->volume_control) {
+        g_vol_pct = xr_volume_next(g_vol_pct, XR_VOL_SET, (int)volume);
+        xr_player_set_volume(g_vol_pct);
+        xr_volume_save(volume_state_path(), g_vol_pct);
+        fprintf(stderr, "[ui] volume=%d%%\n", g_vol_pct);
+    }
+    return command == XR_UI_STOP && responding;
+}
+
+static int service_ui_drain(void *opaque) {
+    xr_ui_context_t *context = opaque;
+    xr_tick();
+    if (!service_ui(context)) return 0;
+    context->abort_failed = be_abort(context->backend) != 0;
+    fprintf(stderr, "[ui] stop during drain\n");
+    return 1;
 }
 static int cue_load(const char *path, int16_t **out_pcm, size_t *out_n, const char *tag) {
     int rc = xr_cue_load(path, out_pcm, out_n);
@@ -567,6 +612,11 @@ int main(int argc, char **argv) {
         if (!be) { fprintf(stderr, "[xr] backend 创建失败(XR_BACKEND=%s)\n", bk ? bk : "local"); return 2; }
     }
 
+    xr_ui_context_t ui = {
+        .backend = be, .session = &ses, .vad = &vad, .config = config,
+    };
+    const char *ui_socket = getenv("XR_UI_SOCKET");
+
     xr_tick();   /* 看门狗基线: 重启路径内每处有界等待前都续命 */
     {
         pthread_t wd_tid;
@@ -576,6 +626,9 @@ int main(int argc, char **argv) {
     }
 
 restart:
+    xr_ui_server_close(ui.server);
+    ui.server = NULL;
+    ui.was_responding = 0;
     xr_playback_control_stop(&playback_control, g_vol_pct);
     /* 重连前清理: 播放/麦克风/残留流, 否则 asr_mic 被占死后永远进不来 */
     xr_player_drop();
@@ -606,6 +659,10 @@ restart:
         xr_player_start();
     }
     xr_session_note_ping(&ses, now_s());
+    if (ui_socket && *ui_socket) {
+        ui.server = xr_ui_server_open(ui_socket);
+        if (!ui.server) fprintf(stderr, "[ui] socket unavailable: %s\n", strerror(errno));
+    }
     printf("[xr] connected\n");
 
     if (g_fifo_fd < 0) {
@@ -685,6 +742,19 @@ restart:
 inject_wait:
     while (!got_sig) {
         xr_tick();   /* 每次迭代续命: 卡在 ALSA 读/RKNN 精修/poll 即停摆, 看门狗接管 */
+        if (service_ui(&ui)) {
+            xr_playback_control_stop(&playback_control, g_vol_pct);
+            if (be_abort(be) != 0) goto restart;
+            xr_player_drop();
+            if (capture_finish_turn(mic) < 0) goto restart;
+            xr_vad_clear_preroll(&vad);
+            xr_speech_kws_reset();
+            xr_session_end_turn_silent(&ses, now_s(), config->finish_cool_ms / 1000.0);
+            xr_session_set_echo_guard(&ses, now_s() + config->echo_guard_s);
+            xr_vad_reset_gate(&vad);
+            fprintf(stderr, "[ui] stop\n");
+            continue;
+        }
         if (ses.state == XR_SESSION_RESPOND) {
             xr_playback_control_tick(&playback_control, g_vol_pct);
             xr_music_command_t music_command;
@@ -737,7 +807,7 @@ inject_wait:
             size_t l = 0;
             char ev_text[256] = {0};
             backend_ev_t ev = be_poll_event(be, wsbuf, sizeof(wsbuf), &l,
-                                            ev_text, sizeof(ev_text), 1000);
+                                            ev_text, sizeof(ev_text), ui.server ? 50 : 1000);
             if (ev == EV_ERROR) { fprintf(stderr, "[xr] ws 断(播放期)\n"); goto restart; }
             if (ev == EV_ANNOUNCE_REQUEST) {
                 if (be_announce_reply(be, ev_text, 0)) goto restart;
@@ -831,10 +901,8 @@ inject_wait:
                     xr_session_awake(&ses, now_s());
                     if (xr_player_start() == 0 && ack_pcm) {
                         xr_player_push_pcm(ack_pcm, ack_n);
-                        xr_session_set_cool(&ses, now_s(),
-                                            (double)ack_n / 24000.0 + config->ack_cool_ms / 1000.0);
-                        xr_session_set_echo_guard(&ses, now_s() + (double)ack_n / 24000.0
-                                                  + config->echo_guard_s);
+                        xr_session_note_ack(&ses, now_s(), (double)ack_n / 24000.0,
+                                            config->ack_cool_ms / 1000.0);
                     }
                     fprintf(stderr, "[xr] 服务端静默回执(唤醒): 直接进跟说窗\n");
                 } else {
@@ -844,7 +912,10 @@ inject_wait:
             }
             if (ev == EV_TTS_STOP) {
                 xr_playback_control_stop(&playback_control, g_vol_pct);
-                xr_player_finish();            /* drain: 1.9s 缓冲自然播完, 句尾不截 */
+                ui.abort_failed = 0;
+                int cancelled = xr_player_finish_with_poll(
+                    ui.server ? service_ui_drain : NULL, &ui);
+                if (ui.abort_failed) goto restart;
                 /* 回答期间没有读麦克风，丢弃 ALSA 积压的自身播音，避免回声成为下一轮指令。 */
                 if (capture_finish_turn(mic) < 0) goto restart;
                 xr_vad_clear_preroll(&vad);
@@ -853,7 +924,7 @@ inject_wait:
                    静默实测里这种轮次会白送 30s 免唤醒, 之后屋里随口一句话就被
                    当"跟说"直接上云 —— 用户听到的就是"莫名其妙答话"。只有真出过
                    声的轮次才续窗。 */
-                int answered = ses.pkt_n > 0;
+                int answered = ses.pkt_n > 0 && !cancelled;
                 if (answered)
                     xr_session_end_turn(&ses, now_s(), config->finish_cool_ms / 1000.0);
                 else
@@ -865,6 +936,7 @@ inject_wait:
                 else
                     fprintf(stderr, "[xr] 空轮(零音频)收轮, 不开跟说窗\n");
             } else if (ev == EV_STT) {
+                xr_ui_server_text(ui.server, true, (const char *)wsbuf);
                 fprintf(stderr, "[xr] ASR 回执: %s\n", ev_text);
             } else if (ev == EV_REBOOT) {
                 /* 语音重启(服务端判定): sync 后整机重启, 自启链拉起本进程 */
@@ -904,6 +976,7 @@ inject_wait:
                 xr_vad_reset_gate(&vad);
                 fprintf(stderr, "[xr] 回答完毕, 30s 内免唤醒\n");
             } else if (ev == EV_TTS_START) {
+                xr_ui_server_text(ui.server, false, (const char *)wsbuf);
                 /* 控制线程覆盖全部播放期(2026-10-16): 音乐+LLM 回答都可
                  * 语音停/调音量; duck 只在音乐轮(回答轮自听不压低)。
                  * USB capture only: VQE/fifo ownership stays unchanged. */
@@ -1180,10 +1253,8 @@ inject_wait:
                         xr_player_push_pcm(ack_pcm, ack_n);
                         /* 确认音仍处于 LISTEN; 板麦在室内容易把 ack 余音
                            收成"好"之类短句并误开跟说窗(20:xx 实测), 余音冷却加长。 */
-                        xr_session_set_cool(&ses, now_s(),
-                                            (double)ack_n / 24000.0 + config->ack_cool_ms / 1000.0);
-                        xr_session_set_echo_guard(&ses, now_s() + (double)ack_n / 24000.0
-                                                  + config->echo_guard_s);
+                        xr_session_note_ack(&ses, now_s(), (double)ack_n / 24000.0,
+                                            config->ack_cool_ms / 1000.0);
                     }
                     continue;
                 }
@@ -1263,5 +1334,6 @@ inject_wait:
     xr_player_drop();
     be_disconnect(be);
     if (mic) { xr_capture_drop(mic); xr_capture_close(mic); }
+    xr_ui_server_close(ui.server);
     return 0;
 }

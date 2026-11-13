@@ -78,3 +78,4 @@ ports/rk3562/resmon.sh
 ports/rk3562/ha-ab.sh
 ports/rk3562/say-tests.sh
 ports/rk3562/to48k-stereo.py
+ui/build/

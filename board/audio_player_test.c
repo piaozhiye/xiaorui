@@ -2,11 +2,14 @@
 #include <assert.h>
 #include <errno.h>
 #include <stdio.h>
+#include <stdatomic.h>
+#include <sched.h>
 #include <string.h>
 
 static int opened, closed, prepared, inject_underrun;
 static size_t written;
 static long long checksum;
+static atomic_int hold_drain;
 static int open_fake(snd_pcm_t **p, const char *name, int stream, int flags) {
     (void)stream; (void)flags; assert(!strcmp(name,"xr_spk"));
     *p = (snd_pcm_t *)&opened; ++opened; return 0;
@@ -36,6 +39,19 @@ static int close_fake(snd_pcm_t *p) { (void)p; ++closed; return 0; }
 static int no_op(snd_pcm_t *p) { (void)p; return 0; }
 static const char *error_fake(int e) { (void)e; return "test error"; }
 
+static int drain_fake(snd_pcm_t *pcm) {
+    (void)pcm;
+    while (atomic_load(&hold_drain)) sched_yield();
+    return 0;
+}
+
+static int cancel_poll(void *context) {
+    int *calls = context;
+    (*calls)++;
+    atomic_store(&hold_drain, 0);
+    return 1;
+}
+
 int main(void) {
     const xr_audio_output_ops_t ops = {
         .a_open=open_fake, .a_hwp_malloc=alloc_fake, .a_hwp_any=any_fake,
@@ -44,7 +60,7 @@ int main(void) {
         .a_set_ps=period_fake, .a_set_periods=rate_fake,
         .a_hwp=any_fake, .a_hwp_free=free_fake, .a_prepare=prepare_fake,
         .a_writei=write_fake, .a_drop=no_op, .a_close=close_fake,
-        .a_drain=no_op, .a_strerror=error_fake,
+        .a_drain=drain_fake, .a_strerror=error_fake,
     };
     assert(xr_player_init(&ops)==0);
     int16_t pcm[7200];
@@ -63,6 +79,13 @@ int main(void) {
     xr_player_push_pcm(pcm,7200);
     xr_player_finish();
     assert(written==14400 && checksum==2*expected);
+    xr_player_drop();
+    atomic_store(&hold_drain, 1);
+    assert(xr_player_start() == 0);
+    int calls = 0;
+    int cancelled = xr_player_finish_with_poll(cancel_poll, &calls);
+    assert(cancelled == 1 && calls == 1);
+    assert(xr_player_start() == 0);
     xr_player_drop();
     puts("audio player queue/partial write/underrun/restart tests passed");
     return 0;
