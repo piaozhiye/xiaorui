@@ -61,7 +61,7 @@ static uint64_t last_memory_ms;
 static int displayed_volume = -1;
 static int displayed_speaking = -1;
 static char displayed_question[256];
-static char displayed_answer[4096];
+static char displayed_answer[XR_UI_ANSWER_CAPACITY];
 
 static const uint32_t state_palette[4] = {0x8ca5aa, 0x8fe3c3, 0xf0d38a, 0xa8d8f0};
 static const char *state_text[4] = {
@@ -189,7 +189,8 @@ static void exit_ui(lv_event_t *event) {
     {
         exit_armed = true;
         exit_armed_at = (uint32_t)monotonic_ms();
-        if (exit_caption) lv_label_set_text(exit_caption, "确认退出？");
+        if (exit_caption)
+            lv_label_set_text(exit_caption, fonts_ready ? "确认退出？" : "CONFIRM EXIT?");
         fprintf(stderr, "[ui] exit requested (press again to confirm)\n");
         return;
     }
@@ -296,6 +297,7 @@ static void build_conversation(lv_obj_t *screen) {
     answer_label = label(answer_card, answer_placeholder,
                           30, 60, 884, title_font.font, 0xe6eeea);
     /* 长回答要能往下翻: 卡片竖向可滚, 文字自然高度 */
+    lv_obj_add_flag(answer_card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(answer_card, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(answer_card, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_bg_opa(answer_card, LV_OPA_60, LV_PART_SCROLLBAR);
@@ -389,14 +391,15 @@ static void refresh(lv_timer_t *timer) {
     (void)timer;
     uint64_t now_ms = monotonic_ms();
     xr_ui_client_tick(now_ms);
-    if (!fonts_ready)
-        return;
-    refresh_header();
     if (exit_armed && (uint32_t)now_ms - exit_armed_at > 3000)
     {
         exit_armed = false;
-        if (exit_caption) lv_label_set_text(exit_caption, "退出界面");
+        if (exit_caption)
+            lv_label_set_text(exit_caption, fonts_ready ? "退出界面" : "EXIT");
     }
+    if (!fonts_ready)
+        return;
+    refresh_header();
     bool available = !demo && xr_ui_client_connected(now_ms);
     if (available != connected)
     {
@@ -609,12 +612,12 @@ int main(int argc, char **argv) {
         sigaction(SIGUSR1, &action, NULL) != 0)
         goto cleanup;
     build_ui();
-    if (settings_visible)
+    if (fonts_ready && settings_visible)
     {
         lv_obj_add_flag(conversation_page, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(settings_page, LV_OBJ_FLAG_HIDDEN);
     }
-    if (demo)
+    if (fonts_ready && demo)
     {
         lv_label_set_text(connection_label,
                           "界面预览模式 · 非真实语音状态 · 控制已禁用");

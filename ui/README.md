@@ -94,6 +94,9 @@ adb -s SERIAL shell 'sh /etc/init.d/S99xiaorui-ui status'
 `ui/build/native/xiaorui_ui --demo --snapshot /tmp/xiaorui.ppm`。
 可加 `--settings` 直接预览设置页；主机 Wayland 库如需覆盖，使用
 `XR_HOST_WAYLAND_LIBRARY`，与交叉构建的目标板库设置分开。
+主机运行时回归测试用 `bash ui/test.sh`，沿用 native 构建的 LVGL/XML 环境变量；
+可通过 `XR_UI_TEST_FONT` 指定主机中文字体。测试覆盖长回答滚动、手动翻阅后的跟随、
+缺字体时的预览参数组合与退出确认。
 运行期间设置 `XR_UI_DUMP=/tmp/xiaorui.ppm`，发送 SIGUSR1 可保存本进程画面；
 不会截取其他应用或访问 DRM。
 

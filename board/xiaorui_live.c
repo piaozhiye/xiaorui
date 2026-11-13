@@ -820,7 +820,7 @@ inject_wait:
             /* 播放期: 只收 ws; 文本事件打印, 音频解码直写, stop 排干恢复.
                LLM 首句可能 >10s, ws_recv 超时(返 0)继续等不算断线. */
             size_t l = 0;
-            char ev_text[256] = {0};
+            char ev_text[XR_UI_ANSWER_CAPACITY] = {0};
             /* 只有真有 UI 客户端在看时才把 ws 轮询降到 50ms。UI 每 500ms 问
                一次状态, 2s 内问过就算"有人在看"; 没 UI 时回到 1000ms, 即
                UI 提交之前的行为, 回答期不必 20Hz 空转。

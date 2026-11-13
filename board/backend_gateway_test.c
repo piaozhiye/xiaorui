@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "backend.h"
+#include "ui_protocol.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -105,12 +106,12 @@ int main(int argc, char **argv) {
         printf("gateway announce passed\n");
         return 0;
     }
-    if (!strcmp(argv[1], "text-events")) {
+    if (!strncmp(argv[1], "text-events", 11)) {
         /* 线上真实报文: 网关 json.dumps 默认 ensure_ascii=True, 冒号后带空格,
            中文是 \uXXXX 转义。ev_text 必须是解码后的 UTF-8 明文, 否则 UI
            字幕/ASR 回执拿到的是转义串或空串。 */
         assert(be_submit_text(b, "gateway test") == 0);
-        unsigned char tbuf[4096]; char ttext[4096]; size_t tlen;
+        unsigned char tbuf[4096]; char ttext[XR_UI_ANSWER_CAPACITY]; size_t tlen;
         backend_ev_t ev = be_poll_event(b, tbuf, sizeof(tbuf), &tlen,
                                        ttext, sizeof(ttext), 1000);
         assert(ev == EV_STT);
@@ -121,6 +122,13 @@ int main(int argc, char **argv) {
         ev = be_poll_event(b, tbuf, sizeof(tbuf), &tlen, ttext, sizeof(ttext), 1000);
         assert(ev == EV_TTS_START);
         assert(ttext[0] == 0);
+        char expected[XR_UI_ANSWER_CAPACITY] = {0};
+        for (size_t index = 0; index < 300; index++)
+            memcpy(expected + index * strlen("长"), "长", strlen("长"));
+        strcat(expected, "说\"你好\"😀结束");
+        ev = be_poll_event(b, tbuf, sizeof(tbuf), &tlen, ttext, sizeof(ttext), 1000);
+        assert(ev == EV_TTS_START);
+        assert(!strcmp(ttext, expected));
         be_disconnect(b);
         puts("gateway text events passed");
         return 0;
