@@ -69,6 +69,9 @@ static const char *state_text[4] = {
 };
 static const char *question_placeholder = "说点什么，识别后的文字会显示在这里";
 static const char *answer_placeholder = "小瑞的回答会显示在这里";
+/* 静音时保留的待机微光(%)。纯电平为 0 时脸是全暗的, 观感偏死;
+   15 与之前被整数除法钉住的亮度一致, 说话时在此之上叠加。 */
+#define IDLE_GLOW 15
 
 static uint64_t monotonic_ms(void) {
     struct timespec now;
@@ -465,7 +468,7 @@ static void refresh(lv_timer_t *timer) {
     /* 麦克风电平: 眼睛和光圈跟着人说话亮起来 */
     int target_level = connected ? (int)status->level : 0;
     /* 整数除法在差值 <4 时得 0, 直接加会停在离目标 3 的地方(和前端同款坑),
-       保证每次至少走 1, 静音时才能真的回到全暗 */
+       保证每次至少走 1, 静音时才能真的回到待机微光 */
     int level_delta = target_level - ui_level;
     if (level_delta)
     {
@@ -475,8 +478,10 @@ static void refresh(lv_timer_t *timer) {
     }
     if (ui_level < 0) ui_level = 0;
     if (ui_level > 100) ui_level = 100;
-    uint32_t eye_color = mix_color(0x2c6a60, 0x8fe3c3, ui_level);
-    uint32_t ring_color = mix_color(0x1e3d3e, 0x3f8f7a, ui_level);
+    int glow = ui_level + IDLE_GLOW;
+    if (glow > 100) glow = 100;
+    uint32_t eye_color = mix_color(0x2c6a60, 0x8fe3c3, glow);
+    uint32_t ring_color = mix_color(0x1e3d3e, 0x3f8f7a, glow);
     if (eye_color != displayed_eye_color)
     {
         displayed_eye_color = eye_color;
