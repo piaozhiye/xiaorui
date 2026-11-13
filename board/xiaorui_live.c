@@ -133,6 +133,7 @@ typedef struct {
     const xr_runtime_config_t *config;
     int was_responding;
     int content_seen;
+    int level;
     int abort_failed;
 } xr_ui_context_t;
 
@@ -1049,6 +1050,18 @@ inject_wait:
         long n = mic_read(mic, frame, FRAME_SAMPLES);
         if (n == -EPIPE) { xr_capture_prepare(mic); continue; }
         if (n < 0) { fprintf(stderr, "[xr] mic: %s\n", xr_audio_error((int)n)); sleep(2); goto restart; }
+        /* 麦克风电平给界面用(眼睛/声浪跟着人说话动): 相对底噪的 dB 映射成
+           0..100, 上去快下来慢, 不然数值乱跳 */
+        {
+            double level_db = xr_vad_frame_db(frame, FRAME_SAMPLES);
+            double reference = xr_vad_noise_db(&vad);
+            int level = (int)((level_db - reference) * 3.0);
+            if (level < 0) level = 0;
+            if (level > 100) level = 100;
+            if (level > ui.level) ui.level = level;
+            else ui.level -= (ui.level - level) / 16;
+            xr_ui_server_level(ui.server, (unsigned int)ui.level);
+        }
         /* 调试(XR_UTT_DUMP=<dir>): 落原始帧 + 上传前的句子, 用于现场比对
            "麦克风到底收到了什么" 与 "云端听到了什么"。不设变量时零开销。 */
         dump_raw_frame(frame, n);

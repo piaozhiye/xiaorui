@@ -13,7 +13,8 @@ class Message(ctypes.Structure):
     _fields_ = [
         ("magic", ctypes.c_uint32), ("version", ctypes.c_uint32),
         ("type", ctypes.c_uint32), ("state", ctypes.c_uint32),
-        ("volume", ctypes.c_uint32), ("question", ctypes.c_char * 256),
+        ("volume", ctypes.c_uint32), ("level", ctypes.c_uint32),
+        ("question", ctypes.c_char * 256),
         ("answer", ctypes.c_char * 4096),
     ]
 
@@ -47,7 +48,7 @@ def status():
 
 def test_status_validation(client):
     message = status()
-    assert ctypes.sizeof(message) == 4372
+    assert ctypes.sizeof(message) == 4376
     assert client.xr_ui_message_valid(ctypes.byref(message), ctypes.sizeof(message))
     for field, value in [("magic", 0), ("version", 2), ("type", 4), ("state", 4),
                          ("volume", 0), ("volume", 101)]:

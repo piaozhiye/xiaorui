@@ -125,6 +125,11 @@ void xr_ui_server_state(xr_ui_server_t *server, enum xr_ui_state state, unsigned
     server->status.volume = volume;
 }
 
+void xr_ui_server_level(xr_ui_server_t *server, unsigned int level) {
+    if (!server) return;
+    server->status.level = level > 100 ? 100 : level;
+}
+
 void xr_ui_server_text(xr_ui_server_t *server, bool question, const char *text) {
     if (!server || !text || !text[0]) return;
     if (question) {

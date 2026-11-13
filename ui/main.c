@@ -36,6 +36,11 @@ static lv_obj_t *answer_card;
 static lv_obj_t *greeting_label;
 static lv_obj_t *date_label;
 static lv_obj_t *exit_caption;
+static lv_obj_t *halo;
+static lv_obj_t *service_label;
+static lv_obj_t *detail_volume;
+static lv_obj_t *memory_label;
+static lv_obj_t *uptime_label;
 static lv_obj_t *eyes[2];
 static bool settings_visible;
 static bool demo;
@@ -48,6 +53,11 @@ static const lv_font_t *caption_font;
 static const char *font_path_used;
 static uint32_t displayed_state = UINT32_MAX;
 static int displayed_hour = -1;
+static int ui_level;
+static uint32_t displayed_eye_color;
+static uint32_t displayed_ring_color;
+static uint64_t started_ms;
+static uint64_t last_memory_ms;
 static int displayed_volume = -1;
 static int displayed_speaking = -1;
 static char displayed_question[256];
@@ -65,6 +75,28 @@ static uint64_t monotonic_ms(void) {
     if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
         return 0;
     return (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
+}
+
+/* 两个颜色按百分比混 */
+static uint32_t mix_color(uint32_t from, uint32_t to, int percent) {
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+    int red = (int)(((from >> 16) & 0xff) * (100 - percent) + ((to >> 16) & 0xff) * percent) / 100;
+    int green = (int)(((from >> 8) & 0xff) * (100 - percent) + ((to >> 8) & 0xff) * percent) / 100;
+    int blue = (int)((from & 0xff) * (100 - percent) + (to & 0xff) * percent) / 100;
+    return ((uint32_t)red << 16) | ((uint32_t)green << 8) | (uint32_t)blue;
+}
+
+/* 界面自己占多少内存 */
+static int read_rss_kb(void) {
+    FILE *status = fopen("/proc/self/status", "r");
+    if (!status) return 0;
+    char line[256];
+    int kilobytes = 0;
+    while (fgets(line, sizeof(line), status))
+        if (!strncmp(line, "VmRSS:", 6)) { kilobytes = atoi(line + 6); break; }
+    fclose(status);
+    return kilobytes;
 }
 
 static void on_signal(int number) {
@@ -241,7 +273,7 @@ static void build_conversation(lv_obj_t *screen) {
                            large_font.font, 0xf2f0e8);
     label(conversation_page, "一句「小瑞小瑞」，开始我们的对话", 76, 101, 920,
           body_font.font, 0x8ca5aa);
-    lv_obj_t *halo = panel(conversation_page, 259, 258, 562, 562, 0x10272b, LV_RADIUS_CIRCLE);
+    halo = panel(conversation_page, 259, 258, 562, 562, 0x10272b, LV_RADIUS_CIRCLE);
     lv_obj_set_style_border_width(halo, 2, 0);
     lv_obj_set_style_border_color(halo, lv_color_hex(0x294548), 0);
     lv_obj_t *face = panel(halo, 59, 59, 440, 440, 0x17383b, LV_RADIUS_CIRCLE);
@@ -279,19 +311,31 @@ static void build_settings(lv_obj_t *screen) {
     label(card, "播放音量", 40, 38, 700, title_font.font, 0xdce5e4);
     volume_label = label(card, "等待连接", 40, 110, 800, body_font.font, 0x82c6b0);
     volume_slider = lv_slider_create(card);
-    lv_obj_set_pos(volume_slider, 55, 240);
+    lv_obj_set_pos(volume_slider, 55, 200);
     lv_obj_set_size(volume_slider, 835, 22);
     lv_slider_set_range(volume_slider, 10, 100);
     lv_obj_set_style_bg_color(volume_slider, lv_color_hex(0x274346), LV_PART_MAIN);
     lv_obj_set_style_bg_color(volume_slider, lv_color_hex(0x8fe3c3), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_grad_color(volume_slider, lv_color_hex(0x8fe3c3), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_grad_dir(volume_slider, LV_GRAD_DIR_HOR, LV_PART_INDICATOR);
     lv_obj_set_style_bg_color(volume_slider, lv_color_hex(0xc9f7e7), LV_PART_KNOB);
     lv_obj_add_event_cb(volume_slider, volume_changed, LV_EVENT_RELEASED, NULL);
     lv_obj_add_state(volume_slider, LV_STATE_DISABLED);
+    label(card, "10", 52, 240, 120, tag_font, 0x6a9499);
+    label(card, "50", 450, 240, 120, tag_font, 0x6a9499);
+    label(card, "100", 800, 240, 120, tag_font, 0x6a9499);
     lv_obj_t *details = panel(settings_page, 64, 640, 952, 470, 0x122327, 28);
     label(details, "设备与连接", 40, 38, 800, title_font.font, 0xdce5e4);
-    label(details, "RK3562 EVB2\n1080 × 1920 触摸屏\n"
-          "LVGL 8.4 / Wayland\n语音状态：由本机 IPC 上报",
-          40, 120, 860, body_font.font, 0x8ca5aa);
+    label(details, "语音服务", 40, 120, 280, body_font.font, 0x8ca5aa);
+    service_label = label(details, "未连接", 320, 120, 560, body_font.font, 0x82c6b0);
+    label(details, "语音状态", 40, 185, 280, body_font.font, 0x8ca5aa);
+    detail_volume = label(details, "--", 320, 185, 560, body_font.font, 0x82c6b0);
+    label(details, "界面内存", 40, 250, 280, body_font.font, 0x8ca5aa);
+    memory_label = label(details, "--", 320, 250, 560, body_font.font, 0x82c6b0);
+    label(details, "运行时长", 40, 315, 280, body_font.font, 0x8ca5aa);
+    uptime_label = label(details, "--", 320, 315, 560, body_font.font, 0x82c6b0);
+    label(details, "RK3562 EVB2 · 1080×1920 · LVGL 8.4 / Wayland",
+          40, 390, 880, tag_font, 0x64798a);
     label(settings_page, "连接中断时控制会自动禁用，"
           "不影响语音程序继续运行。",
           76, 1180, 900, body_font.font, 0x8ca5aa);
@@ -418,6 +462,51 @@ static void refresh(lv_timer_t *timer) {
             lv_slider_set_value(volume_slider, displayed_volume, LV_ANIM_OFF);
         }
     }
+    /* 麦克风电平: 眼睛和光圈跟着人说话亮起来 */
+    int target_level = connected ? (int)status->level : 0;
+    ui_level += (target_level - ui_level) / 4;
+    if (ui_level < 0) ui_level = 0;
+    if (ui_level > 100) ui_level = 100;
+    uint32_t eye_color = mix_color(0x2c6a60, 0x8fe3c3, ui_level);
+    uint32_t ring_color = mix_color(0x1e3d3e, 0x3f8f7a, ui_level);
+    if (eye_color != displayed_eye_color)
+    {
+        displayed_eye_color = eye_color;
+        for (int index = 0; index < 2; index++)
+            lv_obj_set_style_bg_color(eyes[index], lv_color_hex(eye_color), 0);
+    }
+    if (ring_color != displayed_ring_color)
+    {
+        displayed_ring_color = ring_color;
+        if (halo) lv_obj_set_style_border_color(halo, lv_color_hex(ring_color), 0);
+    }
+    if (service_label)
+    {
+        const char *service = connected ? "已连接 · 本机 IPC" : "未连接";
+        if (strcmp(lv_label_get_text(service_label), service))
+            lv_label_set_text(service_label, service);
+    }
+    if (detail_volume)
+    {
+        const char *phase = connected ? state_text[state] : "--";
+        if (strcmp(lv_label_get_text(detail_volume), phase))
+            lv_label_set_text(detail_volume, phase);
+    }
+    if (uptime_label)
+    {
+        char value[32];
+        snprintf(value, sizeof(value), "%u 分钟", (unsigned int)((now_ms - started_ms) / 60000));
+        if (strcmp(lv_label_get_text(uptime_label), value))
+            lv_label_set_text(uptime_label, value);
+    }
+    if (memory_label && now_ms - last_memory_ms > 5000)
+    {
+        last_memory_ms = now_ms;
+        char value[32];
+        snprintf(value, sizeof(value), "%d MB", read_rss_kb() / 1024);
+        if (strcmp(lv_label_get_text(memory_label), value))
+            lv_label_set_text(memory_label, value);
+    }
     int eye_height = eye_height_at(now_ms, state == XR_UI_SPEAKING);
     for (int index = 0; index < 2; index++)
     {
@@ -468,6 +557,7 @@ int main(int argc, char **argv) {
         }
     }
     font_path_used = font_path;
+    started_ms = monotonic_ms();
     if (xr_display_open(snapshot != NULL) != 0)
     {
         fprintf(stderr, "[ui] cannot initialize Wayland/LVGL display\n");

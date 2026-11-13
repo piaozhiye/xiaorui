@@ -15,10 +15,11 @@ typedef struct {
     uint32_t type;
     uint32_t state;
     uint32_t volume;
+    uint32_t level;      /* 麦克风电平 0..100, 给界面做反馈 */
     char question[256];
     char answer[4096];
 } xr_ui_message_t;
 
-_Static_assert(sizeof(xr_ui_message_t) == 4372, "Unexpected UI wire layout");
+_Static_assert(sizeof(xr_ui_message_t) == 4376, "Unexpected UI wire layout");
 
 #endif

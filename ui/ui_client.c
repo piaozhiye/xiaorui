@@ -59,7 +59,8 @@ int xr_ui_client_command(enum xr_ui_message_type type, unsigned int value) {
 void xr_ui_client_tick(uint64_t now_ms) {
     if (descriptor < 0)
         return;
-    if (now_ms - last_query >= 500)
+    /* 100ms 问一次: 麦克风电平要跟得上, 界面才有"在听"的动态 */
+    if (now_ms - last_query >= 100)
     {
         last_query = now_ms;
         if (xr_ui_client_command(XR_UI_QUERY, 0) != 0 &&

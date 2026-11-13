@@ -12,6 +12,8 @@ void xr_ui_server_close(xr_ui_server_t *server);
    注意不能在"进入 RESPOND"时清 —— 那种轮次可能被网关当噪声丢掉,
    清了就把用户刚问的和刚答的全擦了。 */
 void xr_ui_server_turn_begin(xr_ui_server_t *server);
+/* 麦克风电平 0..100 */
+void xr_ui_server_level(xr_ui_server_t *server, unsigned int level);
 void xr_ui_server_state(xr_ui_server_t *server, enum xr_ui_state state, unsigned int volume);
 /* text 为已解码的 UTF-8 明文(问句/回答分句), 不再传 JSON */
 void xr_ui_server_text(xr_ui_server_t *server, bool question, const char *text);
