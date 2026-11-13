@@ -53,25 +53,13 @@ LVGL 依赖的头文件、库及其许可应由使用者保留；这些二进制
 
 ## 构建
 
-依赖与参考工程匹配的 LVGL 8.4 SDK（`include/lvgl`、`include/lv_conf.h`、
-`lib/aarch64/liblvgl.so` 或 `lib/x86/liblvgl.so`），32-bit 色深及 FreeType 必须启用。
-不能只换库、不换配置头文件；现有参考工程库可通过 `XR_LVGL_ROOT` 指向。
-PC 需要 wayland-scanner、Wayland 客户端开发头，交叉工具链见 RK3562 复现说明。
-
-一个现成的公开来源是 [rk-eqdrc-tuner](https://github.com/piaozhiye/rk-eqdrc-tuner)：
-它的 `include/lvgl`、`include/lv_conf.h`、`lib/aarch64/liblvgl.so`、`lib/x86/liblvgl.so`
-就是 LVGL 8.4.1 的未修改构建（MIT，来源与许可见该仓 `NOTICE`）。本仓构建即指向它：
+LVGL 8.4 的头文件与预编译库已随仓放在 `ui/third_party/lvgl/`（上游 8.4.0，
+32-bit 色深 + FreeType，MIT，许可证原文同目录），`ui/build.sh` 默认就用它，
+不需要额外准备 SDK。要换别的同版本 SDK 时设 `XR_LVGL_ROOT`——库和 `lv_conf.h`
+必须配套，不能只换库。PC 需要 wayland-scanner、Wayland 客户端开发头，交叉工具链
+见 RK3562 复现说明。
 
 ```bash
-git clone https://github.com/piaozhiye/rk-eqdrc-tuner.git
-export XR_LVGL_ROOT="$PWD/rk-eqdrc-tuner"
-```
-
-也用上游 LVGL 8.4.1 源码按同一份 `lv_conf.h` 自行重编（32-bit 色深 + FreeType），
-不依赖该仓。
-
-```bash
-export XR_LVGL_ROOT="$PWD/rk-eqdrc-tuner"   # 或自备的 LVGL 8.4 SDK
 export XR_TOOLCHAIN_ROOT=/path/to/aarch64-buildroot-toolchain
 mkdir -p ui/build/deps
 adb -s SERIAL pull /usr/lib/libwayland-client.so.0 ui/build/deps/

@@ -2,7 +2,9 @@
 set -euo pipefail
 
 directory="$(cd "$(dirname "$0")" && pwd)"
-lvgl_root="${XR_LVGL_ROOT:?Set XR_LVGL_ROOT to the LVGL 8.4 SDK with matching include/ and lib/}"
+# 默认用仓内 vendored 的 LVGL 8.4（头文件 + 预编译库，MIT）；需要换 SDK 时设
+# XR_LVGL_ROOT 覆盖即可。
+lvgl_root="${XR_LVGL_ROOT:-$directory/third_party/lvgl}"
 mode="${1:-aarch64}"
 case "$mode" in
     aarch64)

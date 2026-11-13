@@ -31,6 +31,8 @@ tests/audio/
 Linux_11.4.0_x86_64/
 # vendor 例外: 部署可复现需要补丁版插件二进制
 !vendor/rkaudio-vqe/*.so
+# UI 构建依赖: vendored LVGL 8.4 预编译库(上游 MIT, 见 ui/third_party/lvgl)
+!ui/third_party/lvgl/lib/*/liblvgl.so
 # 提示音例外: 板上提示音在仓库的唯一权威副本(部署可复现+可回溯 SHA)
 !board-server/cues/*.wav
 *.p3

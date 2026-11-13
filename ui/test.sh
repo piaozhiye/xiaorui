@@ -2,7 +2,7 @@
 set -euo pipefail
 
 directory="$(cd "$(dirname "$0")" && pwd)"
-lvgl_root="${XR_LVGL_ROOT:?Set XR_LVGL_ROOT to the LVGL 8.4 SDK}"
+lvgl_root="${XR_LVGL_ROOT:-$directory/third_party/lvgl}"
 bash "$directory/build.sh" native
 build="$directory/build/native"
 "${CC:-gcc}" -std=c11 -O2 -g -Wall -Wextra -Werror \
