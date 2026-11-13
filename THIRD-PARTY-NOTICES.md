@@ -21,6 +21,10 @@ XiaoRui 项目自研代码按根目录 [LICENSE](LICENSE)（MIT）授权。
 | Home Assistant Core | Apache-2.0 | 作为独立服务运行（REST 通信，无代码链接）；随镜像分发时须附 Apache-2.0 文本、NOTICE 并声明修改 |
 | sherpa-onnx | Apache-2.0 | 板载 ASR/VAD/KWS 推理 |
 | libopus (Xiph) | Xiph.Org BSD 变体 | 静态链入前端 |
+| LVGL 8.4 | MIT | 板载触摸界面的框架。**不随本仓分发**：编译期由 `XR_LVGL_ROOT` 指向的外部 SDK 提供，产物落在 `ui/build/`（已忽略）；构建方式见 `ui/README.md` |
+| libwayland-client / xdg-shell | MIT | 界面进程通过 Wayland 显示与接收触摸；同为由工具链/系统提供的外部依赖，不随本仓分发 |
+| FreeType | FreeType License（BSD 式）**或** GPLv2 双许可 | LVGL 渲染中文所用的字体后端；随镜像再分发时按所用版本选定的许可履行 |
+| Source Han Sans CN（思源黑体） | SIL OFL 1.1 | 板上 `/usr/share/fonts/source-han-sans-cn/` 的界面字体，不随本仓分发；分发字体文件或整机镜像时须附 OFL 1.1 文本并保留字体名 |
 | Linux 内核 / Buildroot / busybox | GPL-2.0（及各组件自有许可） | 分发相关源码或二进制时按具体组件许可履行义务，不限于整机镜像；源码提供方式须符合适用条款 |
 | RKLLM / RKNN 运行时 | 以所用版本附带许可证为准 | 仓库级 LICENSE 不自动代表所有预编译运行库的授权范围；再分发前单独核对 |
 | VQE 算法库 / ALSA 插件 / wopt 权重 | 以对应 SDK / 发布包条款为准 | **不随本仓分发**（向瑞芯微申请 .so）；若随整机再分发，须按对应条款单独核对，不适用本项目 MIT 授权 |

@@ -7,6 +7,7 @@ xdg-shell 和 wl_shm 显示，触摸通过 Wayland seat 接收。
 参考 `eqdrc` 的 LVGL 8.4/32-bit 色深、中文 FreeType 字体及布局经验。
 没有复制其 Rockchip SDK 专有端口或独占 DRM 驱动。
 LVGL 依赖的头文件、库及其许可应由使用者保留；这些二进制不随本仓分发。
+具体清单见根目录 [THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md)。
 
 ## 界面截图
 
