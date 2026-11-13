@@ -806,8 +806,13 @@ inject_wait:
                LLM 首句可能 >10s, ws_recv 超时(返 0)继续等不算断线. */
             size_t l = 0;
             char ev_text[256] = {0};
+            /* 只有真有 UI 客户端在看时才把 ws 轮询降到 50ms。UI 每 500ms 问
+               一次状态, 2s 内问过就算"有人在看"; 没 UI 时回到 1000ms, 即
+               UI 提交之前的行为, 回答期不必 20Hz 空转。
+               注: 空闲采集期本来就是 timeout 0 非阻塞轮询, 与 UI 在不在无关。 */
+            int ui_poll_ms = (ui.server && xr_ui_server_client_active(ui.server, 2000)) ? 50 : 1000;
             backend_ev_t ev = be_poll_event(be, wsbuf, sizeof(wsbuf), &l,
-                                            ev_text, sizeof(ev_text), ui.server ? 50 : 1000);
+                                            ev_text, sizeof(ev_text), ui_poll_ms);
             if (ev == EV_ERROR) { fprintf(stderr, "[xr] ws 断(播放期)\n"); goto restart; }
             if (ev == EV_ANNOUNCE_REQUEST) {
                 if (be_announce_reply(be, ev_text, 0)) goto restart;
@@ -936,7 +941,7 @@ inject_wait:
                 else
                     fprintf(stderr, "[xr] 空轮(零音频)收轮, 不开跟说窗\n");
             } else if (ev == EV_STT) {
-                xr_ui_server_text(ui.server, true, (const char *)wsbuf);
+                xr_ui_server_text(ui.server, true, ev_text);
                 fprintf(stderr, "[xr] ASR 回执: %s\n", ev_text);
             } else if (ev == EV_REBOOT) {
                 /* 语音重启(服务端判定): sync 后整机重启, 自启链拉起本进程 */
@@ -976,12 +981,12 @@ inject_wait:
                 xr_vad_reset_gate(&vad);
                 fprintf(stderr, "[xr] 回答完毕, 30s 内免唤醒\n");
             } else if (ev == EV_TTS_START) {
-                xr_ui_server_text(ui.server, false, (const char *)wsbuf);
+                if (ev_text[0]) xr_ui_server_text(ui.server, false, ev_text);
                 /* 控制线程覆盖全部播放期(2026-10-16): 音乐+LLM 回答都可
                  * 语音停/调音量; duck 只在音乐轮(回答轮自听不压低)。
                  * USB capture only: VQE/fifo ownership stays unchanged. */
-                if (!playback_control.music && (strstr(ev_text, "\"media\":\"music\"") ||
-                                       strstr(ev_text, "\"media\": \"music\""))) {
+                if (!playback_control.music && (strstr((const char *)wsbuf, "\"media\":\"music\"") ||
+                                       strstr((const char *)wsbuf, "\"media\": \"music\""))) {
                     playback_control.music = 1;
                 }
                 /* 每句 TTS_START 都会走到这: drop/start 只做一次 --
@@ -1011,7 +1016,7 @@ inject_wait:
                                 playback_control.music ? "音乐" : "回答");
                     }
                 }
-                printf("[event] %.160s\n", ev_text);
+                printf("[event] %.160s\n", (const char *)wsbuf);
             } else if (ev == EV_TTS_AUDIO) {
                 int ns = xr_player_push_opus(wsbuf, l);
                 xr_session_note_packet(&ses, now_s(), ns,

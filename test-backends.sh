@@ -18,6 +18,7 @@ done
     -I"${XR_OPUS_ROOT:-/tmp/opus-aarch64}/include/opus" \
     "$DIR/board/backend_local.c" "$DIR/board/backend_cloud.c" \
     "$DIR/board/ws_transport.c" "$DIR/board/runtime_config.c" \
+    "$DIR/board/json_field.c" \
     "$DIR/board/backend_gateway_test.c" -l:libopus.so.0 -o "$TEST_DIR/gateway"
 "$TEST_DIR/ws"
 "$TEST_DIR/hybrid"

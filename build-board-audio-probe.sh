@@ -14,6 +14,7 @@ fi
     -I"$DIR/board" -I"$OPUS_ROOT/include/opus" \
     "$DIR/board/backend_audio_probe.c" "$DIR/board/backend_local.c" \
     "$DIR/board/backend_cloud.c" "$DIR/board/ws_transport.c" \
+    "$DIR/board/json_field.c" \
     "$DIR/board/runtime_config.c" "$OPUS_ROOT/lib/libopus.a" \
     -lm -ldl -o "$DIR/board/backend_audio_probe"
 file "$DIR/board/backend_audio_probe"

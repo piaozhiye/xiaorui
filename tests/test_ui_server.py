@@ -1,5 +1,4 @@
 import ctypes
-import json
 import os
 from pathlib import Path
 import socket
@@ -18,7 +17,7 @@ def interface(tmp_path):
     library = tmp_path / "server.so"
     subprocess.run([
         "cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-shared", "-fPIC",
-        str(ROOT / "board/ui_server.c"), str(ROOT / "board/ui_json.c"),
+        str(ROOT / "board/ui_server.c"),
         "-o", str(library),
     ], check=True)
     api = ctypes.CDLL(str(library))
@@ -29,27 +28,8 @@ def interface(tmp_path):
     api.xr_ui_server_state.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint]
     api.xr_ui_server_text.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_char_p]
     api.xr_ui_server_poll.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint)]
-    api.xr_ui_json_string.argtypes = [ctypes.c_char_p, ctypes.c_char_p,
-                                      ctypes.c_char_p, ctypes.c_size_t]
+    api.xr_ui_server_client_active.argtypes = [ctypes.c_void_p, ctypes.c_uint]
     return api
-
-
-@pytest.mark.parametrize("payload,capacity,expected,result", [
-    (b'{"text":"\\u4f60\\u597d\\ud83d\\ude00"}', 64, "你好😀", 1),
-    (json.dumps({"text": '说"你好"\\再见\n'}).encode(), 64, '说"你好"\\再见\n', 1),
-    ('{"text":"你好😀结束"}'.encode(), 8, "你好", 1),
-    ('{"text":"你好"}'.encode(), 1, "", 1),
-    (b'{"nested":{"text":"wrong"},"text":"right"}', 64, "right", 1),
-    (b'{"other":"absent"}', 64, "", 0),
-    (b'{"text":"\\ud800"}', 64, "", -1),
-    (b'{"text":"\\u0000"}', 64, "", -1),
-    (b'{"text":"\xf0\x80\x80\x80"}', 64, "", -1),
-    (b'{"text":"unfinished', 64, "", -1),
-])
-def test_unicode_decoder(interface, payload, capacity, expected, result):
-    output = ctypes.create_string_buffer(capacity)
-    assert interface.xr_ui_json_string(payload, b"text", output, capacity) == result
-    assert output.value.decode() == expected
 
 
 def test_status_controls_and_captions(interface, tmp_path):
@@ -61,11 +41,10 @@ def test_status_controls_and_captions(interface, tmp_path):
         assert path.stat().st_mode & 0o777 == 0o600
         assert path.parent.stat().st_mode & 0o777 == 0o700
         interface.xr_ui_server_state(server, 3, 80)
-        interface.xr_ui_server_text(server, True, json.dumps({"text": "现在几点了？"}).encode())
+        interface.xr_ui_server_text(server, True, "现在几点了？".encode())
         for sentence in ["现在是", "上午十一点。"]:
-            interface.xr_ui_server_text(server, False, json.dumps(
-                {"state": "sentence_start", "text": sentence}).encode())
-        interface.xr_ui_server_text(server, False, b'{"text":"ignored","state":"stop"}')
+            interface.xr_ui_server_text(server, False, sentence.encode())
+        interface.xr_ui_server_text(server, False, b"")
         with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as peer:
             peer.bind(b"\0xr-test-" + os.urandom(8))
             peer.settimeout(0.1)
@@ -118,3 +97,42 @@ def test_recover_stale_socket_preserve_files_and_reject_public_directory(interfa
     link = tmp_path / "link"
     link.symlink_to(private, target_is_directory=True)
     assert not interface.xr_ui_server_open(os.fsencode(link / "voice.sock"))
+
+
+def query_status(interface, server, path):
+    volume = ctypes.c_uint()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as peer:
+        peer.bind(b"\0xr-test-" + os.urandom(8))
+        peer.settimeout(0.5)
+        peer.sendto(bytes(Message(magic=0x58525549, version=1, type=1)), str(path))
+        assert interface.xr_ui_server_poll(server, ctypes.byref(volume)) == 0
+        return Message.from_buffer_copy(peer.recv(2048))
+
+
+def test_client_activity_follows_ui_queries(interface, tmp_path):
+    path = tmp_path / "private" / "voice.sock"
+    server = interface.xr_ui_server_open(os.fsencode(path))
+    try:
+        assert interface.xr_ui_server_client_active(server, 2000) == 0
+        query_status(interface, server, path)
+        assert interface.xr_ui_server_client_active(server, 2000) == 1
+        assert interface.xr_ui_server_client_active(server, 0) == 0
+    finally:
+        interface.xr_ui_server_close(server)
+
+
+def test_captions_truncate_on_character_boundary(interface, tmp_path):
+    path = tmp_path / "private" / "voice.sock"
+    server = interface.xr_ui_server_open(os.fsencode(path))
+    try:
+        interface.xr_ui_server_text(server, True, ("问" * 200).encode())
+        interface.xr_ui_server_text(server, False, ("答" * 400).encode())
+        status = query_status(interface, server, path)
+        question = status.question.decode()
+        answer = status.answer.decode()
+        assert question == "问" * 85
+        assert answer == "答" * 255
+        interface.xr_ui_server_text(server, False, ("答" * 100).encode())
+        assert query_status(interface, server, path).answer.decode() == "答" * 255
+    finally:
+        interface.xr_ui_server_close(server)

@@ -17,6 +17,7 @@
 #include "announce_protocol.h"
 #include "runtime_config.h"
 #include "json_escape.h"
+#include "json_field.h"
 #include "opus.h"
 #include "ws_transport.h"
 #include <arpa/inet.h>
@@ -300,15 +301,12 @@ static backend_ev_t cb_poll_event(backend_t *b, unsigned char *buf, size_t cap,
     }
     if (strstr((char *)buf, "\"type\":\"stt\"") || strstr((char *)buf, "\"type\": \"stt\"")) {
         if (!xr_turn_accept(&cb->turn)) return EV_NONE;
+        /* json.dumps 默认 ensure_ascii=True: 中文在链路上是 \uXXXX, 得按
+           JSON 规则解码成 UTF-8。旧的裸截取只找 "\"text\":"(无空格), 而线上
+           实际是 "\"text\": "(带空格) -> 恒取到空串。 */
         if (ev_text && text_cap) {
-            const char *k = strstr((char *)buf, "\"text\":");
-            if (k) {
-                k += 7; while (*k == ' ') k++;
-                if (*k == '"') k++;
-                size_t ti = 0;
-                while (*k && *k != '"' && ti < text_cap - 1) ev_text[ti++] = *k++;
-                ev_text[ti] = 0;
-            }
+            ev_text[0] = 0;
+            xr_json_field_string((const char *)buf, "text", ev_text, text_cap);
         }
         return EV_STT;
     }
@@ -316,7 +314,16 @@ static backend_ev_t cb_poll_event(backend_t *b, unsigned char *buf, size_t cap,
         /* llm 情绪/文本事件与 tts sentence_start 都走这里; detect 模式下网关
            不一定回显 stt, 任一文本事件都视为本轮已受理(stop 不再被当迟到) */
         if (!xr_turn_accept(&cb->turn)) return EV_NONE;
-        if (ev_text && text_cap) snprintf(ev_text, text_cap, "%s", (char *)buf);
+        /* 只有 sentence_start 才是"一句回答": ev_text 放解码后的分句明文,
+           其它文本事件留空, 免得污染 UI 字幕(这个判断原来在 UI 侧解析 JSON
+           做, 现在下沉到后端, 链路只解析一次)。 */
+        if (ev_text && text_cap) {
+            char state[32] = {0};
+            ev_text[0] = 0;
+            if (xr_json_field_string((const char *)buf, "state", state, sizeof(state)) == 1 &&
+                !strcmp(state, "sentence_start"))
+                xr_json_field_string((const char *)buf, "text", ev_text, text_cap);
+        }
         return EV_TTS_START;
     }
     return EV_NONE;

@@ -105,6 +105,26 @@ int main(int argc, char **argv) {
         printf("gateway announce passed\n");
         return 0;
     }
+    if (!strcmp(argv[1], "text-events")) {
+        /* 线上真实报文: 网关 json.dumps 默认 ensure_ascii=True, 冒号后带空格,
+           中文是 \uXXXX 转义。ev_text 必须是解码后的 UTF-8 明文, 否则 UI
+           字幕/ASR 回执拿到的是转义串或空串。 */
+        assert(be_submit_text(b, "gateway test") == 0);
+        unsigned char tbuf[4096]; char ttext[4096]; size_t tlen;
+        backend_ev_t ev = be_poll_event(b, tbuf, sizeof(tbuf), &tlen,
+                                       ttext, sizeof(ttext), 1000);
+        assert(ev == EV_STT);
+        assert(!strcmp(ttext, "现在几点"));
+        ev = be_poll_event(b, tbuf, sizeof(tbuf), &tlen, ttext, sizeof(ttext), 1000);
+        assert(ev == EV_TTS_START);
+        assert(!strcmp(ttext, "上午十一点"));
+        ev = be_poll_event(b, tbuf, sizeof(tbuf), &tlen, ttext, sizeof(ttext), 1000);
+        assert(ev == EV_TTS_START);
+        assert(ttext[0] == 0);
+        be_disconnect(b);
+        puts("gateway text events passed");
+        return 0;
+    }
     if (!strcmp(argv[1], "audio")) {
         int16_t pcm[1957] = {0};
         backend_audio_request_t r = {.pcm=pcm, .samples=1957};

@@ -5,6 +5,7 @@
 #include "backend_turn.h"
 #include "announce_protocol.h"
 #include "json_escape.h"
+#include "json_field.h"
 #include "ws_transport.h"
 #include <arpa/inet.h>
 #include <errno.h>
@@ -253,21 +254,24 @@ static backend_ev_t lb_poll_event(backend_t *b, unsigned char *buf, size_t cap,
     }
     if (strstr((char *)buf, "\"type\":\"stt\"") || strstr((char *)buf, "\"type\": \"stt\"")) {
         if (!xr_turn_accept(&lb->turn)) return EV_NONE;
+        /* 同云端: 线上是 "\"text\": "(带空格), 且中文是 \uXXXX 转义, 只能
+           按 JSON 规则解码, 裸截取会取到空串/转义串。 */
         if (ev_text && text_cap) {
-            const char *k = strstr((char *)buf, "\"text\":");
-            if (k) {
-                k += 7; while (*k == ' ') k++;
-                if (*k == '"') k++;
-                size_t ti = 0;
-                while (*k && *k != '"' && ti < text_cap - 1) ev_text[ti++] = *k++;
-                ev_text[ti] = 0;
-            }
+            ev_text[0] = 0;
+            xr_json_field_string((const char *)buf, "text", ev_text, text_cap);
         }
         return EV_STT;
     }
     if (strstr((char *)buf, "\"text\"")) {
         if (!xr_turn_active(&lb->turn)) return EV_NONE;
-        if (ev_text && text_cap) snprintf(ev_text, text_cap, "%s", (char *)buf);
+        /* 只有 sentence_start 才是"一句回答", 其它文本事件留空 */
+        if (ev_text && text_cap) {
+            char state[32] = {0};
+            ev_text[0] = 0;
+            if (xr_json_field_string((const char *)buf, "state", state, sizeof(state)) == 1 &&
+                !strcmp(state, "sentence_start"))
+                xr_json_field_string((const char *)buf, "text", ev_text, text_cap);
+        }
         return EV_TTS_START;
     }
     return EV_NONE;

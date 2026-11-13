@@ -6,9 +6,9 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
-#include "ui_json.h"
 #include "ui_server.h"
 
 struct xr_ui_server {
@@ -17,8 +17,30 @@ struct xr_ui_server {
     ino_t inode;
     dev_t device;
     bool bound;
+    bool client_seen;
+    uint64_t last_client_ms;
     xr_ui_message_t status;
 };
+
+static uint64_t monotonic_ms(void) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return 0;
+    return (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
+}
+
+/* 拷贝文本, 容量不够时回退到 UTF-8 字符边界, 不截半个汉字 */
+static void copy_text(char *destination, size_t capacity, const char *source) {
+    if (capacity == 0) return;
+    size_t length = strlen(source);
+    if (length >= capacity) {
+        length = capacity - 1;
+        while (length > 0 && ((unsigned char)source[length] & 0xc0) == 0x80)
+            length--;
+    }
+    memcpy(destination, source, length);
+    destination[length] = 0;
+}
 
 static int bind_endpoint(int descriptor, const struct sockaddr_un *address) {
     if (bind(descriptor, (const struct sockaddr *)address, sizeof(*address)) == 0)
@@ -103,27 +125,23 @@ void xr_ui_server_state(xr_ui_server_t *server, enum xr_ui_state state, unsigned
     server->status.volume = volume;
 }
 
-void xr_ui_server_text(xr_ui_server_t *server, bool question, const char *json) {
-    if (!server || !json) return;
-    char text[sizeof(server->status.answer)];
-    if (xr_ui_json_string(json, "text", text, sizeof(text)) != 1 || !text[0]) return;
-    if (question)
-    {
-        if (xr_ui_json_string(json, "text", server->status.question,
-                              sizeof(server->status.question)) != 1)
-            server->status.question[0] = 0;
+void xr_ui_server_text(xr_ui_server_t *server, bool question, const char *text) {
+    if (!server || !text || !text[0]) return;
+    if (question) {
+        copy_text(server->status.question, sizeof(server->status.question), text);
+        return;
     }
-    else
-    {
-        char state[32];
-        if (xr_ui_json_string(json, "state", state, sizeof(state)) != 1 ||
-            strcmp(state, "sentence_start")) return;
-        size_t used = strlen(server->status.answer);
-        size_t available = sizeof(server->status.answer) - used;
-        char segment[sizeof(server->status.answer)];
-        if (xr_ui_json_string(json, "text", segment, available) != 1) return;
-        memcpy(server->status.answer + used, segment, strlen(segment) + 1);
-    }
+    size_t used = strlen(server->status.answer);
+    size_t available = sizeof(server->status.answer) - used;
+    if (available < 2) return;   /* 字幕已满: 后面的句子丢弃 */
+    copy_text(server->status.answer + used, available, text);
+}
+
+int xr_ui_server_client_active(const xr_ui_server_t *server, unsigned int window_ms) {
+    if (!server || !server->client_seen) return 0;
+    uint64_t now = monotonic_ms();
+    if (now < server->last_client_ms) return 1;
+    return now - server->last_client_ms < window_ms;
 }
 
 int xr_ui_server_poll(xr_ui_server_t *server, unsigned int *volume) {
@@ -156,6 +174,8 @@ int xr_ui_server_poll(xr_ui_server_t *server, unsigned int *volume) {
             }
         }
         if (!trusted) continue;
+        server->client_seen = true;
+        server->last_client_ms = monotonic_ms();
         if (request.type == XR_UI_QUERY)
         {
             ssize_t sent = sendto(server->descriptor, &server->status, sizeof(server->status),

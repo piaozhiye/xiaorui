@@ -113,6 +113,18 @@ def serve(listener, scenario, errors):
                 conn.sendall(stt + frame(2, b"abc")
                              + frame(1, b'{"type":"tts","state":"stop"}'))
                 return
+            if scenario == "text-events":
+                # 线上真实报文格式: json.dumps 默认 ensure_ascii=True,
+                # 冒号后带空格, 中文是 \uXXXX 转义
+                stt = frame(1, json.dumps({"type": "stt", "text": "现在几点",
+                                           "session_id": "t"}).encode())
+                sentence = frame(1, json.dumps({"type": "tts", "state": "sentence_start",
+                                                "session_id": "t",
+                                                "text": "上午十一点"}).encode())
+                other = frame(1, json.dumps({"type": "llm", "text": "情绪文本"}).encode())
+                conn.sendall(stt + sentence + other)
+                time.sleep(1.2)
+                return
             if scenario == "silent":
                 time.sleep(1.2)
                 return
@@ -160,7 +172,7 @@ def serve(listener, scenario, errors):
 
 
 def main():
-    for scenario in ("normal", "volume", "reboot", "announce", "announce_ack", "disorder", "midstream", "silent", "before_audio", "audio", "abort-cloud", "abort-local", "continue-cloud", "continue-local"):
+    for scenario in ("normal", "volume", "reboot", "announce", "announce_ack", "disorder", "midstream", "silent", "before_audio", "audio", "abort-cloud", "abort-local", "continue-cloud", "continue-local", "text-events"):
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
             listener.listen(1)

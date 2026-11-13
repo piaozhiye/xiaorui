@@ -2,7 +2,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "ui_json.h"
+#include "json_field.h"
 
 static int hex_digit(unsigned char value) {
     if (value >= '0' && value <= '9') return value - '0';
@@ -122,7 +122,7 @@ static int read_string(const char **cursor, char *output, size_t capacity) {
     return 0;
 }
 
-int xr_ui_json_string(const char *json, const char *key, char *output, size_t capacity) {
+int xr_json_field_string(const char *json, const char *key, char *output, size_t capacity) {
     if (!json || !key || !output || !capacity) return -1;
     output[0] = 0;
     int depth = 0;
