@@ -33,11 +33,21 @@ static lv_obj_t *volume_slider;
 static lv_obj_t *volume_label;
 static lv_obj_t *stop_button;
 static lv_obj_t *answer_card;
+static lv_obj_t *greeting_label;
+static lv_obj_t *date_label;
+static lv_obj_t *exit_caption;
 static lv_obj_t *eyes[2];
 static bool settings_visible;
 static bool demo;
 static bool connected;
+static bool fonts_ready;
+static bool answer_follow = true;
+static bool exit_armed;
+static uint32_t exit_armed_at;
+static const lv_font_t *caption_font;
+static const char *font_path_used;
 static uint32_t displayed_state = UINT32_MAX;
+static int displayed_hour = -1;
 static int displayed_volume = -1;
 static int displayed_speaking = -1;
 static char displayed_question[256];
@@ -117,7 +127,7 @@ static lv_obj_t *button(lv_obj_t *parent, const char *text, int position_x, int 
     lv_obj_set_style_bg_color(object, lv_color_hex(0x2f5a5f), LV_STATE_PRESSED);
     lv_obj_set_style_shadow_width(object, 0, 0);
     lv_obj_set_style_bg_opa(object, LV_OPA_40, LV_STATE_DISABLED);
-    lv_obj_t *caption = label(object, text, 0, 0, width - 20, title_font.font, 0xd9e9e7);
+    lv_obj_t *caption = label(object, text, 0, 0, width - 20, caption_font, 0xd9e9e7);
     lv_obj_set_style_text_color(caption, lv_color_hex(0xffffff), LV_STATE_PRESSED);
     lv_obj_set_style_text_align(caption, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_center(caption);
@@ -140,8 +150,16 @@ static void volume_changed(lv_event_t *event) {
 
 static void exit_ui(lv_event_t *event) {
     (void)event;
+    if (!exit_armed || monotonic_ms() - exit_armed_at > 3000)
+    {
+        exit_armed = true;
+        exit_armed_at = (uint32_t)monotonic_ms();
+        if (exit_caption) lv_label_set_text(exit_caption, "确认退出？");
+        fprintf(stderr, "[ui] exit requested (press again to confirm)\n");
+        return;
+    }
     interrupted = 1;
-    fprintf(stderr, "[ui] exit requested\n");
+    fprintf(stderr, "[ui] exit confirmed\n");
 }
 
 /* 状态胶囊: 文字长度变了就重新量宽度并居中 */
@@ -158,8 +176,44 @@ static void layout_state_chip(const char *text, uint32_t color) {
 }
 
 static void scroll_answer_to_bottom(void) {
-    if (!answer_card) return;
+    if (!answer_card || !answer_follow) return;
     lv_obj_scroll_to_y(answer_card, LV_COORD_MAX, LV_ANIM_OFF);
+}
+
+/* 用户自己往上翻了就别再把他弹回底部, 回到底部才恢复跟随 */
+static void answer_scrolled(lv_event_t *event) {
+    lv_obj_t *card = lv_event_get_target(event);
+    answer_follow = lv_obj_get_scroll_bottom(card) <= 4;
+}
+
+static const char *greeting_text(int hour) {
+    if (hour < 5)  return "夜深了，早点休息";
+    if (hour < 9)  return "早上好，很高兴见到你";
+    if (hour < 11) return "上午好，很高兴见到你";
+    if (hour < 13) return "中午好，吃点东西吧";
+    if (hour < 18) return "下午好，很高兴见到你";
+    return "晚上好，欢迎回来";
+}
+
+/* 顶栏的日期和问候语: 按小时换, 跟板子语音里的问候呼应 */
+static void refresh_header(void) {
+    time_t now = time(NULL);
+    struct tm local;
+    if (!localtime_r(&now, &local)) return;
+    if (date_label) {
+        static const char *weekdays[7] = {"日", "一", "二", "三", "四", "五", "六"};
+        char date_text[32];
+        snprintf(date_text, sizeof(date_text), "%d月%d日 星期%s",
+                 local.tm_mon + 1, local.tm_mday, weekdays[local.tm_wday]);
+        if (strcmp(lv_label_get_text(date_label), date_text))
+            lv_label_set_text(date_label, date_text);
+    }
+    if (greeting_label && local.tm_hour != displayed_hour) {
+        displayed_hour = local.tm_hour;
+        const char *greeting = greeting_text(local.tm_hour);
+        if (strcmp(lv_label_get_text(greeting_label), greeting))
+            lv_label_set_text(greeting_label, greeting);
+    }
 }
 
 /* 眨眼: 5 秒一轮, 闭眼 170ms, 用 smoothstep 睁开; 说话时轻微律动 */
@@ -183,7 +237,8 @@ static int eye_height_at(uint64_t now_ms, int speaking) {
 
 static void build_conversation(lv_obj_t *screen) {
     conversation_page = panel(screen, 0, 185, 1080, 1450, 0x0c171b, 0);
-    label(conversation_page, "很高兴见到你", 74, 16, 900, large_font.font, 0xf2f0e8);
+    greeting_label = label(conversation_page, "很高兴见到你", 74, 16, 900,
+                           large_font.font, 0xf2f0e8);
     label(conversation_page, "一句「小瑞小瑞」，开始我们的对话", 76, 101, 920,
           body_font.font, 0x8ca5aa);
     lv_obj_t *halo = panel(conversation_page, 259, 258, 562, 562, 0x10272b, LV_RADIUS_CIRCLE);
@@ -207,7 +262,12 @@ static void build_conversation(lv_obj_t *screen) {
                           30, 60, 884, title_font.font, 0xe6eeea);
     /* 长回答要能往下翻: 卡片竖向可滚, 文字自然高度 */
     lv_obj_set_scroll_dir(answer_card, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(answer_card, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_scrollbar_mode(answer_card, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_opa(answer_card, LV_OPA_60, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(answer_card, lv_color_hex(0x8fe3c3), LV_PART_SCROLLBAR);
+    lv_obj_set_style_width(answer_card, 4, LV_PART_SCROLLBAR);
+    lv_obj_set_style_radius(answer_card, 2, LV_PART_SCROLLBAR);
+    lv_obj_add_event_cb(answer_card, answer_scrolled, LV_EVENT_SCROLL, NULL);
 }
 
 static void build_settings(lv_obj_t *screen) {
@@ -235,18 +295,36 @@ static void build_settings(lv_obj_t *screen) {
     label(settings_page, "连接中断时控制会自动禁用，"
           "不影响语音程序继续运行。",
           76, 1180, 900, body_font.font, 0x8ca5aa);
-    button(settings_page, "退出界面", 64, 1250, 952, exit_ui, NULL);
+    lv_obj_t *exit = button(settings_page, "退出界面", 64, 1250, 952, exit_ui, NULL);
+    exit_caption = lv_obj_get_child(exit, 0);
     label(settings_page, "退出后回到系统界面，语音继续运行。",
           76, 1370, 900, body_font.font, 0x8ca5aa);
     lv_obj_add_flag(settings_page, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void build_degraded_ui(lv_obj_t *screen) {
+    label(screen, "X I A O R U I", 74, 57, 500, &lv_font_montserrat_28, 0x8fe3c3);
+    label(screen, "CHINESE FONT MISSING", 74, 420, 900, &lv_font_montserrat_28, 0xf2f0e8);
+    label(screen, "The panel runs in degraded mode.", 74, 500, 900, &lv_font_montserrat_20, 0x8ca5aa);
+    label(screen, "Expected:", 74, 600, 300, &lv_font_montserrat_20, 0x7b989e);
+    label(screen, font_path_used ? font_path_used : "(unset)", 74, 640, 930, &lv_font_montserrat_20, 0x7b989e);
+    label(screen, "Voice assistant keeps working.", 74, 740, 900, &lv_font_montserrat_20, 0x8ca5aa);
+    lv_obj_t *exit = button(screen, "EXIT", 64, 1750, 285, exit_ui, NULL);
+    exit_caption = lv_obj_get_child(exit, 0);
 }
 
 static void build_ui(void) {
     lv_obj_t *screen = lv_scr_act();
     lv_obj_set_style_bg_color(screen, lv_color_hex(0x0c171b), 0);
     lv_obj_clear_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+    if (!fonts_ready) {
+        build_degraded_ui(screen);
+        return;
+    }
     label(screen, "X I A O R U I", 74, 57, 500, &lv_font_montserrat_28, 0x8fe3c3);
     clock_label = label(screen, "--:--", 814, 49, 200, &lv_font_montserrat_32, 0xf2f0e8);
+    date_label = label(screen, "", 740, 95, 274, tag_font, 0x6a9499);
+    lv_obj_set_style_text_align(date_label, LV_TEXT_ALIGN_RIGHT, 0);
     label(screen, "小瑞 · 你的端侧语音伙伴", 74, 109, 900, body_font.font, 0x64838a);
     build_conversation(screen);
     build_settings(screen);
@@ -264,6 +342,14 @@ static void refresh(lv_timer_t *timer) {
     (void)timer;
     uint64_t now_ms = monotonic_ms();
     xr_ui_client_tick(now_ms);
+    if (!fonts_ready)
+        return;
+    refresh_header();
+    if (exit_armed && (uint32_t)now_ms - exit_armed_at > 3000)
+    {
+        exit_armed = false;
+        if (exit_caption) lv_label_set_text(exit_caption, "退出界面");
+    }
     bool available = !demo && xr_ui_client_connected(now_ms);
     if (available != connected)
     {
@@ -317,6 +403,8 @@ static void refresh(lv_timer_t *timer) {
             memcpy(displayed_answer, status->answer, sizeof(displayed_answer));
             lv_label_set_text(answer_label, displayed_answer[0] ?
                               displayed_answer : answer_placeholder);
+            if (!displayed_answer[0])
+                answer_follow = true;   /* 新一轮: 重新从头跟随 */
             scroll_answer_to_bottom();
         }
         if (((int)status->volume != displayed_volume ||
@@ -379,25 +467,33 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
-    if (access(font_path, R_OK) != 0)
-    {
-        fprintf(stderr, "[ui] Chinese font unavailable: %s\n", font_path);
-        return 1;
-    }
+    font_path_used = font_path;
     if (xr_display_open(snapshot != NULL) != 0)
     {
         fprintf(stderr, "[ui] cannot initialize Wayland/LVGL display\n");
         return 1;
     }
     int result = 1;
-    if (!lv_freetype_init(4, 4, 4 * 1024 * 1024) || load_font(&body_font, font_path, 28) ||
-        load_font(&title_font, font_path, 34) || load_font(&large_font, font_path, 58))
+    fonts_ready = access(font_path, R_OK) == 0;
+    if (fonts_ready && !lv_freetype_init(4, 4, 4 * 1024 * 1024))
+        fonts_ready = false;
+    if (fonts_ready && (load_font(&body_font, font_path, 28) ||
+                        load_font(&title_font, font_path, 34) ||
+                        load_font(&large_font, font_path, 58)))
+        fonts_ready = false;
+    if (fonts_ready)
     {
-        fprintf(stderr, "[ui] cannot initialize Chinese fonts\n");
-        goto cleanup;
+        /* 小字号只用于卡片标签, 加载失败就退回正文, 不因此退出 */
+        tag_font = load_font(&small_font, font_path, 22) == 0 ? small_font.font : body_font.font;
+        caption_font = title_font.font;
     }
-    /* 小字号只用于卡片标签, 加载失败就退回正文, 不因此退出 */
-    tag_font = load_font(&small_font, font_path, 22) == 0 ? small_font.font : body_font.font;
+    else
+    {
+        /* 没有中文字体不再黑屏退出: 退化成纯 ASCII 界面, 语音照常跑 */
+        tag_font = &lv_font_montserrat_20;
+        caption_font = &lv_font_montserrat_28;
+        fprintf(stderr, "[ui] Chinese font unavailable (%s), degraded ASCII UI\n", font_path);
+    }
     if (!snapshot && !demo && xr_ui_client_open(socket_path) != 0)
     {
         fprintf(stderr, "[ui] cannot initialize IPC client\n");
