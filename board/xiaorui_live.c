@@ -132,6 +132,7 @@ typedef struct {
     xr_vad_t *vad;
     const xr_runtime_config_t *config;
     int was_responding;
+    int content_seen;
     int abort_failed;
 } xr_ui_context_t;
 
@@ -142,7 +143,7 @@ static int service_ui(xr_ui_context_t *context) {
     if (!context->server) return 0;
     int responding = context->session->state == XR_SESSION_RESPOND;
     if (responding && !context->was_responding)
-        xr_ui_server_begin_turn(context->server);
+        context->content_seen = 0;   /* 新一轮: 等第一段内容到了再清屏 */
     context->was_responding = responding;
     enum xr_ui_state state = responding ?
         (context->session->pkt_n ? XR_UI_SPEAKING : XR_UI_THINKING) :
@@ -157,7 +158,18 @@ static int service_ui(xr_ui_context_t *context) {
         xr_volume_save(volume_state_path(), g_vol_pct);
         fprintf(stderr, "[ui] volume=%d%%\n", g_vol_pct);
     }
+    if (command == XR_UI_STOP && !responding)
+        fprintf(stderr, "[ui] stop 忽略(当前不在回答)\n");
     return command == XR_UI_STOP && responding;
+}
+
+/* 本轮第一段内容(问句或回答首句)到达: 清掉上一轮的字幕, 一轮只清一次。
+   以前是"进入 RESPOND 就清", 但那种轮次可能被网关当噪声丢掉(房间里
+   随便一声就能触发), 清了就把用户刚问的和刚答的全擦掉。 */
+static void ui_turn_content(xr_ui_context_t *context) {
+    if (context->content_seen || !context->server) return;
+    context->content_seen = 1;
+    xr_ui_server_turn_begin(context->server);
 }
 
 static int service_ui_drain(void *opaque) {
@@ -629,6 +641,7 @@ restart:
     xr_ui_server_close(ui.server);
     ui.server = NULL;
     ui.was_responding = 0;
+    ui.content_seen = 0;
     xr_playback_control_stop(&playback_control, g_vol_pct);
     /* 重连前清理: 播放/麦克风/残留流, 否则 asr_mic 被占死后永远进不来 */
     xr_player_drop();
@@ -941,7 +954,10 @@ inject_wait:
                 else
                     fprintf(stderr, "[xr] 空轮(零音频)收轮, 不开跟说窗\n");
             } else if (ev == EV_STT) {
-                xr_ui_server_text(ui.server, true, ev_text);
+                if (ev_text[0]) {
+                    ui_turn_content(&ui);
+                    xr_ui_server_text(ui.server, true, ev_text);
+                }
                 fprintf(stderr, "[xr] ASR 回执: %s\n", ev_text);
             } else if (ev == EV_REBOOT) {
                 /* 语音重启(服务端判定): sync 后整机重启, 自启链拉起本进程 */
@@ -981,7 +997,10 @@ inject_wait:
                 xr_vad_reset_gate(&vad);
                 fprintf(stderr, "[xr] 回答完毕, 30s 内免唤醒\n");
             } else if (ev == EV_TTS_START) {
-                if (ev_text[0]) xr_ui_server_text(ui.server, false, ev_text);
+                if (ev_text[0]) {
+                    ui_turn_content(&ui);
+                    xr_ui_server_text(ui.server, false, ev_text);
+                }
                 /* 控制线程覆盖全部播放期(2026-10-16): 音乐+LLM 回答都可
                  * 语音停/调音量; duck 只在音乐轮(回答轮自听不压低)。
                  * USB capture only: VQE/fifo ownership stays unchanged. */

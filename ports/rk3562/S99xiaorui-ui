@@ -19,6 +19,9 @@ fi
 running_pids() {
     for candidate in $(pgrep -x xiaorui_ui || :); do
         executable="$(readlink "/proc/$candidate/exe" 2>/dev/null || :)"
+        # 二进制被覆盖后 exe 会带 " (deleted)", 不去掉就认不出这个进程,
+         # 老进程会留下来和新进程抢同一块屏幕
+        executable="${executable% (deleted)}"
         if [ "$executable" = "$directory/xiaorui_ui" ]; then
             echo "$candidate"
         fi

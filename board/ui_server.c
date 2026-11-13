@@ -113,7 +113,7 @@ void xr_ui_server_close(xr_ui_server_t *server) {
     free(server);
 }
 
-void xr_ui_server_begin_turn(xr_ui_server_t *server) {
+void xr_ui_server_turn_begin(xr_ui_server_t *server) {
     if (!server) return;
     server->status.question[0] = 0;
     server->status.answer[0] = 0;
@@ -134,6 +134,12 @@ void xr_ui_server_text(xr_ui_server_t *server, bool question, const char *text) 
     size_t used = strlen(server->status.answer);
     size_t available = sizeof(server->status.answer) - used;
     if (available < 2) return;   /* 字幕已满: 后面的句子丢弃 */
+    if (used && server->status.answer[used - 1] != '\n')
+    {
+        server->status.answer[used++] = '\n';
+        server->status.answer[used] = 0;
+        available--;
+    }
     copy_text(server->status.answer + used, available, text);
 }
 

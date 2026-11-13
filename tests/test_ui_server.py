@@ -24,7 +24,7 @@ def interface(tmp_path):
     api.xr_ui_server_open.argtypes = [ctypes.c_char_p]
     api.xr_ui_server_open.restype = ctypes.c_void_p
     api.xr_ui_server_close.argtypes = [ctypes.c_void_p]
-    api.xr_ui_server_begin_turn.argtypes = [ctypes.c_void_p]
+    api.xr_ui_server_turn_begin.argtypes = [ctypes.c_void_p]
     api.xr_ui_server_state.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint]
     api.xr_ui_server_text.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_char_p]
     api.xr_ui_server_poll.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint)]
@@ -55,10 +55,10 @@ def test_status_controls_and_captions(interface, tmp_path):
 
             query = Message(magic=0x58525549, version=1, type=1)
             assert send(query) == 0
-            status = Message.from_buffer_copy(peer.recv(2048))
+            status = Message.from_buffer_copy(peer.recv(8192))
             assert (status.state, status.volume) == (3, 80)
             assert status.question.decode() == "现在几点了？"
-            assert status.answer.decode() == "现在是上午十一点。"
+            assert status.answer.decode() == "现在是\n上午十一点。"
             assert send(Message(magic=0x58525549, version=1, type=3, volume=70)) == 3
             assert volume.value == 70
             assert send(Message(magic=0x58525549, version=1, type=3, volume=101)) == 0
@@ -67,10 +67,10 @@ def test_status_controls_and_captions(interface, tmp_path):
             peer.sendto(bytes(query) + b"oversized", str(path))
             assert interface.xr_ui_server_poll(server, ctypes.byref(volume)) == 0
             with pytest.raises(socket.timeout):
-                peer.recv(2048)
-            interface.xr_ui_server_begin_turn(server)
+                peer.recv(8192)
+            interface.xr_ui_server_turn_begin(server)
             assert send(query) == 0
-            status = Message.from_buffer_copy(peer.recv(2048))
+            status = Message.from_buffer_copy(peer.recv(8192))
             assert status.question == status.answer == b""
         assert not interface.xr_ui_server_open(os.fsencode(path))
         assert path.exists()
@@ -106,7 +106,7 @@ def query_status(interface, server, path):
         peer.settimeout(0.5)
         peer.sendto(bytes(Message(magic=0x58525549, version=1, type=1)), str(path))
         assert interface.xr_ui_server_poll(server, ctypes.byref(volume)) == 0
-        return Message.from_buffer_copy(peer.recv(2048))
+        return Message.from_buffer_copy(peer.recv(8192))
 
 
 def test_client_activity_follows_ui_queries(interface, tmp_path):
@@ -126,13 +126,13 @@ def test_captions_truncate_on_character_boundary(interface, tmp_path):
     server = interface.xr_ui_server_open(os.fsencode(path))
     try:
         interface.xr_ui_server_text(server, True, ("问" * 200).encode())
-        interface.xr_ui_server_text(server, False, ("答" * 400).encode())
+        interface.xr_ui_server_text(server, False, ("答" * 2000).encode())
         status = query_status(interface, server, path)
         question = status.question.decode()
         answer = status.answer.decode()
         assert question == "问" * 85
-        assert answer == "答" * 255
+        assert answer == "答" * 1365
         interface.xr_ui_server_text(server, False, ("答" * 100).encode())
-        assert query_status(interface, server, path).answer.decode() == "答" * 255
+        assert query_status(interface, server, path).answer.decode() == "答" * 1365
     finally:
         interface.xr_ui_server_close(server)

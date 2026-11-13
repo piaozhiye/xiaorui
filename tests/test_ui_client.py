@@ -14,7 +14,7 @@ class Message(ctypes.Structure):
         ("magic", ctypes.c_uint32), ("version", ctypes.c_uint32),
         ("type", ctypes.c_uint32), ("state", ctypes.c_uint32),
         ("volume", ctypes.c_uint32), ("question", ctypes.c_char * 256),
-        ("answer", ctypes.c_char * 768),
+        ("answer", ctypes.c_char * 4096),
     ]
 
 
@@ -47,7 +47,7 @@ def status():
 
 def test_status_validation(client):
     message = status()
-    assert ctypes.sizeof(message) == 1044
+    assert ctypes.sizeof(message) == 4372
     assert client.xr_ui_message_valid(ctypes.byref(message), ctypes.sizeof(message))
     for field, value in [("magic", 0), ("version", 2), ("type", 4), ("state", 4),
                          ("volume", 0), ("volume", 101)]:
@@ -73,7 +73,7 @@ def test_live_status_timeout_and_controls(client, tmp_path):
         server.settimeout(1)
         assert client.xr_ui_client_open(str(path).encode()) == 0
         client.xr_ui_client_tick(1000)
-        query, peer = server.recvfrom(2048)
+        query, peer = server.recvfrom(8192)
         assert Message.from_buffer_copy(query).type == 1
         message = status()
         server.sendto(bytes(message), peer)
@@ -82,10 +82,10 @@ def test_live_status_timeout_and_controls(client, tmp_path):
         assert client.xr_ui_client_status().contents.question.decode() == "你叫什么名字？"
         assert client.xr_ui_client_status().contents.volume == 60
         assert client.xr_ui_client_command(3, 70) == 0
-        command, _ = server.recvfrom(2048)
+        command, _ = server.recvfrom(8192)
         assert Message.from_buffer_copy(command).volume == 70
         assert client.xr_ui_client_command(4, 0) == 0
-        command, _ = server.recvfrom(2048)
+        command, _ = server.recvfrom(8192)
         assert Message.from_buffer_copy(command).type == 4
         assert client.xr_ui_client_command(3, 101) == -1
         assert client.xr_ui_client_command(99, 0) == -1
@@ -98,7 +98,7 @@ def test_other_sender_and_oversized_messages_are_rejected(client, tmp_path):
         server.settimeout(1)
         assert client.xr_ui_client_open(str(tmp_path / "voice.sock").encode()) == 0
         client.xr_ui_client_tick(1000)
-        _, peer = server.recvfrom(2048)
+        _, peer = server.recvfrom(8192)
         with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as other:
             other.bind(str(tmp_path / "other.sock"))
             other.sendto(bytes(status()), peer)

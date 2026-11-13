@@ -18,9 +18,13 @@ static volatile sig_atomic_t dump_requested;
 static lv_ft_info_t body_font;
 static lv_ft_info_t title_font;
 static lv_ft_info_t large_font;
+static lv_ft_info_t small_font;
+static const lv_font_t *tag_font;
 static lv_obj_t *conversation_page;
 static lv_obj_t *settings_page;
 static lv_obj_t *state_label;
+static lv_obj_t *state_dot;
+static lv_obj_t *state_chip;
 static lv_obj_t *connection_label;
 static lv_obj_t *question_label;
 static lv_obj_t *answer_label;
@@ -28,14 +32,23 @@ static lv_obj_t *clock_label;
 static lv_obj_t *volume_slider;
 static lv_obj_t *volume_label;
 static lv_obj_t *stop_button;
+static lv_obj_t *answer_card;
 static lv_obj_t *eyes[2];
 static bool settings_visible;
 static bool demo;
 static bool connected;
 static uint32_t displayed_state = UINT32_MAX;
 static int displayed_volume = -1;
+static int displayed_speaking = -1;
 static char displayed_question[256];
-static char displayed_answer[768];
+static char displayed_answer[4096];
+
+static const uint32_t state_palette[4] = {0x8ca5aa, 0x8fe3c3, 0xf0d38a, 0xa8d8f0};
+static const char *state_text[4] = {
+    "等你说一句「小瑞小瑞」", "我在听，请说", "让我想一想", "正在回答你",
+};
+static const char *question_placeholder = "说点什么，识别后的文字会显示在这里";
+static const char *answer_placeholder = "小瑞的回答会显示在这里";
 
 static uint64_t monotonic_ms(void) {
     struct timespec now;
@@ -98,10 +111,14 @@ static lv_obj_t *button(lv_obj_t *parent, const char *text, int position_x, int 
     lv_obj_set_size(object, width, 94);
     lv_obj_set_style_radius(object, 25, 0);
     lv_obj_set_style_bg_color(object, lv_color_hex(0x1c3034), 0);
+    lv_obj_set_style_border_width(object, 1, 0);
+    lv_obj_set_style_border_color(object, lv_color_hex(0x2c4a50), 0);
+    lv_obj_set_style_border_color(object, lv_color_hex(0x8fe3c3), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(object, lv_color_hex(0x2f5a5f), LV_STATE_PRESSED);
     lv_obj_set_style_shadow_width(object, 0, 0);
-    lv_obj_set_style_bg_color(object, lv_color_hex(0x284c50), LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(object, LV_OPA_40, LV_STATE_DISABLED);
     lv_obj_t *caption = label(object, text, 0, 0, width - 20, title_font.font, 0xd9e9e7);
+    lv_obj_set_style_text_color(caption, lv_color_hex(0xffffff), LV_STATE_PRESSED);
     lv_obj_set_style_text_align(caption, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_center(caption);
     lv_obj_add_event_cb(object, callback, LV_EVENT_CLICKED, user_data);
@@ -127,6 +144,43 @@ static void exit_ui(lv_event_t *event) {
     fprintf(stderr, "[ui] exit requested\n");
 }
 
+/* 状态胶囊: 文字长度变了就重新量宽度并居中 */
+static void layout_state_chip(const char *text, uint32_t color) {
+    if (!state_chip) return;
+    lv_point_t size;
+    lv_txt_get_size(&size, text, title_font.font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    int width = 48 + size.x + 24;
+    lv_obj_set_width(state_chip, width);
+    lv_obj_set_x(state_chip, (XR_UI_WIDTH - width) / 2);
+    lv_obj_set_width(state_label, size.x);
+    lv_obj_set_style_text_color(state_label, lv_color_hex(color), 0);
+    lv_obj_set_style_bg_color(state_dot, lv_color_hex(color), 0);
+}
+
+static void scroll_answer_to_bottom(void) {
+    if (!answer_card) return;
+    lv_obj_scroll_to_y(answer_card, LV_COORD_MAX, LV_ANIM_OFF);
+}
+
+/* 眨眼: 5 秒一轮, 闭眼 170ms, 用 smoothstep 睁开; 说话时轻微律动 */
+static int eye_height_at(uint64_t now_ms, int speaking) {
+    const int closed = 12, open = 86;
+    uint32_t phase = (uint32_t)(now_ms % 5000);
+    if (phase < 170)
+        return closed;
+    if (phase < 310) {
+        float t = (float)(phase - 170) / 140.0f;
+        t = t * t * (3.0f - 2.0f * t);
+        return closed + (int)((open - closed) * t);
+    }
+    if (speaking) {
+        float wave = (float)((now_ms % 700) / 700.0f);
+        int offset = (int)(6.0f * (wave < 0.5f ? wave : 1.0f - wave));
+        return open - offset;
+    }
+    return open;
+}
+
 static void build_conversation(lv_obj_t *screen) {
     conversation_page = panel(screen, 0, 185, 1080, 1450, 0x0c171b, 0);
     label(conversation_page, "很高兴见到你", 74, 16, 900, large_font.font, 0xf2f0e8);
@@ -139,20 +193,21 @@ static void build_conversation(lv_obj_t *screen) {
     for (int index = 0; index < 2; index++)
         eyes[index] = panel(face, 112 + index * 145, 163, 42, 86, 0x8fe3c3, 21);
     panel(face, 194, 280, 52, 8, 0x8fe3c3, 4);
-    state_label = label(conversation_page, "等待语音服务连接", 80, 868, 920,
+    state_chip = panel(conversation_page, 0, 852, 240, 52, 0x14262a, 26);
+    state_dot = panel(state_chip, 18, 17, 18, 18, 0x8ca5aa, LV_RADIUS_CIRCLE);
+    state_label = label(state_chip, "等待语音服务连接", 48, 8, 180,
                         title_font.font, 0xc8e8dc);
-    lv_obj_set_style_text_align(state_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_t *question = panel(conversation_page, 64, 980, 952, 170, 0x122327, 28);
-    label(question, "你说", 30, 22, 800, body_font.font, 0x6a9499);
+    label(question, "你说", 30, 22, 800, tag_font, 0x6a9499);
     question_label = label(question, "识别后的文字会显示在这里", 30, 77, 884,
                            title_font.font, 0xdce5e4);
-    lv_obj_t *answer = panel(conversation_page, 64, 1172, 952, 255, 0x152b2d, 28);
-    label(answer, "小瑞", 30, 22, 800, body_font.font, 0x82c6b0);
-    answer_label = label(answer, "界面已就绪。语音连接后，"
-                         "这里将同步显示真实回答。",
-                         30, 77, 884, title_font.font, 0xe6eeea);
-    lv_obj_set_height(answer_label, 160);
-    lv_label_set_long_mode(answer_label, LV_LABEL_LONG_DOT);
+    answer_card = panel(conversation_page, 64, 1172, 952, 255, 0x152b2d, 28);
+    label(answer_card, "小瑞", 30, 22, 800, tag_font, 0x82c6b0);
+    answer_label = label(answer_card, answer_placeholder,
+                          30, 60, 884, title_font.font, 0xe6eeea);
+    /* 长回答要能往下翻: 卡片竖向可滚, 文字自然高度 */
+    lv_obj_set_scroll_dir(answer_card, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(answer_card, LV_SCROLLBAR_MODE_OFF);
 }
 
 static void build_settings(lv_obj_t *screen) {
@@ -214,45 +269,55 @@ static void refresh(lv_timer_t *timer) {
     {
         connected = available;
         displayed_state = UINT32_MAX;
+        displayed_speaking = -1;
         const char *connection = connected ? "语音已连接 · 本机实时状态" :
                                             "语音 IPC 未连接 · 控制暂不可用";
         lv_label_set_text(connection_label, connection);
         if (connected)
         {
             lv_obj_clear_state(volume_slider, LV_STATE_DISABLED);
-            lv_obj_clear_state(stop_button, LV_STATE_DISABLED);
         }
         else
         {
             lv_obj_add_state(volume_slider, LV_STATE_DISABLED);
             lv_obj_add_state(stop_button, LV_STATE_DISABLED);
             lv_label_set_text(state_label, "等待语音服务连接");
+            layout_state_chip("等待语音服务连接", state_palette[0]);
             lv_label_set_text(volume_label, "等待连接");
             displayed_volume = -1;
         }
     }
     const xr_ui_message_t *status = xr_ui_client_status();
     uint32_t state = demo ? (uint32_t)((now_ms / 5000) % 4) : status->state;
+    if (state > XR_UI_SPEAKING) state = XR_UI_READY;
     if ((connected || demo) && state != displayed_state)
     {
-        static const char *states[] = {
-            "等你说一句「小瑞小瑞」", "我在听，请说",
-            "让我想一想", "正在回答你",
-        };
-        lv_label_set_text(state_label, states[state]);
+        lv_label_set_text(state_label, state_text[state]);
+        layout_state_chip(state_text[state], state_palette[state]);
         displayed_state = state;
+    }
+    /* 停止按钮只有在真在回答时才有意义, 否则点了没反应 */
+    int speaking = (connected && state == XR_UI_SPEAKING) ? 1 : 0;
+    if (speaking != displayed_speaking)
+    {
+        displayed_speaking = speaking;
+        if (speaking) lv_obj_clear_state(stop_button, LV_STATE_DISABLED);
+        else lv_obj_add_state(stop_button, LV_STATE_DISABLED);
     }
     if (connected)
     {
         if (strcmp(displayed_question, status->question))
         {
             memcpy(displayed_question, status->question, sizeof(displayed_question));
-            lv_label_set_text(question_label, displayed_question);
+            lv_label_set_text(question_label, displayed_question[0] ?
+                              displayed_question : question_placeholder);
         }
         if (strcmp(displayed_answer, status->answer))
         {
             memcpy(displayed_answer, status->answer, sizeof(displayed_answer));
-            lv_label_set_text(answer_label, displayed_answer);
+            lv_label_set_text(answer_label, displayed_answer[0] ?
+                              displayed_answer : answer_placeholder);
+            scroll_answer_to_bottom();
         }
         if (((int)status->volume != displayed_volume ||
              lv_slider_get_value(volume_slider) != (int)status->volume) &&
@@ -265,7 +330,7 @@ static void refresh(lv_timer_t *timer) {
             lv_slider_set_value(volume_slider, displayed_volume, LV_ANIM_OFF);
         }
     }
-    int eye_height = now_ms % 5000 < 180 ? 12 : 86;
+    int eye_height = eye_height_at(now_ms, state == XR_UI_SPEAKING);
     for (int index = 0; index < 2; index++)
     {
         if (lv_obj_get_height(eyes[index]) != eye_height)
@@ -331,6 +396,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[ui] cannot initialize Chinese fonts\n");
         goto cleanup;
     }
+    /* 小字号只用于卡片标签, 加载失败就退回正文, 不因此退出 */
+    tag_font = load_font(&small_font, font_path, 22) == 0 ? small_font.font : body_font.font;
     if (!snapshot && !demo && xr_ui_client_open(socket_path) != 0)
     {
         fprintf(stderr, "[ui] cannot initialize IPC client\n");
@@ -357,7 +424,7 @@ int main(int argc, char **argv) {
                           "我叫小瑞，是运行在开发板上的语音助手。"
                           "很高兴认识你。");
     }
-    lv_timer_create(refresh, 100, NULL);
+    lv_timer_create(refresh, 50, NULL);
     refresh(NULL);
     lv_refr_now(NULL);
     if (snapshot)
@@ -369,12 +436,7 @@ int main(int argc, char **argv) {
     result = 0;
     while (!interrupted)
     {
-        if (xr_display_pump() != 0)
-        {
-            result = 1;
-            break;
-        }
-        lv_timer_handler();
+        uint32_t idle_ms = lv_timer_handler();
         if (dump_requested)
         {
             dump_requested = 0;
@@ -382,8 +444,15 @@ int main(int argc, char **argv) {
             if (dump_path && xr_display_dump(dump_path) != 0)
                 fprintf(stderr, "[ui] screenshot write failed\n");
         }
-        struct timespec delay = {.tv_nsec = 10000000};
-        nanosleep(&delay, NULL);
+        /* 等 wayland 事件, 最多等下一个 LVGL 定时器: 原来固定 10ms 空转
+           (100Hz 唤醒), 现在 ~30Hz, 触摸照样即时(有事件 poll 立刻返回) */
+        int wait = idle_ms > 50 ? 50 : (int)idle_ms;
+        if (wait < 1) wait = 1;
+        if (xr_display_pump(wait) != 0)
+        {
+            result = 1;
+            break;
+        }
     }
 cleanup:
     xr_ui_client_close();

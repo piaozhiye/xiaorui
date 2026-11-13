@@ -16,9 +16,9 @@ typedef struct {
     uint32_t state;
     uint32_t volume;
     char question[256];
-    char answer[768];
+    char answer[4096];
 } xr_ui_message_t;
 
-_Static_assert(sizeof(xr_ui_message_t) == 1044, "Unexpected UI wire layout");
+_Static_assert(sizeof(xr_ui_message_t) == 4372, "Unexpected UI wire layout");
 
 #endif

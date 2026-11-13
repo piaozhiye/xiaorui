@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 #include <wayland-client.h>
 
@@ -17,6 +18,9 @@ typedef struct {
     struct wl_buffer *buffer;
     uint32_t *pixels;
     bool busy;
+    bool presented;
+    lv_area_t pending;
+    bool has_pending;
 } frame_t;
 
 typedef struct {
@@ -47,13 +51,40 @@ static struct {
     touch_event_t touch_events[16];
     unsigned int touch_head;
     unsigned int touch_count;
+    lv_area_t dirty;
+    bool dirty_valid;
 } port;
 
 static const size_t frame_bytes = XR_UI_WIDTH * XR_UI_HEIGHT * sizeof(uint32_t);
 
+static void rect_union(lv_area_t *target, bool *valid, const lv_area_t *area) {
+    if (!*valid) {
+        *target = *area;
+        *valid = true;
+        return;
+    }
+    if (area->x1 < target->x1) target->x1 = area->x1;
+    if (area->y1 < target->y1) target->y1 = area->y1;
+    if (area->x2 > target->x2) target->x2 = area->x2;
+    if (area->y2 > target->y2) target->y2 = area->y2;
+}
+
+static void copy_rect(uint32_t *destination, const lv_area_t *area) {
+    int width = area->x2 - area->x1 + 1;
+    for (int row = area->y1; row <= area->y2; row++)
+        memcpy(destination + (size_t)row * XR_UI_WIDTH + area->x1,
+               port.pixels + (size_t)row * XR_UI_WIDTH + area->x1,
+               (size_t)width * 4);
+}
+
 static void buffer_release(void *data, struct wl_buffer *buffer) {
     (void)buffer;
-    ((frame_t *)data)->busy = false;
+    frame_t *frame = (frame_t *)data;
+    frame->busy = false;
+    if (frame->has_pending && frame->presented) {
+        copy_rect(frame->pixels, &frame->pending);
+        frame->has_pending = false;
+    }
 }
 
 static const struct wl_buffer_listener buffer_listener = {.release = buffer_release};
@@ -87,21 +118,42 @@ static int create_frame(frame_t *frame) {
 }
 
 static void present(void) {
-    if (!port.pending || !port.configured || port.closed)
+    if (!port.pending || !port.configured || port.closed || !port.dirty_valid)
         return;
+    frame_t *target = NULL;
     for (size_t index = 0; index < 2; index++)
-    {
-        frame_t *frame = &port.frames[index];
-        if (frame->busy)
-            continue;
-        memcpy(frame->pixels, port.pixels, frame_bytes);
-        wl_surface_attach(port.surface, frame->buffer, 0, 0);
-        wl_surface_damage(port.surface, 0, 0, XR_UI_WIDTH, XR_UI_HEIGHT);
-        wl_surface_commit(port.surface);
-        frame->busy = true;
-        port.pending = false;
-        break;
+        if (port.frames[index].buffer && !port.frames[index].busy) {
+            target = &port.frames[index];
+            break;
+        }
+    if (!target)
+        return;
+    lv_area_t area = port.dirty;
+    if (!target->presented) {
+        memcpy(target->pixels, port.pixels, frame_bytes);
+        area.x1 = 0;
+        area.y1 = 0;
+        area.x2 = XR_UI_WIDTH - 1;
+        area.y2 = XR_UI_HEIGHT - 1;
+    } else {
+        copy_rect(target->pixels, &area);
     }
+    frame_t *other = (target == &port.frames[0]) ? &port.frames[1] : &port.frames[0];
+    if (other->buffer) {
+        if (other->busy)
+            rect_union(&other->pending, &other->has_pending, &area);
+        else if (other->presented)
+            copy_rect(other->pixels, &area);
+    }
+    target->presented = true;
+    wl_surface_attach(port.surface, target->buffer, 0, 0);
+    wl_surface_damage(port.surface, area.x1, area.y1,
+                      area.x2 - area.x1 + 1, area.y2 - area.y1 + 1);
+    wl_surface_commit(port.surface);
+    target->busy = true;
+    target->has_pending = false;
+    port.pending = false;
+    port.dirty_valid = false;
 }
 
 static void flush(lv_disp_drv_t *driver, const lv_area_t *area, lv_color_t *colors) {
@@ -111,6 +163,7 @@ static void flush(lv_disp_drv_t *driver, const lv_area_t *area, lv_color_t *colo
         memcpy(port.pixels + (size_t)row * XR_UI_WIDTH + area->x1,
                colors + (size_t)(row - area->y1) * width, (size_t)width * 4);
     }
+    rect_union(&port.dirty, &port.dirty_valid, area);
     if (lv_disp_flush_is_last(driver))
     {
         port.pending = true;
@@ -368,15 +421,21 @@ error:
     return -1;
 }
 
-int xr_display_pump(void) {
+int xr_display_pump(int timeout_ms) {
     if (port.closed)
         return -1;
-    if (!port.display)
+    if (!port.display) {
+        if (timeout_ms > 0) {
+            struct timespec delay = {.tv_sec = timeout_ms / 1000,
+                                     .tv_nsec = (long)(timeout_ms % 1000) * 1000000};
+            nanosleep(&delay, NULL);
+        }
         return 0;
+    }
     if (wl_display_dispatch_pending(port.display) < 0)
         return -1;
     struct pollfd descriptor = {.fd = wl_display_get_fd(port.display), .events = POLLIN};
-    int result = poll(&descriptor, 1, 0);
+    int result = poll(&descriptor, 1, timeout_ms);
     if (result < 0 && errno != EINTR)
         return -1;
     if (result > 0)

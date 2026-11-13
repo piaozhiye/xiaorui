@@ -17,6 +17,14 @@ LVGL 依赖的头文件、库及其许可应由使用者保留；这些二进制
   ASR 问句与 TTS 分句字幕；音量复用软件增益，停止复用后端 abort。
 - 设置页的“退出界面”关闭 UI，恢复 Weston 原界面，语音继续运行。
 
+界面细节：状态用带色点的胶囊（按时钟/聆听/思考/回答四种颜色区分），眨眼是
+平滑过渡、说话时轻微律动；回答卡片可上下滑动并自动跟到最新一句；“停止回答”
+只在真正回答时可用，其余时间是灰的。
+
+渲染只走脏区：LVGL 刷新的区域会被合并成一个矩形，只把这块拷进 shm 缓冲、
+只损伤这块，合成器不用整屏重画。主循环改成阻塞等 wayland 事件（原来固定
+10ms 空转，100Hz 唤醒），板上实测 UI 进程 CPU 从 0.7% 降到 0%。
+
 ## 构建
 
 依赖与参考工程匹配的 LVGL 8.4 SDK（`include/lvgl`、`include/lv_conf.h`、
@@ -78,7 +86,7 @@ adb -s SERIAL shell 'sh /etc/init.d/S99xiaorui-ui status'
 
 ## 语音 IPC 契约
 
-`board/ui_protocol.h` 定义本机 Unix datagram v1 协议，状态包固定 1044 字节，
+`board/ui_protocol.h` 定义本机 Unix datagram v1 协议，状态包固定 4372 字节，
 含 magic、version、type、state、volume、UTF-8 question/answer（均须 NUL 结尾）。
 协议使用本机字节序，仅限同板 C 进程，不是网络 API。
 UI 使用进程独有的 abstract socket，每 500ms 向 `XR_UI_SOCKET` 请求状态；
@@ -90,8 +98,11 @@ UI 不建立、删除或覆盖服务端 socket。
 
 服务端在语音线程中非阻塞处理 QUERY/VOLUME/STOP，音频排空期间继续轮询。
 状态和字幕来自会话事件，不解析日志；字幕是已解码的 UTF-8 明文（网关的
-`\uXXXX` 转义在后端解好，IPC 这层不再传 JSON），字幕容量有限，长回答按
-UTF-8 字符边界截断。
+`\uXXXX` 转义在后端解好，IPC 这层不再传 JSON），回答分句之间用换行分隔，
+字幕容量有限（回答 4096 字节），超出的按 UTF-8 字符边界截断。
+
+字幕只在"这一轮的第一段内容"到达时才清上一轮：噪声触发、又被网关丢掉的
+轮次不会把用户刚问的和刚答的擦掉。
 目录权限为 0700，socket 为 0600，并校验发送者 UID；UI 与前端应使用同一用户。
 异常退出后自动回收遗留 socket，拒绝覆盖仍活跃的服务端或普通文件。
 未设置 `XR_UI_SOCKET` 时不启用服务端；连接失败不阻止语音工作。
