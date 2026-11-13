@@ -335,7 +335,7 @@ static void build_settings(lv_obj_t *screen) {
     label(details, "运行时长", 40, 315, 280, body_font.font, 0x8ca5aa);
     uptime_label = label(details, "--", 320, 315, 560, body_font.font, 0x82c6b0);
     label(details, "RK3562 EVB2 · 1080×1920 · LVGL 8.4 / Wayland",
-          40, 390, 880, tag_font, 0x64798a);
+          40, 390, 880, tag_font, 0x7f9ea0);
     label(settings_page, "连接中断时控制会自动禁用，"
           "不影响语音程序继续运行。",
           76, 1180, 900, body_font.font, 0x8ca5aa);
@@ -369,7 +369,7 @@ static void build_ui(void) {
     clock_label = label(screen, "--:--", 814, 49, 200, &lv_font_montserrat_32, 0xf2f0e8);
     date_label = label(screen, "", 740, 95, 274, tag_font, 0x6a9499);
     lv_obj_set_style_text_align(date_label, LV_TEXT_ALIGN_RIGHT, 0);
-    label(screen, "小瑞 · 你的端侧语音伙伴", 74, 109, 900, body_font.font, 0x64838a);
+    label(screen, "小瑞 · 你的端侧语音伙伴", 74, 109, 900, body_font.font, 0x7f9ea0);
     build_conversation(screen);
     build_settings(screen);
     connection_label = label(screen, "语音 IPC 未连接，控制暂不可用", 76, 1660, 930,

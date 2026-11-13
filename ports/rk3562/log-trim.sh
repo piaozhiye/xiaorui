@@ -8,6 +8,7 @@ for f in /data/xiaorui-gateway/data/gateway.log \
          /data/xiaorui-gateway/data/rkllm.log \
          /data/xiaorui-gateway/data/stack.log \
          /data/xiaorui/frontend.log \
+         /data/xiaorui-ui/ui.log \
          /data/ha-config/ha.log; do
     [ -f "$f" ] || continue
     sz=$(stat -c%s "$f" 2>/dev/null) || continue

@@ -28,6 +28,14 @@ running_pids() {
     done
 }
 
+# OOM 优先级: 语音主链路(网关/RKLLM)由 start-ha.sh 保护(-500), UI 只是显示层,
+# 内存紧张时先牺牲它, 保住语音链路。进程重启后 pid 变, 所以每次启动重设。
+set_oom_priority() {
+    for candidate in $(running_pids); do
+        echo 200 > "/proc/$candidate/oom_score_adj" 2>/dev/null || true
+    done
+}
+
 start_ui() {
     if [ -n "$(running_pids)" ]; then
         echo 'xiaorui-ui: already running'
@@ -53,6 +61,7 @@ start_ui() {
     while [ "$attempts" -lt 20 ]; do
         if [ -n "$(running_pids)" ]; then
             echo 'xiaorui-ui: started'
+            set_oom_priority
             return 0
         fi
         attempts=$((attempts + 1))
