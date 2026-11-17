@@ -5,6 +5,7 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$DIR/../.." && pwd)"
 SERIAL="${XZ_BOARD_SERIAL:-}"
 SVC=/data/xiaorui-gateway/data/.config.yaml
 
@@ -54,6 +55,11 @@ log "板内配置已恢复, 重启网关…"
 $ADB shell "pkill -f 'xiaorui-gateway/server/[a]pp.py' 2>/dev/null; sleep 2; true"
 # 启动放板上后台(adb 秒回), 就绪在 PC 侧轮询 —— 板内网关加载 ASR/TTS 模型
 # 要 20s+, adb 同步等会被 PC 侧超时截断(2026-11-11 实测), 留下半启动态。
+# 回滚前也把仓库里的 start-board-stack.sh 与端口探针推上去:
+# 板上的可能是旧副本(缺 LD_LIBRARY_PATH 修复或旧探针路径)。
+adb -s "$SERIAL" push "$DIR/start-board-stack.sh" /data/xiaorui-gateway/start-board-stack.sh >/dev/null
+adb -s "$SERIAL" push "$REPO/board-server/probe-port.py" /data/xiaorui-gateway/probe-port.py >/dev/null
+adb -s "$SERIAL" shell 'chmod +x /data/xiaorui-gateway/start-board-stack.sh /data/xiaorui-gateway/probe-port.py'
 $ADB shell "(setsid sh /data/xiaorui-gateway/start-board-stack.sh >>/data/xiaorui-gateway/data/stack.log 2>&1 </dev/null &); true"
 i=0
 while [ "$i" -lt 120 ]; do

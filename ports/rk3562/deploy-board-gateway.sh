@@ -22,7 +22,8 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 WHEELS="${XR_GATEWAY_WHEELS:-$REPO/board-server/wheels314}"
 VAD_MODEL="${XR_SILERO_VAD_MODEL:-$REPO/models/snakers4_silero-vad/src/silero_vad/data/silero_vad.onnx}"
 RKLLM="${XR_RKLLM_MODEL:-$REPO/models/qwen2.5-0.5b-instruct-rk3562-w8a8.rkllm}"
-for asset in "$REPO/board-server/librkllmrt.so" "$VAD_MODEL" "$RKLLM"; do
+PORT_PROBE="$REPO/board-server/probe-port.py"
+for asset in "$REPO/board-server/librkllmrt.so" "$PORT_PROBE" "$VAD_MODEL" "$RKLLM"; do
     [ -f "$asset" ] || { echo "缺部署资源: $asset，见 DEPLOYMENT.md" >&2; exit 2; }
 done
 [ -d "$WHEELS" ] || { echo "缺离线 wheel 目录: $WHEELS" >&2; exit 2; }
@@ -58,7 +59,7 @@ adb -s "$SERIAL" shell 'mkdir -p /data/wheels' >/dev/null
 adb -s "$SERIAL" push "$WHEELS/." /data/wheels/ >/dev/null
 # opuslib_next 用 ctypes.util.find_library 找 libopus: 板端没有 ldconfig/gcc,
 # 它的 Linux fallback 只认 x86_64 路径 -> 造个 /usr/local/lib/libopus.so.0 软链
-adb -s "$SERIAL" shell 'mkdir -p /usr/local/lib && ln -sf /usr/lib/libopus.so.0 /usr/local/lib/libopus.so.0'
+adb -s "$SERIAL" shell 'mkdir -p /usr/local/lib; if [ ! -e /usr/local/lib/libopus.so.0 ] && [ ! -L /usr/local/lib/libopus.so.0 ]; then ln -s /usr/lib/libopus.so.0 /usr/local/lib/libopus.so.0; fi'
 if ! adb -s "$SERIAL" shell '[ -x /data/gwvenv/bin/python ]' 2>/dev/null; then
     adb -s "$SERIAL" shell '/data/miniforge/bin/python3 -m venv /data/gwvenv'
 fi
@@ -96,15 +97,28 @@ adb -s "$SERIAL" push "$RKLLM" \
 
 echo "== 6) 启动脚本 + 开机自启 =="
 adb -s "$SERIAL" push "$DIR/start-board-stack.sh" /data/xiaorui-gateway/start-board-stack.sh >/dev/null
-adb -s "$SERIAL" push "$DIR/init-S98xiaorui" /etc/init.d/S98xiaorui >/dev/null
-adb -s "$SERIAL" shell 'chmod +x /data/xiaorui-gateway/start-board-stack.sh /etc/init.d/S98xiaorui'
+if [ "${XR_SKIP_INIT_INSTALL:-0}" = "1" ]; then
+    # ES8388 profile 自带开机自启脚本(控制项与 RK809 完全不同), 不装旧板的 S98。
+    adb -s "$SERIAL" shell 'chmod +x /data/xiaorui-gateway/start-board-stack.sh'
+else
+    adb -s "$SERIAL" push "$DIR/init-S98xiaorui" /etc/init.d/S98xiaorui >/dev/null
+    adb -s "$SERIAL" shell 'chmod +x /data/xiaorui-gateway/start-board-stack.sh /etc/init.d/S98xiaorui'
+fi
 
 echo "== 7) 启动板内栈 =="
+# start-board-stack.sh requires this file; push before starting it.
+adb -s "$SERIAL" shell 'mkdir -p /data/xiaorui-gateway'
+adb -s "$SERIAL" push "$PORT_PROBE" /data/xiaorui-gateway/probe-port.py >/dev/null
+adb -s "$SERIAL" shell 'chmod +x /data/xiaorui-gateway/probe-port.py'
 adb -s "$SERIAL" shell 'pkill -f "[s]erver/app.py" 2>/dev/null; sleep 1'
 adb -s "$SERIAL" shell '(setsid sh /data/xiaorui-gateway/start-board-stack.sh >>/data/xiaorui-gateway/data/stack.log 2>&1 </dev/null &); true'
+probe_board_port() {
+    adb -s "$SERIAL" shell "/data/miniforge/bin/python3.14 /data/xiaorui-gateway/probe-port.py $1" \
+        >/dev/null 2>&1
+}
 for port in 8112 8001 8004; do
     elapsed=0
-    until adb -s "$SERIAL" shell "(echo > /dev/tcp/127.0.0.1/$port) 2>/dev/null"; do
+    until probe_board_port "$port"; do
         [ "$elapsed" -lt 180 ] || {
             echo "端口 $port 未就绪(180s)，查 /data/xiaorui-gateway/data/stack.log" >&2
             exit 1

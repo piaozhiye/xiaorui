@@ -150,6 +150,11 @@ $ADB shell "pkill -f 'xiaorui-gateway/server/[a]pp.py' 2>/dev/null; sleep 2; tru
 # 启动放板上后台(adb 秒回), 就绪在 PC 侧轮询 —— 云网关虽不加载大模型,
 # 但 dashscope 首次 import + 板上 python 冷启动也要 10s+, adb 同步等有
 # 被 PC 侧超时截断的风险(2026-11-11 实测, 留下半启动态)。
+# 刷新板上的 start-board-stack.sh 与端口探针: 仓里的版本修了
+# LD_LIBRARY_PATH 与探针路径, 板上是旧副本就享受不到。
+adb -s "$SERIAL" push "$DIR/start-board-stack.sh" /data/xiaorui-gateway/start-board-stack.sh >/dev/null
+adb -s "$SERIAL" push "$REPO/board-server/probe-port.py" /data/xiaorui-gateway/probe-port.py >/dev/null
+adb -s "$SERIAL" shell 'chmod +x /data/xiaorui-gateway/start-board-stack.sh /data/xiaorui-gateway/probe-port.py'
 $ADB shell "(setsid sh /data/xiaorui-gateway/start-board-stack.sh >>/data/xiaorui-gateway/data/stack.log 2>&1 </dev/null &); true"
 i=0
 while [ "$i" -lt 120 ]; do

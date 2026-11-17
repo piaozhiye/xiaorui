@@ -1,0 +1,107 @@
+#!/bin/sh
+# RK3562 + ES8388 (AIOT DEMO LP4X V10) 板端开机自启: 小瑞全栈。
+#
+# 顺序: 定频 -> 时间 -> 采集 mixer -> 板内栈(RKLLM+网关) -> 前端
+# 前端自带重连: 网关没起来时每 10s 重试 WS, 所以不必判断网关可达性。
+#
+# 与 ports/rk3562/init-S98xiaorui(RK809 + PDM + VQE)的区别:
+#   - 没有 RK809 的 "Playback Path"/"Capture MIC Path"/"ADC Capture Volume"
+#     (那是 RK809 codec 的控件, 本板是 ES8388)
+#   - mixer 用 ES8388 自己的控件(麦 PGA + 喇叭开关)
+#   - 本板没有 DMC/DDR devfreq 节点, DDR 无法定频(已在日志里说明)
+#
+# buildroot busybox init: /etc/init.d/rcS 会跑 /etc/init.d/S*
+case "$1" in
+    start)
+        # 0) 定频: CPU / NPU 全部 performance
+        #    NPU 本来就在 1GHz(rknpu_ondemand), 但 governor 切成 performance
+        #    后推理延迟更稳; CPU 侧跑 SenseVoice/Matcha, schedutil 会掉频。
+        for c in 0 1 2 3; do
+            # 节点缺失或权限不足要留痕(spec: 频率相关失败必须记录为未完成项),
+            # 静默失败会让人以为已经定频。
+            if ! echo performance > /sys/devices/system/cpu/cpu$c/cpufreq/scaling_governor 2>/dev/null; then
+                echo "[S98] CPU$c governor 设置失败(节点缺失或权限不足)"
+            fi
+        done
+        NPU=/sys/devices/platform/ff300000.npu/devfreq/ff300000.npu
+        if [ -d "$NPU" ]; then
+            if ! echo performance > "$NPU/governor" 2>/dev/null; then
+                echo "[S98] NPU governor 设置失败(权限不足或不支持 performance)"
+            fi
+        else
+            echo "[S98] 找不到 NPU devfreq 节点, 跳过 NPU governor"
+        fi
+        # DDR: 本板内核声明了 DMC 节点(rockchip,rk3562-dmc)但驱动没有绑定,
+        # 因此没有 DMC devfreq 节点 —— 用户态与内核都没有任何可改 DDR 频率的接口,
+        # 也就是 DDR 频率是固定的: 以引导时固化的频率运行(实测恒为 1332MHz, 见 resmon.sh)。
+        # 没有可写的节点, 所以这里既不需要也不能写 DDR 频率。
+
+        # 1) 时间与时区(板上 RTC 正常时也会兜底)
+        if [ -x /data/xiaorui/board-time.sh ]; then
+            sh /data/xiaorui/board-time.sh setup
+        fi
+
+        # 2) 采集/播放 mixer(板载麦 PGA + 板载喇叭)
+        if [ -x /data/mixer-es8388.sh ]; then
+            sh /data/mixer-es8388.sh || echo "[S98] mixer 设置失败(前端可能拾不到音)"
+        fi
+
+        # 3) 板内栈(NPU 大模型 :8112 + 网关 :8001)
+        if [ -x /data/xiaorui-gateway/start-board-stack.sh ]; then
+            # 和 start-board-stack.sh 共用部署时推送的端口探针文件;
+            # 文件缺失时退回板内内联 socket 探测, 不能空等 60 秒。
+            probe_port() {
+                if [ -f /data/xiaorui-gateway/probe-port.py ]; then
+                    /data/gwvenv/bin/python /data/xiaorui-gateway/probe-port.py "$1" >/dev/null 2>&1
+                else
+                    /data/gwvenv/bin/python -c 'import socket,sys; s=socket.socket(); s.settimeout(1); sys.exit(0 if s.connect_ex(("127.0.0.1", int(sys.argv[1]))) == 0 else 1)' "$1" >/dev/null 2>&1
+                fi
+            }
+            setsid bash /data/xiaorui-gateway/start-board-stack.sh \
+                >>/data/xiaorui-gateway/data/stack.log 2>&1 </dev/null &
+            i=0
+            while [ $i -lt 30 ]; do
+                probe_port 8001 && break
+                sleep 2
+                i=$((i + 1))
+            done
+        fi
+
+        # 4) 前端(采集 + KWS + 播放)
+        if [ -x /data/xiaorui/start-frontend.sh ] \
+            && ! pgrep -x xiaorui_live >/dev/null 2>&1; then
+            mkdir -p /data/xiaorui
+            setsid bash /data/xiaorui/start-frontend.sh \
+                >>/data/xiaorui/frontend.log 2>&1 </dev/null &
+        fi
+        ;;
+    stop)
+        # 只回收本 profile 的进程, 不用 pkill -f(可能匹配到调用它的 shell)。
+        pkill -x xiaorui_live 2>/dev/null || true
+        stop_cmdline() {
+            needle="$1"
+            for d in /proc/[0-9]*; do
+                pid=${d#/proc/}
+                [ "$pid" != "$$" ] || continue
+                [ "$pid" != "$PPID" ] || continue
+                [ -r "$d/cmdline" ] || continue
+                cmd=$(tr '\000' ' ' < "$d/cmdline" 2>/dev/null)
+                case "$cmd" in
+                    *"$needle"*) kill "$pid" 2>/dev/null || true ;;
+                esac
+            done
+        }
+        stop_cmdline "/data/xiaorui-server/llm_rkllm.py"
+        stop_cmdline "/data/xiaorui-gateway/server/app.py"
+        ;;
+    restart)
+        "$0" stop
+        sleep 2
+        "$0" start
+        ;;
+    *)
+        echo "用法: $0 {start|stop|restart}" >&2
+        exit 1
+        ;;
+esac
+exit 0

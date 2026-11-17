@@ -29,4 +29,11 @@ int xr_deci3_run(xr_deci3_t *d, const int16_t *in, int in_n, int16_t *out);
 int xr_mic4_pick(const int16_t *interleaved, int frames, int hw_channels,
                  int mic_ch, int16_t *mono_out);
 
+/* es8388 直采模式的参数校验。
+ * 支持的硬件通道数:
+ *   2 = 板载 ES8388 原生采集(本板: ADC 左右两路, 采集硬件只支持 48kHz)
+ *   4 = 旧板 SAI 数字回环(2 mic + 2 ref, 给 VQE 用)
+ * mic_ch 必须是 [0, hw_channels) 内的通道号。 */
+int xr_es8388_params_ok(int hw_channels, int mic_ch);
+
 #endif

@@ -19,6 +19,10 @@ GW=/data/xiaorui-gateway
 SRV=/data/xiaorui-server
 PY=/data/gwvenv/bin/python
 MODEL=${XR_RKLLM_MODEL:-$SRV/qwen2.5-0.5b-instruct-rk3562-w8a8.rkllm}
+# librkllmrt.so 的 NEEDED 里有 libgomp.so.1, 部分板端镜像(比如 RK3562 AIOT
+# LP4X V10 / Buildroot 2026.02) 没自带, 要用 /data/xiaorui-server/lib 里那份。
+# 目录不存在时这个赋值无害(动态链接器会忽略不存在的路径)。
+export LD_LIBRARY_PATH="$SRV/lib:${LD_LIBRARY_PATH:-}"
 # 人设里写明跑在 RK3562 的 NPU 上(llm_rkllm.py 默认写的是 RK3576)
 export XR_RKLLM_PERSONA="${XR_RKLLM_PERSONA:-你是小瑞，运行在 RK3562 开发板上的端侧语音助手，大脑在本机 NPU 上本地推理。回答控制在两三句话内，适合语音播报，不要用列表。}"
 
@@ -33,8 +37,18 @@ ln -sfn "$GW/models" "$GW/work/models"
 export XR_DATA_DIR="$GW/data"
 export XR_CONFIG_FILE="$GW/data/.config.yaml"
 
-# 端口探测: 板端 busybox 的 ss 不可用, 用 bash 的 /dev/tcp
-probe() { (echo > /dev/tcp/127.0.0.1/"$1") 2>/dev/null; }
+# 端口探测: 优先用部署器推来的独立脚本(adb shell 的多层引号会损坏 python -c,
+# /dev/tcp 在 setsid 新会话中也不可靠)。旧板路径(deploy-cloud-gateway /
+# rollback-cloud-gateway)不推这个文件, 此时退回板内内联 socket 探测 ——
+# 内联代码在板上直接执行, 没有 adb 引号问题。
+PROBE=/data/xiaorui-gateway/probe-port.py
+probe() {
+    if [ -f "$PROBE" ]; then
+        "$PY" "$PROBE" "$1" >/dev/null 2>&1
+    else
+        "$PY" -c 'import socket,sys; s=socket.socket(); s.settimeout(1); sys.exit(0 if s.connect_ex(("127.0.0.1", int(sys.argv[1]))) == 0 else 1)' "$1" >/dev/null 2>&1
+    fi
+}
 
 # --- 1) RKLLM 大模型 (NPU) ---
 if ! probe 8112; then

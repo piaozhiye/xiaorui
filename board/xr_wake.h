@@ -121,15 +121,55 @@ static const char *xr_find_wake_mid(const char *p) {
     return NULL;
 }
 
-/* UTF-8 字符数: "单单位放宽档"要求尾巴 >=2 字(单字尾巴是回声特征, 不放行) */
-static int xr_utf8_chars(const char *p) {
+/* Count command content, not punctuation. In particular, the single-wake
+ * fallback must treat "吗？" as one semantic character, not two UTF-8 code
+ * points; otherwise a KWS false hit on "你叫小瑞吗？" can pass the >=2 gate.
+ */
+static int xr_utf8_command_chars(const char *p) {
     int n = 0;
     if (!p) return 0;
     while (*p) {
-        if ((*p & 0xE0) == 0xC0) p += 2;
-        else if ((*p & 0xF0) == 0xE0) p += 3;
-        else if ((*p & 0xF8) == 0xF0) p += 4;
-        else p += 1;
+        const unsigned char *s = (const unsigned char *)p;
+        unsigned int cp;
+        int bytes;
+        if (s[0] < 0x80) {
+            cp = s[0];
+            bytes = 1;
+        } else if ((s[0] & 0xE0) == 0xC0 && s[1]) {
+            cp = ((unsigned int)(s[0] & 0x1F) << 6) | (s[1] & 0x3F);
+            bytes = 2;
+        } else if ((s[0] & 0xF0) == 0xE0 && s[1] && s[2]) {
+            cp = ((unsigned int)(s[0] & 0x0F) << 12) |
+                 ((unsigned int)(s[1] & 0x3F) << 6) | (s[2] & 0x3F);
+            bytes = 3;
+        } else if ((s[0] & 0xF8) == 0xF0 && s[1] && s[2] && s[3]) {
+            cp = ((unsigned int)(s[0] & 0x07) << 18) |
+                 ((unsigned int)(s[1] & 0x3F) << 12) |
+                 ((unsigned int)(s[2] & 0x3F) << 6) | (s[3] & 0x3F);
+            bytes = 4;
+        } else {
+            /* Invalid/truncated UTF-8 is ignored as command content. */
+            p++;
+            continue;
+        }
+        p += bytes;
+        if (cp < 0x80) {
+            if ((cp >= '0' && cp <= '9') || (cp >= 'A' && cp <= 'Z') ||
+                (cp >= 'a' && cp <= 'z'))
+                n++;
+            continue;
+        }
+        /* ASCII, general, CJK, presentation-form and full-width punctuation. */
+        if ((cp >= 0x2000 && cp <= 0x206F) ||
+            (cp >= 0x2E00 && cp <= 0x2E7F) ||
+            (cp >= 0x3000 && cp <= 0x303F) ||
+            (cp >= 0xFE10 && cp <= 0xFE1F) ||
+            (cp >= 0xFE30 && cp <= 0xFE6F) ||
+            (cp >= 0xFF01 && cp <= 0xFF0F) ||
+            (cp >= 0xFF1A && cp <= 0xFF20) ||
+            (cp >= 0xFF3B && cp <= 0xFF40) ||
+            (cp >= 0xFF5B && cp <= 0xFF65))
+            continue;
         n++;
     }
     return n;
@@ -176,7 +216,7 @@ static int xr_parse_wake_kws(const char *text, char *out, size_t cap,
     if (xr_is_wake_only_kws(text)) return 1;
     rest = xr_find_wake_once(text);
     if (!rest) return 0;
-    if (*rest && xr_utf8_chars(rest) < 2) return 0;
+    if (*rest && xr_utf8_command_chars(rest) < 2) return 0;
     if (single_unit) *single_unit = 1;
     if (*rest) { snprintf(out, cap, "%s", rest); return 2; }
     out[0] = 0;

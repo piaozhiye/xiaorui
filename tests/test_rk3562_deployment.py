@@ -163,6 +163,7 @@ def fake_deployment(tmp_path, monkeypatch):
         (repo / directory).mkdir(parents=True)
     for filename in (
         "board-server/librkllmrt.so", "board-server/llm_rkllm.py",
+        "board-server/probe-port.py",
         "models/qwen2.5-0.5b-instruct-rk3562-w8a8.rkllm",
         "models/snakers4_silero-vad/src/silero_vad/data/silero_vad.onnx",
         "board/xiaorui_live", "keywords.txt",
@@ -199,17 +200,57 @@ if "push" in arguments:
     source = Path(arguments[arguments.index("push") + 1])
     sys.exit(0 if source.exists() else 1)
 command = arguments[-1]
-if "cat /proc/device-tree/model" in command:
+if command == "get-state":
+    print("device")
+elif "cat /proc/device-tree/model" in command:
     print("RK3562 EVB2")
+elif "wc -l" in command and "frontend.log" in command:
+    print("123")
+elif "amixer" in command and "cget" in command:
+    print("numid=52,iface=MIXER,name='Left Channel Capture Volume'")
+    print("  ; type=INTEGER,access=rw---R--,values=1,min=0,max=8,step=0")
+    if "Output" in command:
+        # 区间控件: amixer 打印 ": values=15,15"
+        print("  : values=15,15")
+    elif "Capture Volume" in command:
+        # 单值控件: ": values=8"
+        print("  : values=8")
+    else:
+        print("  : values=27")
+elif "amixer" in command and "sget" in command:
+    print("Simple mixer control 'Main Mic',0")
+    print("  Mono: Playback [on]")
+elif "cat /proc/asound/cards" in command:
+    print(" 0 [rockchipes8388 ]: rockchip-es8388 - rockchip-es8388")
+elif "cat /data/xiaorui/.rk3562-es8388-state" in command:
+    print(os.environ.get("PROFILE_STATE", ""))
+elif "df -Pk /data" in command:
+    available = os.environ.get("AVAILABLE_KB", "9000000")
+    print("Filesystem 1024-blocks Used Available Capacity Mounted on")
+    print(f"/dev/root 10000000 1000000 {available} 10% /data")
+elif "test -f" in command and os.environ.get("FAIL_BOARD_FILE") and \
+        os.environ["FAIL_BOARD_FILE"] in command:
+    sys.exit(1)
+elif "pgrep -x xiaorui_live" in command:
+    if os.environ.get("FRONTEND_ALIVE", "1") != "1":
+        sys.exit(1)
+    # 每次调用给一个不同的 PID: 部署要求"新前端 PID 与旧的不同"。
+    counter_path = os.environ.get("PGREP_COUNTER")
+    pid = 1000
+    if counter_path and os.path.exists(counter_path):
+        pid = int(Path(counter_path).read_text().strip() or 1000)
+    if counter_path:
+        Path(counter_path).write_text(str(pid + 1))
+    print(pid)
 elif "snd_config_search" in command:
     sys.exit(0 if os.environ.get("ALSA_CONFIG_VALID", "1") == "1" else 1)
 elif command == "/data/miniforge/bin/python3 -V":
     print("Python 3.14")
 elif "grep -c" in command:
     print("1")
-elif "/dev/tcp/" in command:
-    port = os.environ.get("FAIL_PORT")
-    sys.exit(1 if port and "/" + port + ")" in command else 0)
+elif "connect_ex" in command or "/data/xiaorui-gateway/probe-port.py" in command:
+    port = command.rsplit(None, 1)[-1].strip(chr(39) + chr(34))
+    sys.exit(1 if port == os.environ.get("FAIL_PORT") else 0)
 elif "--password-stdin" in command:
     Path(os.environ["PASSWORD_CAPTURE"]).write_text(sys.stdin.read())
 ''')
@@ -220,6 +261,7 @@ elif "--password-stdin" in command:
     log = tmp_path / "adb.log"
     monkeypatch.setenv("PATH", str(binaries) + os.pathsep + os.environ["PATH"])
     monkeypatch.setenv("ADB_LOG", str(log))
+    monkeypatch.setenv("PGREP_COUNTER", str(tmp_path / "pgrep-counter"))
     monkeypatch.setenv("XR_MINIFORGE", str(repo / "board-server/miniforge.sh"))
     monkeypatch.setenv("PASSWORD_CAPTURE", str(tmp_path / "password"))
     return port, log
@@ -241,6 +283,30 @@ def test_gateway_deployment_requires_every_port(fake_deployment, monkeypatch, fa
     if failed_port:
         assert f"端口 {failed_port} 未就绪" in result.stderr
     assert "timeout 20" not in log.read_text()
+
+
+def test_shared_stack_uses_neutral_probe_path():
+    """共享脚本不能依赖某个板型的文件名(旧板没有 es8388 探针)。"""
+    source = (PORT / "start-board-stack.sh").read_text()
+    assert "PROBE=/data/xiaorui-gateway/probe-port.py" in source
+    assert "xr-es8388-probe" not in source
+
+
+def test_gateway_pushes_probe_before_starting_stack(fake_deployment):
+    port, log = fake_deployment
+    result = run_deployment(port, "deploy-board-gateway.sh", "fake-board")
+    assert result.returncode == 0, result.stderr
+    commands = [json.loads(line) for line in log.read_text().splitlines()]
+    probe_push = next(
+        i for i, command in enumerate(commands)
+        if "push" in command and "probe-port.py" in " ".join(command)
+    )
+    assert commands[probe_push][-1] == "/data/xiaorui-gateway/probe-port.py"
+    stack_start = next(
+        i for i, command in enumerate(commands)
+        if "shell" in command and "setsid sh /data/xiaorui-gateway/start-board-stack.sh" in command[-1]
+    )
+    assert probe_push < stack_start
 
 
 @pytest.mark.parametrize("alsa_config_valid", [False, True])
@@ -274,15 +340,61 @@ def test_frontend_preflight_accepts_alsa_devices_without_hints(tmp_path, monkeyp
 def test_running_gateway_requires_http_port(tmp_path, monkeypatch, http_ready):
     source = (PORT / "start-board-stack.sh").read_text()
     source = source.replace("GW=/data/xiaorui-gateway", "GW=" + shlex.quote(str(tmp_path)))
+    fake_python = tmp_path / "probe-python"
+    fake_python.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        "port = sys.argv[-1]\n"
+        "sys.exit(1 if port == os.environ.get('FAIL_PORT') else 0)\n"
+    )
+    fake_python.chmod(0o755)
+    fake_probe = tmp_path / "probe-port.py"
+    fake_probe.write_text("#!/bin/sh\nexit 0\n")
     source = source.replace(
-        'probe() { (echo > /dev/tcp/127.0.0.1/"$1") 2>/dev/null; }',
-        'probe() { [ "$1" != "${FAIL_PORT:-}" ]; }',
+        "PY=/data/gwvenv/bin/python",
+        "PY=" + shlex.quote(str(fake_python)),
+    )
+    source = source.replace(
+        "PROBE=/data/xiaorui-gateway/probe-port.py",
+        "PROBE=" + shlex.quote(str(fake_probe)),
     )
     monkeypatch.setenv("FAIL_PORT", "" if http_ready else "8004")
     result = subprocess.run(["bash", "-c", source], capture_output=True, text=True, check=False)
     assert (result.returncode == 0) == http_ready
     if not http_ready:
         assert "8004 未就绪" in result.stdout
+
+
+def test_stack_start_falls_back_to_inline_probe_when_probe_file_missing(
+    tmp_path, monkeypatch
+):
+    """旧板路径(deploy-cloud-gateway/rollback-cloud-gateway)不推探针文件, 不能因此起不来。
+
+    回归: 探针文件被改成硬依赖后, 旧板的云网关切换/回滚会因为
+    "缺端口探针"直接退出, 板内栈起不来。
+    """
+    source = (PORT / "start-board-stack.sh").read_text()
+    source = source.replace("GW=/data/xiaorui-gateway", "GW=" + shlex.quote(str(tmp_path)))
+    fake_python = tmp_path / "probe-python"
+    fake_python.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        "port = sys.argv[-1]\n"
+        "sys.exit(1 if port == os.environ.get('FAIL_PORT') else 0)\n"
+    )
+    fake_python.chmod(0o755)
+    source = source.replace(
+        "PY=/data/gwvenv/bin/python",
+        "PY=" + shlex.quote(str(fake_python)),
+    )
+    source = source.replace(
+        "PROBE=/data/xiaorui-gateway/probe-port.py",
+        "PROBE=" + shlex.quote(str(tmp_path / "missing-probe.py")),
+    )
+    monkeypatch.setenv("FAIL_PORT", "")
+    result = subprocess.run(["bash", "-c", source], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "缺端口探针" not in result.stdout
 
 
 def test_ha_deployment_requires_explicit_password(fake_deployment, monkeypatch):

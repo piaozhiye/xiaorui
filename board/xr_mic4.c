@@ -79,3 +79,10 @@ int xr_mic4_pick(const int16_t *interleaved, int frames, int hw_channels,
         mono_out[i] = interleaved[i * hw_channels + mic_ch];
     return frames;
 }
+
+int xr_es8388_params_ok(int hw_channels, int mic_ch) {
+    /* 2ch: 板载 ES8388 原生采集; 4ch: 旧板 SAI 数字回环(2mic+2ref 给 VQE)。 */
+    if (hw_channels != 2 && hw_channels != 4) return 0;
+    if (mic_ch < 0 || mic_ch >= hw_channels) return 0;
+    return 1;
+}

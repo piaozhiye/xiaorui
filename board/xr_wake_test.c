@@ -126,10 +126,13 @@ int main(void) {
         assert(xr_find_wake_once("今天天气不错") == NULL);
         assert(xr_find_wake_once("") == NULL);
         /* UTF-8 字符计数: 单单位放宽档要求尾巴 >=2 字 */
-        assert(xr_utf8_chars("") == 0);
-        assert(xr_utf8_chars("好") == 1);
-        assert(xr_utf8_chars("好的") == 2);
-        assert(xr_utf8_chars("abc") == 3);
+        assert(xr_utf8_command_chars("") == 0);
+        assert(xr_utf8_command_chars("好") == 1);
+        assert(xr_utf8_command_chars("好的") == 2);
+        assert(xr_utf8_command_chars("abc") == 3);
+        assert(xr_utf8_command_chars("吗？") == 1);
+        assert(xr_utf8_command_chars("现在几点了？") == 5);
+        assert(xr_utf8_command_chars("Open 2") == 5);
     }
     /* KWS 命中时的唤醒门: 双单元优先, 单单位兜底(护栏: 尾巴 >=2 字) */
     {
@@ -155,6 +158,12 @@ int main(void) {
         assert(xr_parse_wake_kws("瑞小瑞好", cmd, sizeof cmd, &single) == 0);
         assert(xr_parse_wake_kws("水鬼", cmd, sizeof cmd, &single) == 0);
         assert(xr_parse_wake_kws("小爱同学你好", cmd, sizeof cmd, &single) == 0);
+        /* A KWS single-unit false hit on "你叫小瑞吗？" must not turn the
+         * trailing question particle + punctuation into a command. */
+        assert(xr_parse_wake_kws("你叫小瑞吗？", cmd, sizeof cmd, &single) == 0);
+        /* Punctuation is not command content; a real multi-character command is. */
+        assert(xr_parse_wake_kws("小瑞现在几点了？", cmd, sizeof cmd, &single) == 2);
+        assert(!strcmp(cmd, "现在几点了？"));
         assert(xr_parse_wake_kws("今天天气不错", cmd, sizeof cmd, &single) == 0);
         assert(xr_parse_wake_kws("", cmd, sizeof cmd, &single) == 0);
         assert(xr_parse_wake_kws(NULL, cmd, sizeof cmd, &single) == 0);

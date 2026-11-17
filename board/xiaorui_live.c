@@ -528,8 +528,9 @@ int main(int argc, char **argv) {
         if (!getenv("XR_MIC") && argc <= 1) dev = "hw:rockchipes8388,0";
         g_hw_ch = getenv("XR_ES8388_CHANNELS") ? atoi(getenv("XR_ES8388_CHANNELS")) : 4;
         g_mic_ch = getenv("XR_ES8388_MIC_CH") ? atoi(getenv("XR_ES8388_MIC_CH")) : 0;
-        if (g_hw_ch != 4 || g_mic_ch < 0 || g_mic_ch >= g_hw_ch) {
-            fprintf(stderr, "[xr] es8388 参数非法: ch=%d mic=%d (仅支持 4ch, mic 0-3)\n",
+        if (!xr_es8388_params_ok(g_hw_ch, g_mic_ch)) {
+            fprintf(stderr, "[xr] es8388 参数非法: ch=%d mic=%d (支持 2ch(板载 ES8388 原生)"
+                            " 或 4ch(SAI 回环), mic 取值 0..ch-1)\n",
                     g_hw_ch, g_mic_ch);
             return 2;
         }

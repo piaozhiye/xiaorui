@@ -81,3 +81,6 @@ ports/rk3562/ha-ab.sh
 ports/rk3562/say-tests.sh
 ports/rk3562/to48k-stereo.py
 ui/build/
+
+# superpowers 流程的过程文档(spec/plan), 不进产品提交
+docs/superpowers/

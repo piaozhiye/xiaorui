@@ -131,6 +131,19 @@ int main(void) {
     xr_deci3_init(&a);
     CHECK(xr_deci3_run(&a, m2, FR, tmp) == FR / 3, "4ch 链路输出数");
 
+    /* 7. es8388 直采参数校验: 2ch(板载 ES8388 原生)/4ch(SAI 回环) 都放行,
+     *    其余通道数与越界 mic 通道都要拒绝 */
+    CHECK(xr_es8388_params_ok(2, 0), "2ch/mic0 放行(板载 ES8388 原生采集)");
+    CHECK(xr_es8388_params_ok(2, 1), "2ch/mic1 放行");
+    CHECK(xr_es8388_params_ok(4, 0), "4ch/mic0 放行(旧板 SAI 回环)");
+    CHECK(xr_es8388_params_ok(4, 3), "4ch/mic3 放行");
+    CHECK(!xr_es8388_params_ok(4, 4), "4ch/mic4 越界拒绝");
+    CHECK(!xr_es8388_params_ok(2, 2), "2ch/mic2 越界拒绝");
+    CHECK(!xr_es8388_params_ok(2, -1), "负 mic 通道拒绝");
+    CHECK(!xr_es8388_params_ok(1, 0), "1ch 不支持");
+    CHECK(!xr_es8388_params_ok(3, 0), "3ch 不支持");
+    CHECK(!xr_es8388_params_ok(0, 0), "0ch 拒绝");
+
     printf(fails ? "RESULT fail=%d\n" : "RESULT pass\n", fails);
     return fails ? 1 : 0;
 }
