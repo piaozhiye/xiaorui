@@ -38,6 +38,7 @@ extern long syscall(long, ...);   /* -std=c11 下 glibc 不声明, reboot 子进
 #include "opus.h"              /* 静态链自建 opus 1.4 -- 板上系统 libopus 的
                                   opus_encoder_create 返回 NULL(err=0), 静态库正常 */
 #include "xr_wake.h"
+#include "xr_vqe_wake.h"
 #include "audio_player.h"
 #include "audio_capture.h"
 #include "xr_mic4.h"
@@ -195,8 +196,48 @@ static long music_read(void *context, int16_t *pcm, size_t samples) {
     if (n == -EPIPE) { xr_capture_prepare(context); return 0; }
     return n;
 }
+/* 唤醒源: 默认瑞芯微 rkaudio_vqe 内置唤醒(和 AEC/降噪同一条 VQE 链路,
+   不占额外 CPU); XR_WAKE_SOURCE=sherpa 可一键退回 CPU zipformer KWS,
+   现场出问题时不用重编。 */
+static int wake_use_vqe(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *s = getenv("XR_WAKE_SOURCE");
+        cached = (s && !strcmp(s, "sherpa")) ? 0 : 1;
+        fprintf(stderr, "[xr] 唤醒源: %s\n", cached ? "rkaudio_vqe 内置" : "sherpa KWS");
+    }
+    return cached;
+}
+static int wake_available(void)
+{
+    return wake_use_vqe() ? xr_vqe_wake_available() : xr_speech_kws_available();
+}
+/* VQE 的唤醒是"状态边沿"不是"帧内命中", 所以不需要 PCM 参数 */
+static int wake_poll(const int16_t *pcm, int samples)
+{
+    if (wake_use_vqe()) return xr_vqe_wake_poll();
+    return xr_speech_kws_feed(pcm, samples);
+}
+/* 句尾收割: VQE 侧改成"最近 keep_ms 内发生过唤醒"(唤醒词往往就是这一句) */
+static int wake_flush(void)
+{
+    if (wake_use_vqe()) return xr_vqe_wake_recent(1500);
+    return xr_speech_kws_flush();
+}
+static void wake_reset(void)
+{
+    if (wake_use_vqe()) xr_vqe_wake_reset();
+    else xr_speech_kws_reset();
+}
+/* 播放期控制线程用的适配(ops 表要的是 (pcm, samples) 签名) */
+static int wake_feed(const int16_t *pcm, int samples)
+{
+    return wake_poll(pcm, samples);
+}
+
 static const xr_music_control_ops_t MUSIC_OPS = {
-    music_read, xr_speech_kws_feed, xr_speech_kws_reset, xr_speech_recognize
+    music_read, wake_feed, wake_reset, xr_speech_recognize
 };
 
 /* 弃轮提示音的播放器 ops: 起播线程 + 推入 PCM。策略(冷却/护栏多长)在
@@ -304,7 +345,35 @@ static int capture_finish_turn(snd_pcm_t *mic) {
     return 0;
 }
 
-static long mic_read(snd_pcm_t *mic, int16_t *out16k, int frames16k) {
+/* 软件数字增益(PDM 麦 + 6mic 波束后电平偏低, 板载 809 的 MIC Boost 管不到
+ * PDM 通路, VQE 里也没有独立的数字增益口, 所以在软件里补一级)。
+ * XR_MIC_GAIN 是线性倍数: 1.0=关(默认), 2.0=+6dB, 4.0=+12dB。
+ * 饱和削顶会引入失真, 所以按样本计数上报, 不做静默截断。 */
+static double mic_gain_factor(void)
+{
+    static double g = -1.0;
+    if (g < 0.0) {
+        const char *s = getenv("XR_MIC_GAIN");
+        g = (s && *s) ? atof(s) : 1.0;
+        if (g <= 0.0) g = 1.0;
+        if (g != 1.0) fprintf(stderr, "[xr] 麦克风数字增益: %.2fx\n", g);
+    }
+    return g;
+}
+static void mic_apply_gain(int16_t *pcm, long frames)
+{
+    double g = mic_gain_factor();
+    if (g == 1.0) return;
+    long clipped = 0;
+    for (long i = 0; i < frames; i++) {
+        double v = (double)pcm[i] * g;
+        if (v > 32767.0) { v = 32767.0; clipped++; }
+        else if (v < -32768.0) { v = -32768.0; clipped++; }
+        pcm[i] = (int16_t)v;
+    }
+    if (clipped) fprintf(stderr, "[xr] 增益饱和削顶 %ld 样本\n", clipped);
+}
+static long mic_read_raw(snd_pcm_t *mic, int16_t *out16k, int frames16k) {
     if (g_fifo_fd >= 0) {
         size_t want = (size_t)frames16k * 2, got = 0;
         while (got < want) {
@@ -359,6 +428,13 @@ static long mic_read(snd_pcm_t *mic, int16_t *out16k, int frames16k) {
 /* FIFO 采集开法: O_NONBLOCK 打开(写端未就绪也立即返回, 重连循环不挂死),
  * 开成后清 NONBLOCK 恢复阻塞读。写端退出时 read 返 0(EOF) → mic_read
  * 返 -1 → 主循环按麦克风错误走 restart, 在那里重开等供给回来。 */
+static long mic_read(snd_pcm_t *mic, int16_t *out16k, int frames16k)
+{
+    long n = mic_read_raw(mic, out16k, frames16k);
+    if (n > 0) mic_apply_gain(out16k, n);
+    return n;
+}
+
 static int fifo_open_nb(const char *path) {
     int fd = open(path, O_RDONLY | O_NONBLOCK);
     if (fd < 0) return -1;
@@ -764,7 +840,7 @@ inject_wait:
             xr_player_drop();
             if (capture_finish_turn(mic) < 0) goto restart;
             xr_vad_clear_preroll(&vad);
-            xr_speech_kws_reset();
+            wake_reset();
             xr_session_end_turn_silent(&ses, now_s(), config->finish_cool_ms / 1000.0);
             xr_session_set_echo_guard(&ses, now_s() + config->echo_guard_s);
             xr_vad_reset_gate(&vad);
@@ -883,7 +959,7 @@ inject_wait:
                     xr_player_drop();
                     if (capture_finish_turn(mic) < 0) goto restart;
                     xr_vad_clear_preroll(&vad);
-                    xr_speech_kws_reset();
+                    wake_reset();
                     xr_session_end_turn_silent(&ses, now_s(), config->abandon_cool_ms / 1000.0);
                     xr_vad_reset_gate(&vad);
                     /* 弃轮反馈: 前面用户已经干等了一整轮, 不给任何声音的话设备
@@ -912,7 +988,7 @@ inject_wait:
                 xr_player_drop();
                 if (capture_finish_turn(mic) < 0) goto restart;
                 xr_vad_clear_preroll(&vad);
-                xr_speech_kws_reset();
+                wake_reset();
                 xr_session_end_turn_silent(&ses, now_s(),
                                            is_wake ? 0.0 : config->abandon_cool_ms / 1000.0);
                 xr_vad_reset_gate(&vad);
@@ -940,7 +1016,7 @@ inject_wait:
                 /* 回答期间没有读麦克风，丢弃 ALSA 积压的自身播音，避免回声成为下一轮指令。 */
                 if (capture_finish_turn(mic) < 0) goto restart;
                 xr_vad_clear_preroll(&vad);
-                xr_speech_kws_reset();
+                wake_reset();
                 /* 零音频轮(空识别, 或服务端有意不答却没发 silent)不开跟说窗:
                    静默实测里这种轮次会白送 30s 免唤醒, 之后屋里随口一句话就被
                    当"跟说"直接上云 —— 用户听到的就是"莫名其妙答话"。只有真出过
@@ -994,7 +1070,7 @@ inject_wait:
                 xr_player_finish();
                 if (capture_finish_turn(mic) < 0) goto restart;
                 xr_vad_clear_preroll(&vad);
-                xr_speech_kws_reset();
+                wake_reset();
                 xr_session_end_turn(&ses, now_s(), config->finish_cool_ms / 1000.0);
                 xr_session_set_echo_guard(&ses, now_s() + config->echo_guard_s);
                 xr_vad_reset_gate(&vad);
@@ -1123,8 +1199,8 @@ inject_wait:
 
         /* 声学 KWS 常驻: 无论是否在采集语句中都持续喂(命中需积累 ~640ms chunk,
            若只在空闲喂, 能量门总会在唤醒词第一个字就先触发 in_utt 导致 KWS 永远吃不满) */
-        if (xr_speech_kws_available()) {
-            if (xr_speech_kws_feed(frame, (int)n)) {
+        if (wake_available()) {
+            if (wake_poll(frame, (int)n)) {
                 kws_wake_this_utt = 1;      /* 声学证据: 后续文本判定兜底用 */
                 /* KWS 命中即开采集: 唤醒词音频可能电平临界没过能量门,
                    声学证据优先 -- 命中帧起收集(预滚已环存) */
@@ -1150,7 +1226,7 @@ inject_wait:
 
         /* 采集结束: 先收割 KWS 可能已触发的唤醒(触发点延后到尾静音区),
            再走文本识别 -- 否则这句的声学唤醒证据被丢 */
-        if (xr_speech_kws_flush()) kws_wake_this_utt = 1;
+        if (wake_flush()) kws_wake_this_utt = 1;
 
         size_t utt_n = 0;
         const int16_t *utt = xr_vad_utterance(&vad, &utt_n);
@@ -1312,7 +1388,7 @@ inject_wait:
                     xr_player_drop();
                     if (capture_finish_turn(mic) < 0) goto restart;
                     xr_vad_clear_preroll(&vad);
-                    xr_speech_kws_reset();
+                    wake_reset();
                     xr_session_end_turn(&ses, now_s(), config->abandon_cool_ms / 1000.0);
                     xr_session_set_echo_guard(&ses, now_s() + config->echo_guard_s);
                     xr_vad_reset_gate(&vad);

@@ -36,6 +36,12 @@ CC="${HOST_CC:-cc}"
     "$DIR/board/xr_vad.c" "$DIR/board/xr_vad_test.c" -lm -o "$TEST_DIR/vad"
 "$TEST_DIR/vad"
 
+# 瑞芯微 VQE 内置唤醒: 状态文件解析 + 唤醒边沿检测
+"$CC" -std=c11 -O2 -Wall -Wextra -Werror -I"$DIR/board" \
+    "$DIR/board/xr_vqe_wake.c" "$DIR/board/xr_vqe_wake_test.c" \
+    -lpthread -o "$TEST_DIR/vqe_wake"
+"$TEST_DIR/vqe_wake"
+
 # es8388 阶段2 采集适配: 通道抽取/抗混叠抽取(混叠抑制/连续性/边界)
 "$CC" -std=c11 -O2 -Wall -Wextra -Werror -I"$DIR/board" \
     "$DIR/board/xr_mic4.c" "$DIR/board/xr_mic4_test.c" -lm -o "$TEST_DIR/mic4"

@@ -45,17 +45,29 @@ for f in librkaudio_vqe.so librkaudio_common.so librkaudio_nn.so; do
 done
 adb -s "$SERIAL" shell 'chmod 755 /usr/lib/alsa-lib/libasound_module_pcm_rkaudio_vqe.so /usr/lib/librkaudio_*.so'
 
-echo "== 2) 算法配置(打开 AEC + AGC) =="
+echo "== 2) 算法配置(AEC + AGC + VQE 内置唤醒) =="
 python3 - "$PKG/config/$CFG/config_aivqe_new.json" "$TMP_DIR/vqe.json" <<'PY'
 import json, sys
 src, dst = sys.argv[1], sys.argv[2]
 d = json.load(open(src, encoding="utf-8"))
 s = d["skv_configs"]
-s["aec"]["status"] = "enable"   # 6mic+2ref: ref = RK809 播放回采
-s["agc"]["status"] = "enable"   # 远近都听得清(KWS/ASR 更稳)
+# 本板要的开关(2026-11-18):
+#  aec    enable  6mic+2ref: ref = RK809 播放回采, AEC 的命门
+#  agc    enable  PDM 麦电平低, 靠 AGC 拉起来
+#  wakeup enable  用瑞芯微 VQE 内置唤醒(和 AEC 同一条链路, 不占额外 CPU),
+#                   不再让前端跑 sherpa-onnx zipformer KWS
+#  unkws  disable 任意词表检测要常驻跑 MNN, 白占 CPU, 本板不需要
+#  command disable 固定指令词用不上
+s["aec"]["status"] = "enable"
+s["agc"]["status"] = "enable"
+s["wakeup"]["status"] = "enable"
+s["unkws"]["status"] = "disable"
+s["command"]["status"] = "disable"
 json.dump(d, open(dst, "w", encoding="utf-8"), indent=1, ensure_ascii=False)
-print("  aec=%s agc=%s bf=%s anr=%s" % (s["aec"]["status"], s["agc"]["status"],
-                                        s["bf"]["status"], s["anr"]["status"]))
+print("  aec=%s agc=%s bf=%s anr=%s wakeup=%s unkws=%s command=%s" % (
+    s["aec"]["status"], s["agc"]["status"], s["bf"]["status"],
+    s["anr"]["status"], s["wakeup"]["status"], s["unkws"]["status"],
+    s["command"]["status"]))
 PY
 adb -s "$SERIAL" push "$TMP_DIR/vqe.json" /usr/share/rkaudio/config_aivqe_new.json >/dev/null
 adb -s "$SERIAL" push "$PKG/config/$CFG/wopt_6mic_ring_35mm_8input_8output.bin" /usr/share/rkaudio/ >/dev/null

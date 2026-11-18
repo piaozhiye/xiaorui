@@ -33,6 +33,7 @@ fi
     "$DIR/board/speech_pipeline.c" \
     "$DIR/board/voice_session.c" \
     "$DIR/board/xr_vad.c" \
+    "$DIR/board/xr_vqe_wake.c" \
     "$DIR/board/xr_mic4.c" \
     "$DIR/board/xr_volume.c" \
     "$DIR/board/ui_server.c" \
