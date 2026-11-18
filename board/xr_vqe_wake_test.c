@@ -57,15 +57,18 @@ int main(void)
     write_status(path, "-1:-1:1:");
     CHECK(xr_vqe_wake_poll() == 1, "0->1 应报一次唤醒");
     CHECK(xr_vqe_wake_recent(1500) == 1, "刚唤醒后 recent 应为 1");
+    CHECK(xr_vqe_wake_active() == 1, "插件窗口开着时 active 应为 1");
 
     /* 4) 窗口期一直是 1: 不重复报 */
     write_status(path, "41:0:1:");
     CHECK(xr_vqe_wake_poll() == 0, "窗口期内不应重复报");
     CHECK(xr_vqe_wake_recent(1500) == 1, "窗口期内 recent 仍为 1");
+    CHECK(xr_vqe_wake_active() == 1, "窗口期内 active 仍为 1");
 
     /* 5) reset() 之后仍在窗口期: 也不能误报(插件还没清零) */
     xr_vqe_wake_reset();
     CHECK(xr_vqe_wake_recent(1500) == 0, "reset 后 recent 应为 0");
+    CHECK(xr_vqe_wake_active() == 1, "reset 不该动插件的窗口状态");
     write_status(path, "41:0:1:");
     CHECK(xr_vqe_wake_poll() == 0, "reset 后仍在窗口期不应误报新唤醒");
 

@@ -85,6 +85,15 @@ int xr_vqe_wake_recent(int keep_ms)
     return (now_ms() - last) <= (long long)keep_ms;
 }
 
+int xr_vqe_wake_active(void)
+{
+    int active;
+    pthread_mutex_lock(&g_mu);
+    active = (g_last_wakeup > 0);
+    pthread_mutex_unlock(&g_mu);
+    return active;
+}
+
 void xr_vqe_wake_reset(void)
 {
     pthread_mutex_lock(&g_mu);

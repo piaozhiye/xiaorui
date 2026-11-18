@@ -198,20 +198,32 @@ static long music_read(void *context, int16_t *pcm, size_t samples) {
 }
 /* 唤醒源: 默认瑞芯微 rkaudio_vqe 内置唤醒(和 AEC/降噪同一条 VQE 链路,
    不占额外 CPU); XR_WAKE_SOURCE=sherpa 可一键退回 CPU zipformer KWS,
-   现场出问题时不用重编。 */
+   现场出问题时不用重编。
+   VQE 状态文件拿不到(插件没起/路径不对)时自动退回 CPU KWS ——
+   宁可慢一点, 也不能让板子变成"唤不醒"。 */
 static int wake_use_vqe(void)
 {
     static int cached = -1;
-    if (cached < 0) {
-        const char *s = getenv("XR_WAKE_SOURCE");
-        cached = (s && !strcmp(s, "sherpa")) ? 0 : 1;
-        fprintf(stderr, "[xr] 唤醒源: %s\n", cached ? "rkaudio_vqe 内置" : "sherpa KWS");
+    if (cached >= 0) return cached;
+    const char *s = getenv("XR_WAKE_SOURCE");
+    if (s && !strcmp(s, "sherpa")) {
+        cached = 0;
+        fprintf(stderr, "[xr] 唤醒源: sherpa KWS (XR_WAKE_SOURCE=sherpa)\n");
+        return cached;
     }
+    /* VQE 插件在打开采集设备时写状态文件; 万一还没写出来, 等最多 3s */
+    for (int i = 0; i < 30 && !xr_vqe_wake_available(); i++) {
+        struct timespec ts = { .tv_sec = 0, .tv_nsec = 100 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+    }
+    cached = xr_vqe_wake_available();
+    fprintf(stderr, "[xr] 唤醒源: %s\n",
+            cached ? "rkaudio_vqe 内置" : "sherpa KWS (VQE 状态文件不可用)");
     return cached;
 }
 static int wake_available(void)
 {
-    return wake_use_vqe() ? xr_vqe_wake_available() : xr_speech_kws_available();
+    return wake_use_vqe() ? 1 : xr_speech_kws_available();
 }
 /* VQE 的唤醒是"状态边沿"不是"帧内命中", 所以不需要 PCM 参数 */
 static int wake_poll(const int16_t *pcm, int samples)
@@ -219,10 +231,11 @@ static int wake_poll(const int16_t *pcm, int samples)
     if (wake_use_vqe()) return xr_vqe_wake_poll();
     return xr_speech_kws_feed(pcm, samples);
 }
-/* 句尾收割: VQE 侧改成"最近 keep_ms 内发生过唤醒"(唤醒词往往就是这一句) */
+/* 句尾收割: VQE 侧用插件自己的检测窗口状态(唤醒词那一句结束时窗口通常
+   还没过期), 比按时间猜准 —— 前端要等 1.2~1.6s 静音才判"说完"。 */
 static int wake_flush(void)
 {
-    if (wake_use_vqe()) return xr_vqe_wake_recent(1500);
+    if (wake_use_vqe()) return xr_vqe_wake_active();
     return xr_speech_kws_flush();
 }
 static void wake_reset(void)

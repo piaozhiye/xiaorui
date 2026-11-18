@@ -25,7 +25,11 @@ int xr_vqe_wake_available(void);
 /* 轮询状态文件: 1 = 本次调用发现了新的唤醒(0 -> >0 的边沿)。 */
 int xr_vqe_wake_poll(void);
 
-/* 1 = 最近 keep_ms 毫秒内发生过唤醒(句尾收割用: 唤醒词往往就是这一句)。 */
+/* 插件的检测窗口是否还开着(状态文件里的 wakeup 字段仍 >0)。
+ * 句尾收割用: 唤醒词那一句结束时, 窗口通常还没过期。 */
+int xr_vqe_wake_active(void);
+
+/* 1 = 最近 keep_ms 毫秒内发生过唤醒。 */
 int xr_vqe_wake_recent(int keep_ms);
 
 /* 放弃当前这次唤醒(用户打断/弃轮时调用)。
