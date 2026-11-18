@@ -154,6 +154,8 @@ def fake_deployment(tmp_path, monkeypatch):
         "ha-onboard.py", "start-ha.sh", "ha-configuration.yaml",
         "render-config.py", "gateway-defaults.yaml", "prepare-wheels.py",
         "requirements-ha.lock",
+        # 部署脚本会推它并依赖它存在(2GB 板的内存兜底: zram 768M zstd)
+        "setup-zram.sh",
     ):
         shutil.copy(PORT / filename, port / filename)
     for directory in (
