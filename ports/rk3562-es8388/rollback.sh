@@ -169,12 +169,15 @@ FRONTEND_WAS_RUNNING=0
 $ADB shell 'pgrep -x xiaorui_live >/dev/null 2>&1' && FRONTEND_WAS_RUNNING=1
 # 只停本 profile 的进程: 按完整路径匹配 cmdline, 不像 pkill -f "[s]erver/app.py"
 # 那样命中板上任何一个 app.py。
+# ★ 模式串用字符类错开自身: adb shell '... pkill -f "/data/.../app.py" ...' 的
+#   远端 shell 自己的命令行里就含这个模式, pkill 会把承载它的 shell 一起杀掉
+#   -> adb 返回非零 -> 本脚本 set -e 直接中断, 后面几步全不执行。
 $ADB shell 'pkill -x xiaorui_live 2>/dev/null || true'
-$ADB shell 'pkill -f "/data/xiaorui-server/llm_rkllm.py" 2>/dev/null || true'
-$ADB shell 'pkill -f "/data/xiaorui-gateway/server/app.py" 2>/dev/null || true'
+$ADB shell 'pkill -f "/data/xiaorui-server/llm_rkll[m].py" 2>/dev/null || true'
+$ADB shell 'pkill -f "/data/xiaorui-gateway/server/[a]pp.py" 2>/dev/null || true'
 # rock helper 是独立进程(app.py 只是父), 不停会占着 600MB+ NPU 内存
-$ADB shell 'pkill -f "rock/asr_helper.py" 2>/dev/null || true'
-$ADB shell 'pkill -f "rock/tts_helper.py" 2>/dev/null || true'
+$ADB shell 'pkill -f "rock/[a]sr_helper.py" 2>/dev/null || true'
+$ADB shell 'pkill -f "rock/[t]ts_helper.py" 2>/dev/null || true'
 # 等前端真的退出: 它还在的时候 init 脚本不会拉新的, 结果谁也没在跑。
 $ADB shell 'i=0; while [ $i -lt 60 ] && pgrep -x xiaorui_live >/dev/null 2>&1; do sleep 0.5 2>/dev/null || sleep 1; i=$((i+1)); done'
 

@@ -31,9 +31,11 @@ fi
 # 2026-10-17: 旧 8000 本地栈(llm_rkllm+server/app.py)已退役 —— 8002 全本地网关取代,
 # 目录删除前备份 /data/xiaorui-gateway/retired-8000-20261017.tar.gz。RKLLM 进程
 # 由 8002 网关自行管理; 剩余 pkill 防的是历史残留进程占资源。
-pkill -f "llm_rkllm.py" 2>/dev/null
-pkill -f "xiaozhi-server/server/app.py" 2>/dev/null
-pkill -f "xz_stream.py" 2>/dev/null
+# 模式串用字符类错开自身: pkill -f 的模式如果原样出现在调用者自己的命令行里,
+# pkill 会连承载它的 shell 一起杀掉(罗总开发笔记踩过两次)。
+pkill -f "llm_rkll[m].py" 2>/dev/null
+pkill -f "xiaozhi-server/server/[a]pp.py" 2>/dev/null
+pkill -f "xz_[s]tream.py" 2>/dev/null
 
 # 常驻语音前端 xiaorui_live (单进程 C: readi 采音+帧级VAD+内嵌流式ASR+WS+writei 播放)
 # 可选前端环境(重启持久): /data/xiaorui-server/xiaorui.env 写

@@ -134,3 +134,35 @@ for port in 8112 8001 8004; do
     done
     echo "$port OK"
 done
+
+# ---------- 8) Rock ASR/TTS (可选) ----------
+# Rockchip 官方 NPU 引擎, 替换板内的 SenseVoice/Matcha:
+#   识别 1.4s(开源 3s), 合成 0.43s(开源 1~2s), 而且网关 RSS 从 786MB 降到 41MB。
+# SDK 二进制和模型不入 git(~650MB), 本机解压好再指过来:
+#   XR_ROCK_ASR_SDK / XR_ROCK_TTS_SDK / XR_ROCK_LIC_DIR
+if [ -n "${XR_ROCK_ASR_SDK:-}" ]; then
+    echo "== 部署 Rock ASR/TTS (NPU) =="
+    bash "$DIR/deploy-rock.sh" "$SERIAL" || {
+        echo "Rock 部署失败, 保持现有引擎" >&2
+        exit 1
+    }
+    # 引擎换了, 配置里的 selected_module 要跟着切
+    adb -s "$SERIAL" shell 'sed -i "s/^  ASR: LocalSenseVoice$/  ASR: RockASR/; s/^  TTS: SherpaLocal$/  TTS: RockTTS/" /data/xiaorui-gateway/data/.config.yaml' \
+        || true
+    echo "== 重启网关让新引擎生效 =="
+    adb -s "$SERIAL" shell 'pkill -f "server/[a]pp.py" 2>/dev/null; sleep 2; (setsid sh /data/xiaorui-gateway/start-board-stack.sh >>/data/xiaorui-gateway/data/stack.log 2>&1 </dev/null &); true'
+    for port in 8001 8004; do
+        elapsed=0
+        until probe_board_port "$port"; do
+            [ "$elapsed" -lt 120 ] || {
+                echo "端口 $port 未就绪(120s)" >&2
+                exit 1
+            }
+            sleep 3
+            elapsed=$((elapsed + 3))
+        done
+        echo "$port OK"
+    done
+else
+    echo "== 未设 XR_ROCK_ASR_SDK, 保持板内 SenseVoice/Matcha =="
+fi

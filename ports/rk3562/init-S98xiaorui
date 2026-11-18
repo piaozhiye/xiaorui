@@ -131,13 +131,17 @@ case "$1" in
         done
         ;;
     stop)
+        # ★ pkill -f 的模式串如果原样出现在调用者自己的命令行里(比如
+        #   adb shell '... pkill -f "server/app.py" ...'), pkill 会连承载它的
+        #   shell 一起杀掉, 后面的命令静默不执行 —— 表现就是"脚本卡住"。
+        #   用 [a]pp 这种字符类错开自身(罗总开发笔记踩过两次)。
         pkill -x xiaorui_live
-        pkill -f "llm_rkllm.py"
-        pkill -f "server/app.py"
+        pkill -f "llm_rkll[m].py"
+        pkill -f "server/[a]pp.py"
         # rock helper 是独立进程(app.py 只是父进程), 各占 ~230-600MB NPU 内存,
         # 不停会变孤儿; 网关重启再拉一份就是双份模型, 直接 OOM(2026-11-18 实测)。
-        pkill -f "rock/asr_helper.py"
-        pkill -f "rock/tts_helper.py"
+        pkill -f "rock/[a]sr_helper.py"
+        pkill -f "rock/[t]ts_helper.py"
         ;;
     restart)
         "$0" stop

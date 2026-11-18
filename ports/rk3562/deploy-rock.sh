@@ -1,5 +1,7 @@
 #!/bin/bash
-# RK3562 + ES8388: 部署 Rockchip RockASR / RockTTS (板内 NPU 的 ASR/TTS).
+# RK3562: 部署 Rockchip RockASR / RockTTS (板内 NPU 的 ASR/TTS).
+#
+# 板型无关(RK809 / ES8388 都一样), 但 SDK 的 .so 与模型是按 RK356x 编译的。
 #
 # 资源不入 git, 从本机解压好的 SDK 目录读:
 #   XR_ROCK_ASR_SDK  rockasr_android_linux_rk356x_* 解压目录
@@ -10,8 +12,13 @@
 #   /data/xiaorui-server/rockasr/{lib,data,key_asr.lic,rockx_auth_config.json}
 #   /data/xiaorui-server/rocktts/{lib,data,key_tts.lic,rockx_auth_config.json}
 #
-# 注意: TTS 模型必须展平到 data/models/ 下(去掉 zip 里的 rk356x 层级),
-# 否则 rockx2 子图 init 静默失败、运行期空指针崩溃(2026-11-18 实测)。
+# 注意 1: TTS 模型必须展平到 data/models/ 下(去掉 zip 里的 rk356x 层级),
+#   否则 rockx2 子图 init 静默失败、运行期空指针崩溃(2026-11-18 实测,
+#   官方 demo 也一样崩)。
+# 注意 2: 装完必须让板上的 zram 生效(ports/rk3562/setup-zram.sh)。
+#   三个 NPU 模型同时驻留要 ~1700MB/1963MB, 没 zram 兜底会 OOM 黑屏。
+# 注意 3: 授权是设备绑定的, license 必须在**这台板子**上用 rkauth 工具生成
+#   (PC 侧: rkdevice_info -> device.inf -> rkauth_tool_bin -d device.inf -m asr|tts)。
 set -uo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
