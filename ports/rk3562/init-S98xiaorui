@@ -1,7 +1,7 @@
 #!/bin/sh
 # RK3562 板端: 开机自启小瑞全栈 (板内网关 + 板内 NPU 大模型 + 前端)
 #
-# 顺序: start-board-stack.sh 起 RKLLM(:8112) 和网关(:8001), 再起前端。
+# 顺序: zram -> 板内栈(RKLLM+网关) -> 前端 -> (可选)HA
 # 前端自带重连: 网关没起来时每 10s 重试一次 WS, 所以不必判断网关可达性。
 #
 # buildroot busybox init: /etc/init.d/rcS 会跑 /etc/init.d/S*
@@ -27,33 +27,54 @@ case "$1" in
             sh /data/xiaorui/board-time.sh setup
         fi
 
-        # 2) 板内栈 (NPU 大模型 + 网关)
+        # 2) zram 压缩 swap —— 2GB 板子的内存兜底, **不能放在 HA 启动器里**。
+        #    板子出厂 SwapTotal=0, NPU 模型(RockASR 558MB + RockTTS 229MB)+
+        #    RKLLM 604MB 常驻不可回收, 余量不够时内核 OOM 会干掉 init ->
+        #    整机黑屏(2026-11-18 实测三次)。
+        #    zstd 而非默认 lzo: lzo 在这些页上压缩比≈1.0(白换), zstd 能压到 1/4.4。
+        if [ -x /data/setup-zram.sh ]; then
+            sh /data/setup-zram.sh || echo "[S98] zram 配置失败(内存兜底没了)"
+        fi
+
+        # 3) 板内栈 (NPU 大模型 + 网关)
         if [ -x /data/xiaorui-gateway/start-board-stack.sh ]; then
-            setsid sh /data/xiaorui-gateway/start-board-stack.sh \
-                >>/data/xiaorui-gateway/data/stack.log 2>&1 </dev/null &
-            # 等网关就绪再拉前端(前端自己也会重连, 这里只是让顺序好看)
-            i=0
-            while [ $i -lt 30 ]; do
-                (echo > /dev/tcp/127.0.0.1/8001) 2>/dev/null && break
-                sleep 2
-                i=$((i + 1))
-            done
+            # 幂等: 网关已经在跑就别再起一套。2026-11-18 实测过双起 ——
+            # 两个 RKLLM(各 604MB)+ 两个网关 = 1.2GB, 2GB 板子直接 OOM 黑屏。
+            if pgrep -f "/data/xiaorui-gateway/server/app.py" >/dev/null 2>&1; then
+                echo "[S98] 网关已在跑, 不重复拉起板内栈"
+            else
+                setsid sh /data/xiaorui-gateway/start-board-stack.sh \
+                    >>/data/xiaorui-gateway/data/stack.log 2>&1 </dev/null &
+                # 等网关就绪再拉前端(前端自己也会重连, 这里只是让顺序好看)
+                i=0
+                while [ $i -lt 30 ]; do
+                    (echo > /dev/tcp/127.0.0.1/8001) 2>/dev/null && break
+                    sleep 2
+                    i=$((i + 1))
+                done
+            fi
         fi
-        # 2b) 板上 Home Assistant(设备控制面, 语音灯/插座走它) + crond 看护。
-        #     start-ha.sh 幂等: zram swap -> HA(--skip-pip) -> OOM 优先级
-        #     (2GB 板四进程共存必须有 swap 和牺牲顺序, 详见脚本头注释)。
-        #     HA 启动 ~40s 且不阻塞语音链路, 所以放后台不等就绪。
-        if [ -x /data/xiaorui-server/start-ha.sh ]; then
-            (setsid sh /data/xiaorui-server/start-ha.sh >/dev/null 2>&1 </dev/null &)
+
+        # 3b) Home Assistant(设备控制面, 语音灯/插座走它) + crond 看护。
+        #     默认不装: HA 约 260MB, 2GB 板子要留给 RockASR/RockTTS/RKLLM
+        #     (2026-11-18 用户决策: 停 HA, 语音全链路常驻)。
+        #     要开就创建 /data/xiaorui/.ha_enabled, 开机自启 + crond 看护都跟着开。
+        #     start-ha.sh 幂等: zram swap -> HA(--skip-pip) -> OOM 优先级。
+        if [ -f /data/xiaorui/.ha_enabled ]; then
+            if [ -x /data/xiaorui-server/start-ha.sh ]; then
+                # HA 启动 ~40s 且不阻塞语音链路, 所以放后台不等就绪。
+                (setsid sh /data/xiaorui-server/start-ha.sh >/dev/null 2>&1 </dev/null &)
+            fi
+            if [ -x /usr/sbin/crond ]; then
+                (crontab -l 2>/dev/null | grep -v 'xiaorui-server/start-ha.sh'; \
+                 echo '*/2 * * * * /data/xiaorui-server/start-ha.sh >/dev/null 2>&1') \
+                    | crontab - 2>/dev/null
+                pgrep -x crond >/dev/null 2>&1 || \
+                    (setsid /usr/sbin/crond >/dev/null 2>&1 </dev/null &)
+            fi
         fi
-        if [ -x /usr/sbin/crond ]; then
-            (crontab -l 2>/dev/null | grep -v 'xiaorui-server/start-ha.sh'; \
-             echo '*/2 * * * * /data/xiaorui-server/start-ha.sh >/dev/null 2>&1') \
-                | crontab - 2>/dev/null
-            pgrep -x crond >/dev/null 2>&1 || \
-                (setsid /usr/sbin/crond >/dev/null 2>&1 </dev/null &)
-        fi
-        # 3) 前端
+
+        # 4) 前端
         if [ -x /data/xiaorui/start-frontend.sh ] \
             && ! pgrep -x xiaorui_live >/dev/null 2>&1; then
             # RK809 混音设置。
@@ -71,7 +92,7 @@ case "$1" in
             # 3) ADC Capture Volume = 255: 回采(ADC)的数字音量 = 0dB。
             #    2026-11-11: 驱动在 adc_for_loopback 分支里原来写的是 0x00
             #    (-95dB 静音), 回采 ref 一点信号都没有, AEC 拿不到参考;
-            #    已改成 0xff(0dB), 实测 ch7 回采到播放音 -17dBFS。
+            #    已改成 0xff(0dB), 实测 ch7 回采到播放音 -17.2dBFS。
             #
             #    ★ 控件名: 新内核(develop-6.1 的 rk817_codec.c)里叫
             #      "ADC Capture Volume", 老内核里叫 "ADC"; 两个都试,
@@ -97,11 +118,26 @@ case "$1" in
             setsid sh /data/xiaorui/start-frontend.sh \
                 >>/data/xiaorui/frontend.log 2>&1 </dev/null &
         fi
+        # oom_score_adj: 内存吃紧时内核 OOM killer 先杀"可牺牲"的, 别杀主链路。
+        #   网关/RKLLM = -500(保护), rock helper = +200(先死, 下次请求自动重拉)
+        #   取值同 start-ha.sh 里那套(罗总开发笔记 RK3562 2GB 实测)。
+        #   这里不依赖 HA: HA 停了也要保住语音主链路。
+        i=0
+        while [ $i -lt 20 ]; do
+            pid=$(pgrep -x xiaorui_live 2>/dev/null | head -1)
+            [ -n "$pid" ] && { echo -500 > "/proc/$pid/oom_score_adj" 2>/dev/null; break; }
+            sleep 0.5
+            i=$((i + 1))
+        done
         ;;
     stop)
         pkill -x xiaorui_live
         pkill -f "llm_rkllm.py"
         pkill -f "server/app.py"
+        # rock helper 是独立进程(app.py 只是父进程), 各占 ~230-600MB NPU 内存,
+        # 不停会变孤儿; 网关重启再拉一份就是双份模型, 直接 OOM(2026-11-18 实测)。
+        pkill -f "rock/asr_helper.py"
+        pkill -f "rock/tts_helper.py"
         ;;
     restart)
         "$0" stop

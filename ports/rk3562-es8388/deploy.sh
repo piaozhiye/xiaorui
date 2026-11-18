@@ -129,6 +129,7 @@ for f in \
     "$REPO/board-server/cues/xr_volack24k.wav" \
     "$DIR/asound.conf" "$DIR/frontend.env.example" "$DIR/init-S98xiaorui" \
     "$DIR/mixer-es8388.sh" \
+    "$REPO/ports/rk3562/setup-zram.sh" \
     "$DIR/stage-runtime.sh" \
     "$REPO/board-server/probe-port.py" \
     "$DIR/check-runtime.sh" \
@@ -203,6 +204,7 @@ for f in \
     /etc/asound.conf \
     /etc/init.d/S98xiaorui \
     /data/mixer-es8388.sh \
+    /data/setup-zram.sh \
     /data/xiaorui/xiaorui.env \
     /data/xiaorui/start-frontend.sh \
     /data/xiaorui/board-time.sh \
@@ -384,13 +386,15 @@ $ADB push "$WORK/frontend.env" /data/xiaorui/xiaorui.env >/dev/null
 $ADB push "$REPO/ports/rk3562/start-frontend.sh" /data/xiaorui/start-frontend.sh >/dev/null
 $ADB push "$REPO/ports/rk3562/board-time.sh" /data/xiaorui/board-time.sh >/dev/null
 $ADB push "$DIR/mixer-es8388.sh" /data/mixer-es8388.sh >/dev/null
+# zram 压缩 swap: 2GB 板子的内存兜底(NPU 模型常驻不可回收, 没它就 OOM 黑屏)
+$ADB push "$REPO/ports/rk3562/setup-zram.sh" /data/setup-zram.sh >/dev/null
 $ADB shell 'mkdir -p /data/xiaorui-gateway'
 $ADB push "$REPO/board-server/probe-port.py" /data/xiaorui-gateway/probe-port.py >/dev/null
 # 旧版把探针放在板型专属路径; 统一后清掉它(该文件已进备份清单, 回滚会还原)。
 $ADB shell 'rm -f /data/xr-es8388-probe.py'
 $ADB push "$DIR/asound.conf" /etc/asound.conf >/dev/null
 $ADB push "$DIR/init-S98xiaorui" /etc/init.d/S98xiaorui >/dev/null
-$ADB shell 'chmod +x /data/xiaorui/start-frontend.sh /data/xiaorui/board-time.sh /data/mixer-es8388.sh /etc/init.d/S98xiaorui /data/xiaorui-gateway/probe-port.py'
+$ADB shell 'chmod +x /data/xiaorui/start-frontend.sh /data/xiaorui/board-time.sh /data/mixer-es8388.sh /data/setup-zram.sh /etc/init.d/S98xiaorui /data/xiaorui-gateway/probe-port.py'
 # ---------- 7) 启动 ----------
 echo "== 启动全栈 =="
 # 推送后逐个核对板端产物: push 失败(空间/只读/传输断)如果不核对,
@@ -400,6 +404,7 @@ for f in \
     /etc/asound.conf \
     /etc/init.d/S98xiaorui \
     /data/mixer-es8388.sh \
+    /data/setup-zram.sh \
     /data/xiaorui/xiaorui.env \
     /data/xiaorui/start-frontend.sh \
     /data/xiaorui/board-time.sh \

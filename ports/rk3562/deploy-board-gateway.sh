@@ -23,7 +23,8 @@ WHEELS="${XR_GATEWAY_WHEELS:-$REPO/board-server/wheels314}"
 VAD_MODEL="${XR_SILERO_VAD_MODEL:-$REPO/models/snakers4_silero-vad/src/silero_vad/data/silero_vad.onnx}"
 RKLLM="${XR_RKLLM_MODEL:-$REPO/models/qwen2.5-0.5b-instruct-rk3562-w8a8.rkllm}"
 PORT_PROBE="$REPO/board-server/probe-port.py"
-for asset in "$REPO/board-server/librkllmrt.so" "$PORT_PROBE" "$VAD_MODEL" "$RKLLM"; do
+for asset in "$REPO/board-server/librkllmrt.so" "$PORT_PROBE" "$VAD_MODEL" "$RKLLM" \
+    "$DIR/setup-zram.sh" "$DIR/init-S98xiaorui"; do
     [ -f "$asset" ] || { echo "缺部署资源: $asset，见 DEPLOYMENT.md" >&2; exit 2; }
 done
 [ -d "$WHEELS" ] || { echo "缺离线 wheel 目录: $WHEELS" >&2; exit 2; }
@@ -97,6 +98,11 @@ adb -s "$SERIAL" push "$RKLLM" \
 
 echo "== 6) 启动脚本 + 开机自启 =="
 adb -s "$SERIAL" push "$DIR/start-board-stack.sh" /data/xiaorui-gateway/start-board-stack.sh >/dev/null
+# zram 压缩 swap: 2GB 板子的内存兜底。板子出厂 SwapTotal=0, NPU 模型常驻
+# 不可回收(RockASR 558MB + RockTTS 229MB + RKLLM 604MB), 余量不够时内核
+# OOM 会干掉 init -> 整机黑屏(2026-11-18 实测三次)。必须独立于 HA 装。
+adb -s "$SERIAL" push "$DIR/setup-zram.sh" /data/setup-zram.sh >/dev/null
+adb -s "$SERIAL" shell 'chmod +x /data/setup-zram.sh'
 if [ "${XR_SKIP_INIT_INSTALL:-0}" = "1" ]; then
     # ES8388 profile 自带开机自启脚本(控制项与 RK809 完全不同), 不装旧板的 S98。
     adb -s "$SERIAL" shell 'chmod +x /data/xiaorui-gateway/start-board-stack.sh'

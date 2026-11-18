@@ -47,7 +47,21 @@ case "$1" in
         fi
 
         # 3) 板内栈(NPU 大模型 :8112 + 网关 :8001)
+        # 3.0) zram 压缩 swap —— 2GB 板子的内存兜底。
+        #      板子出厂 SwapTotal=0, NPU 模型(RockASR 558MB + RockTTS 229MB)
+        #      常驻不可回收, 余量不够时内核 OOM 会干掉 init -> 整机黑屏。
+        #      算法用 zstd 不用默认 lzo: lzo 在这些页上压缩比接近 1.0(白换),
+        #      zstd 同样的页能压到 1/4.4(罗总开发笔记实测)。
+        if [ -x /data/setup-zram.sh ]; then
+            sh /data/setup-zram.sh || echo "[S98] zram 配置失败(内存兜底没了)"
+        fi
+
         if [ -x /data/xiaorui-gateway/start-board-stack.sh ]; then
+            # 幂等: 网关已经在跑就别再起一套。2026-11-18 实测过双起 ——
+            # 两个 RKLLM(各 604MB)+ 两个网关 = 1.2GB, 2GB 板子直接 OOM 黑屏。
+            if pgrep -f "/data/xiaorui-gateway/server/app.py" >/dev/null 2>&1; then
+                echo "[S98] 网关已在跑, 不重复拉起板内栈"
+            else
             # 和 start-board-stack.sh 共用部署时推送的端口探针文件;
             # 文件缺失时退回板内内联 socket 探测, 不能空等 60 秒。
             probe_port() {
@@ -65,6 +79,7 @@ case "$1" in
                 sleep 2
                 i=$((i + 1))
             done
+            fi
         fi
 
         # 4) 前端(采集 + KWS + 播放)
@@ -74,6 +89,16 @@ case "$1" in
             setsid bash /data/xiaorui/start-frontend.sh \
                 >>/data/xiaorui/frontend.log 2>&1 </dev/null &
         fi
+        # oom_score_adj: 内存吃紧时内核 OOM killer 先杀"可牺牲"的, 别杀主链路。
+        #   网关/RKLLM/前端 = -500(保护), rock helper = +200(先死, 下次请求自动重拉)
+        # 取值同罗总开发笔记那套(RK3562 2GB, 实测可用)。
+        i=0
+        while [ $i -lt 20 ]; do
+            pid=$(pgrep -x xiaorui_live 2>/dev/null | head -1)
+            [ -n "$pid" ] && { echo -500 > "/proc/$pid/oom_score_adj" 2>/dev/null; break; }
+            sleep 0.5
+            i=$((i + 1))
+        done
         ;;
     stop)
         # 只回收本 profile 的进程, 不用 pkill -f(可能匹配到调用它的 shell)。
@@ -93,6 +118,10 @@ case "$1" in
         }
         stop_cmdline "/data/xiaorui-server/llm_rkllm.py"
         stop_cmdline "/data/xiaorui-gateway/server/app.py"
+        # rock helper 是独立进程(app.py 只是父进程), 各占 ~230-600MB NPU 内存,
+        # 不停会变孤儿; 网关重启再拉一份就是双份模型, 直接 OOM(2026-11-18 实测)。
+        stop_cmdline "rock/asr_helper.py"
+        stop_cmdline "rock/tts_helper.py"
         ;;
     restart)
         "$0" stop

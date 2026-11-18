@@ -172,6 +172,9 @@ $ADB shell 'pgrep -x xiaorui_live >/dev/null 2>&1' && FRONTEND_WAS_RUNNING=1
 $ADB shell 'pkill -x xiaorui_live 2>/dev/null || true'
 $ADB shell 'pkill -f "/data/xiaorui-server/llm_rkllm.py" 2>/dev/null || true'
 $ADB shell 'pkill -f "/data/xiaorui-gateway/server/app.py" 2>/dev/null || true'
+# rock helper 是独立进程(app.py 只是父), 不停会占着 600MB+ NPU 内存
+$ADB shell 'pkill -f "rock/asr_helper.py" 2>/dev/null || true'
+$ADB shell 'pkill -f "rock/tts_helper.py" 2>/dev/null || true'
 # 等前端真的退出: 它还在的时候 init 脚本不会拉新的, 结果谁也没在跑。
 $ADB shell 'i=0; while [ $i -lt 60 ] && pgrep -x xiaorui_live >/dev/null 2>&1; do sleep 0.5 2>/dev/null || sleep 1; i=$((i+1)); done'
 
@@ -291,6 +294,15 @@ if [ "$FRONTEND_WAS_RUNNING" = "1" ]; then
     fi
 else
     echo "== 回滚前前端未运行，保持停止状态 =="
+fi
+
+if [ "$REMOVE_CREATED_DATA" = "1" ]; then
+    for d in /data/xiaorui-server/rockasr /data/xiaorui-server/rocktts; do
+        if $ADB shell "test -d $d" >/dev/null 2>&1; then
+            $ADB shell "rm -rf $d" </dev/null
+            echo "移除 RockASR/RockTTS SDK 目录: $d"
+        fi
+    done
 fi
 
 if [ "$FAILURES" -eq 0 ]; then

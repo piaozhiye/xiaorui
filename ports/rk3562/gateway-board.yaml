@@ -29,9 +29,9 @@ enable_greeting: true
 
 selected_module:
   VAD: SileroVAD
-  ASR: LocalSenseVoice
+  ASR: RockASR
   LLM: LocalQwen
-  TTS: SherpaLocal
+  TTS: RockTTS
   Memory: nomem
   Intent: function_call
 
@@ -50,7 +50,18 @@ LLM:
       write: 5
       read: 60
 
+# 板内 NPU 上的 Rockchip ASR/TTS (RockX2). 模型常驻 helper 进程:
+# ASR 加载 ~3s / TTS ~3.5s 只付一次; 实测 ASR 10s 音频 1.1s 识别完,
+# TTS 首包 0.47s。回退开源引擎: 把 selected_module 改回
+# LocalSenseVoice / SherpaLocal 即可(模型仍在板上)。
 ASR:
+  RockASR:
+    type: rock_asr
+    lib_dir: /data/xiaorui-server/rockasr/lib
+    model_dir: /data/xiaorui-server/rockasr/data
+    auth_config: /data/xiaorui-server/rockasr/rockx_auth_config.json
+    lang: zh
+    timeout_s: 20
   LocalSenseVoice:
     type: sherpa_onnx_local
     model_type: sense_voice
@@ -59,6 +70,13 @@ ASR:
     api_key: local
 
 TTS:
+  RockTTS:
+    type: rock_tts
+    lib_dir: /data/xiaorui-server/rocktts/lib
+    model_dir: /data/xiaorui-server/rocktts/data
+    auth_config: /data/xiaorui-server/rocktts/rockx_auth_config.json
+    alpha: 1.0
+    timeout_s: 30
   SherpaLocal:
     type: sherpa_local
     engine: matcha

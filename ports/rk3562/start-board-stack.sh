@@ -55,6 +55,10 @@ if ! probe 8112; then
     log "拉起 RKLLM 大模型 (加载 20-40 s)"
     setsid "$PY" "$SRV/llm_rkllm.py" --model "$MODEL" \
         >>"$GW/data/rkllm.log" 2>&1 </dev/null &
+    LLM_PID=$!
+    # oom_score_adj: 内存吃紧时内核 OOM killer 先杀可牺牲的, 别杀主链路。
+    # -500 = 保护(同罗总开发笔记那套 RK3562 2GB 实测取值)。
+    echo -500 > "/proc/$LLM_PID/oom_score_adj" 2>/dev/null || true
     i=0
     while [ $i -lt 60 ]; do
         probe 8112 && break
@@ -73,6 +77,9 @@ if ! probe 8001; then
     cd "$GW/work" || exit 1
     PYTHONPATH="$GW/server" setsid "$PY" "$GW/server/app.py" \
         >>"$GW/data/gateway.log" 2>&1 </dev/null &
+    GW_PID=$!
+    # 网关是主链路, 内存吃紧时别让内核先杀它
+    echo -500 > "/proc/$GW_PID/oom_score_adj" 2>/dev/null || true
     i=0
     while [ $i -lt 45 ]; do
         probe 8001 && probe 8004 && break
