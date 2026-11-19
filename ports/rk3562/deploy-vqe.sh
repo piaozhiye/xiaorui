@@ -30,18 +30,11 @@ fi
 [ -d "$PKG" ] || { echo "缺插件包: $PKG" >&2; exit 2; }
 [ -d "$LIB_DIR" ] || { echo "缺 so 目录: $LIB_DIR" >&2; exit 2; }
 
-# 算法配置来源: 优先用仓内这份 6mic+2ref 真源(可 review, 与 GitHub 上
-# ports/rk3562 一致), 没有才退回插件包里的同名配置。
-# ★ 别用 board-server/config/config_aivqe_new.json —— 那是 **2mic** 板
-#   (RK3576/RK3308)的旧文件, 推到这块 6mic 板会把波束降级成 2mic。
-VQE_CFG_LOCAL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config_aivqe_new_6mic2ref.json"
-if [ -f "$VQE_CFG_LOCAL" ]; then
-    VQE_CFG_SRC="$VQE_CFG_LOCAL"
-    echo "== 算法配置: 仓内 6mic+2ref 真源 ($VQE_CFG_LOCAL)"
-else
-    VQE_CFG_SRC="$PKG/config/$CFG/config_aivqe_new.json"
-    echo "== 算法配置: 插件包 ($VQE_CFG_SRC)"
-fi
+# 算法配置: 6mic+2ref 基线取自插件包(仓库里没有这份, 别用
+# board-server/config/config_aivqe_new.json —— 那是 **2mic** 板
+# (RK3576/RK3308)的旧文件, 推到这块板会把波束降级成 2mic)。
+VQE_CFG_SRC="$PKG/config/$CFG/config_aivqe_new.json"
+echo "== 算法配置: $VQE_CFG_SRC"
 
 echo "== 板子: $SERIAL -> $(adb -s "$SERIAL" shell 'cat /proc/device-tree/model' | tr -d '\0')"
 echo "== so 来源: $LIB_DIR"
@@ -59,7 +52,7 @@ done
 adb -s "$SERIAL" shell 'chmod 755 /usr/lib/alsa-lib/libasound_module_pcm_rkaudio_vqe.so /usr/lib/librkaudio_*.so'
 
 echo "== 2) 算法配置(AEC + AGC + VQE 内置唤醒) =="
-python3 - "$VQE_CFG_SRC" "$TMP_DIR/vqe.json" <<'PY'
+python3 - "$PKG/config/$CFG/config_aivqe_new.json" "$TMP_DIR/vqe.json" <<'PY'
 import json, sys
 src, dst = sys.argv[1], sys.argv[2]
 d = json.load(open(src, encoding="utf-8"))
