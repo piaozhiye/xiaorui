@@ -85,16 +85,18 @@ class TTSProviderBase(ABC):
         # 流式滑动窗口：待匹配的缓存文本
         self._pending_prefix = ""
         self.tts_text_buff = []
+        # ★ 非首句只按强句末标点切(2026-11-19 板端"字级卡顿"事故):
+        #   曾把"，；："也算句末 -> 每个逗号单独合成、单独下发, 句间插静音,
+        #   一段话被剁成"于是"/"是啊"/"小狐狸说"这种碎片, 听感字字顿。
+        #   逗号留在句内一次合成; 首句另有 first_sentence_punctuations
+        #   保留逗号切分(开口快), 长句兜底见 _get_segment_text 的 SOFT 分支。
         self.punctuations = (
-            "，",
             "。",
             "？",
             "?",
             "！",
             "!",
-            "；",
-            ";",
-            "：",
+            "\n",
         )
         self.first_sentence_punctuations = (
             "，",
@@ -583,6 +585,22 @@ class TTSProviderBase(ABC):
                 pos != -1 and pos < last_punct_pos
             ):
                 last_punct_pos = pos
+
+        # ★ 长句兜底(2026-11-19): 非首句只等强句末标点后, 模型偶尔整段不写句号
+        #   (或流式片段迟迟等不到)。攒到 SOFT_MAX 字还没强标点就按逗号切一刀,
+        #   否则全文压到 LAST 才冲刷 -> 用户听到长时间没声音。
+        SOFT_MAX = 40
+        SOFT_PUNCT = ("，", ",", "、", "：", "；", ";")
+        if (last_punct_pos == -1 and not self.is_first_sentence
+                and len(current_text) >= SOFT_MAX):
+            for punct in SOFT_PUNCT:
+                pos = current_text.rfind(punct)
+                if pos != -1 and pos + 1 > last_punct_pos:
+                    last_punct_pos = pos
+                    self._soft_cut_hits = getattr(self, "_soft_cut_hits", 0) + 1
+                    logger.bind(tag=TAG).debug(
+                        f"软切生效(无强标点攒到{SOFT_MAX}字按{punct}切): "
+                        f"累计 {self._soft_cut_hits} 次")
 
         if last_punct_pos != -1:
             # 首段太短(<6字≈0.6s音频)播完时, 次句往往还在合成(单worker池~1.2s/句),
