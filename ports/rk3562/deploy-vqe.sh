@@ -30,6 +30,19 @@ fi
 [ -d "$PKG" ] || { echo "缺插件包: $PKG" >&2; exit 2; }
 [ -d "$LIB_DIR" ] || { echo "缺 so 目录: $LIB_DIR" >&2; exit 2; }
 
+# 算法配置来源: 优先用仓内这份 6mic+2ref 真源(可 review, 与 GitHub 上
+# ports/rk3562 一致), 没有才退回插件包里的同名配置。
+# ★ 别用 board-server/config/config_aivqe_new.json —— 那是 **2mic** 板
+#   (RK3576/RK3308)的旧文件, 推到这块 6mic 板会把波束降级成 2mic。
+VQE_CFG_LOCAL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config_aivqe_new_6mic2ref.json"
+if [ -f "$VQE_CFG_LOCAL" ]; then
+    VQE_CFG_SRC="$VQE_CFG_LOCAL"
+    echo "== 算法配置: 仓内 6mic+2ref 真源 ($VQE_CFG_LOCAL)"
+else
+    VQE_CFG_SRC="$PKG/config/$CFG/config_aivqe_new.json"
+    echo "== 算法配置: 插件包 ($VQE_CFG_SRC)"
+fi
+
 echo "== 板子: $SERIAL -> $(adb -s "$SERIAL" shell 'cat /proc/device-tree/model' | tr -d '\0')"
 echo "== so 来源: $LIB_DIR"
 
@@ -46,12 +59,12 @@ done
 adb -s "$SERIAL" shell 'chmod 755 /usr/lib/alsa-lib/libasound_module_pcm_rkaudio_vqe.so /usr/lib/librkaudio_*.so'
 
 echo "== 2) 算法配置(AEC + AGC + VQE 内置唤醒) =="
-python3 - "$PKG/config/$CFG/config_aivqe_new.json" "$TMP_DIR/vqe.json" <<'PY'
+python3 - "$VQE_CFG_SRC" "$TMP_DIR/vqe.json" <<'PY'
 import json, sys
 src, dst = sys.argv[1], sys.argv[2]
 d = json.load(open(src, encoding="utf-8"))
 s = d["skv_configs"]
-# 本板要的开关(2026-11-18):
+# 本板要的开关(2026-11-19):
 #  aec    enable  6mic+2ref: ref = RK809 播放回采, AEC 的命门
 #  agc    enable  PDM 麦电平低, 靠 AGC 拉起来
 #  wakeup enable  用瑞芯微 VQE 内置唤醒(和 AEC 同一条链路, 不占额外 CPU),
@@ -64,10 +77,10 @@ s["wakeup"]["status"] = "enable"
 s["unkws"]["status"] = "disable"
 s["command"]["status"] = "disable"
 json.dump(d, open(dst, "w", encoding="utf-8"), indent=1, ensure_ascii=False)
-print("  aec=%s agc=%s bf=%s anr=%s wakeup=%s unkws=%s command=%s" % (
+print("  aec=%s agc=%s bf=%s anr=%s wakeup=%s unkws=%s command=%s mic=%s" % (
     s["aec"]["status"], s["agc"]["status"], s["bf"]["status"],
     s["anr"]["status"], s["wakeup"]["status"], s["unkws"]["status"],
-    s["command"]["status"]))
+    s["command"]["status"], s["bf"]["num_array_mic"]))
 PY
 adb -s "$SERIAL" push "$TMP_DIR/vqe.json" /usr/share/rkaudio/config_aivqe_new.json >/dev/null
 adb -s "$SERIAL" push "$PKG/config/$CFG/wopt_6mic_ring_35mm_8input_8output.bin" /usr/share/rkaudio/ >/dev/null

@@ -2,13 +2,13 @@
  "skv_configs": {
   "drop_ref_chan": 0,
   "ref_pos": 1,
-  "ref_pass_threshold": 30,
+  "ref_pass_threshold": 3000,
   "aec": {
    "status": "enable",
    "delay_len": 0,
    "look_ahead_array": 0,
    "look_ahead_discrete": 0,
-   "num_array_mic": 6,
+   "num_array_mic": 2,
    "filter_len": 4,
    "auto_adapted": 1,
    "adapt_rate_down": 0.05,
@@ -68,8 +68,8 @@
    "filter_size": 512,
    "start_freq": 0,
    "end_freq": 8000,
-   "input_beam_num": 8,
-   "output_beam_num": 8,
+   "input_beam_num": 5,
+   "output_beam_num": 5,
    "T_MIU": 0.35,
    "win_low_freq": 800,
    "win_high_freq": 4000,
@@ -77,11 +77,11 @@
    "win_apply_high_freq": 4000,
    "low_freq": 500,
    "high_freq": 4000,
-   "num_array_mic": 6,
+   "num_array_mic": 2,
    "num_discrete_mic": 0,
    "output_mode": 0,
    "chan_select_threshold": 2,
-   "param_path": "/usr/share/rkaudio/wopt_6mic_ring_35mm_8input_8output.bin",
+   "param_path": "/usr/share/rkaudio/wopt_2mic_linear_60mm_5inputbeam_5outputbeam.bin",
    "license_path": "/usr/share/rkaudio/license.lic"
   },
   "aibf": {
@@ -283,8 +283,8 @@
    "status": "enable",
    "attack_time": 200.0,
    "release_time": 200.0,
-   "max_gain": 15.0,
-   "max_peak": -10.0,
+   "max_gain": 15,
+   "max_peak": -10,
    "fRth0": -67.0,
    "fRth1": -64.0,
    "fRth2": -25.0,
@@ -312,7 +312,7 @@
    "alpha": 0.995
   },
   "wakeup": {
-   "status": "enable",
+   "status": "disable",
    "consistent_flag": 1,
    "asr_score_thresh": 0.15,
    "asr_post_smooth_length": 3,
@@ -344,7 +344,7 @@
    "keywords_path": "/usr/share/rkaudio/keywords.txt"
   },
   "doa": {
-   "status": "enable",
+   "status": "disable",
    "alpha": 0.95,
    "start_freq": 500,
    "end_freq": 3000,
@@ -353,25 +353,31 @@
    "azimuth": 360,
    "pitch": 180,
    "fast_search": 0,
-   "search_mic1": 0,
-   "search_mic2": 3,
+   "search_mic1": 3,
+   "search_mic2": 4,
    "X_coord": [
     0.035,
-    0.0175,
-    -0.0175,
+    0.0247,
+    0,
+    -0.0247,
     -0.035,
-    -0.0175,
-    0.0175
+    -0.0247,
+    0,
+    0.0247
    ],
    "Y_coord": [
     0,
-    0.0303,
-    0.0303,
+    0.0247,
+    0.035,
+    0.0247,
     0,
-    -0.0303,
-    -0.0303
+    -0.0247,
+    -0.035,
+    -0.0247
    ],
    "Z_coord": [
+    0,
+    0,
     0,
     0,
     0,
