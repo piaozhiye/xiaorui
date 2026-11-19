@@ -104,7 +104,6 @@ class AsrEngine:
             time.sleep(0.05)
         if time.monotonic() >= deadline and not self._done.is_set():
             raise rockx.RockXError(f"ASR 超时 ({timeout_s}s)")
-        self.rx.wait_finish(self.handle, inp)
         self.rx.input_destroy(self.handle, inp)
         elapsed = time.monotonic() - t0
 

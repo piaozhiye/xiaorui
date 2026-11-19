@@ -77,7 +77,6 @@ class TtsEngine:
 
         if not self._done.wait(timeout_s):
             raise rockx.RockXError(f"TTS 超时 ({timeout_s}s，未收到末帧)")
-        self.rx.wait_finish(self.handle, inp)
         self.rx.input_destroy(self.handle, inp)
         elapsed = time.monotonic() - t0
         pcm = b"".join(self._chunks)

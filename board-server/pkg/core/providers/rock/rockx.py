@@ -110,7 +110,6 @@ class RockX:
         self._keepalive = []
         self._input_refs = {}
         self._packet_inputs = {}
-        self._waits = {}
         self._bind()
 
     def _keep(self, b):
@@ -142,9 +141,10 @@ class RockX:
         lib.RockXInputDestroy.restype = i
         lib.RockXInputDestroy.argtypes = [v, v]
         lib.RockXProcessAsync.restype = i
+        # wait 句柄按 SDK 官方 demo 传 NULL(头文件: "can be NULL if no
+        # necessary wait")。传真实句柄再 RockXWaitFinish 会 ret=-1 失败
+        # (2026-11-19 板端实测), 推理完成信号用回调即可。
         lib.RockXProcessAsync.argtypes = [v, v, ctypes.POINTER(v)]
-        lib.RockXWaitFinish.restype = i
-        lib.RockXWaitFinish.argtypes = [v, v]
         lib.RockXInputGetPacketAt.restype = v
         lib.RockXInputGetPacketAt.argtypes = [v, i]
         lib.RockXPacketSetString.restype = i
@@ -226,12 +226,6 @@ class RockX:
                                if owner != inp}
         return rc
 
-    def wait_finish(self, handle, inp):
-        wait = self._waits.pop(inp)
-        rc = self.lib.RockXWaitFinish(handle, wait)
-        if rc != ROCKX_RET_SUCCESS:
-            raise RockXError(f"RockXWaitFinish 失败 ret={rc}")
-
     def packet_set_string(self, packet, value):
         if isinstance(value, str):
             value = value.encode()
@@ -252,11 +246,7 @@ class RockX:
         )
 
     def process_async(self, handle, input_):
-        wait = ctypes.c_void_p()
-        rc = self.lib.RockXProcessAsync(handle, input_, ctypes.byref(wait))
-        if rc == ROCKX_RET_SUCCESS:
-            self._waits[input_] = wait
-        return rc
+        return self.lib.RockXProcessAsync(handle, input_, None)
 
     def input_get_packet(self, input_, index=0):
         pkt = self.lib.RockXInputGetPacketAt(input_, index)
