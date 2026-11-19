@@ -442,3 +442,36 @@ def test_rock_sdk_is_staged_before_start_and_failure_stops_deployment(
     else:
         assert result.returncode != 0
         assert not starts
+
+
+def test_s98_data_script_gates_use_f_not_x():
+    """★ 2026-11-19: /data 上执行位重启即丢(实测两次, S98 静默跳过起栈,
+    板子"开机了但全 DOWN")。/data 脚本门禁必须 -f(反正 sh 调用);
+    /usr/sbin/crond 是二进制直接执行, 保留 -x。
+    """
+    text = (PORT / "init-S98xiaorui").read_text(encoding="utf-8")
+    assert "-x /data" not in text, "/data 脚本门禁应为 -f(执行位重启会丢)"
+    assert "[ -x /usr/sbin/crond ]" in text, "crond 是二进制, 应保持 -x"
+
+
+def test_wire_lead_fits_alsa_card_buffer():
+    """★ 2026-11-19: 声卡缓冲(period 数 × period 样本)必须 >= tts_lead_ms。
+
+    lead 超过卡缓冲时, 多出的提前量堵在前端环里进不了卡, 句间隙保护
+    打折。此约束横跨 C 常量与 yaml 配置, 靠静态测试防漂移。
+    """
+    c_src = (REPO / "board" / "audio_player.c").read_text(encoding="utf-8")
+    m_periods = re.search(r"a_set_periods\(spk, hw, (\d+), 0\)", c_src)
+    assert m_periods, "audio_player.c 里找不到 a_set_periods 调用"
+    m_period = re.search(r"spk_period = SPK_PERIOD_SAMPLES;", c_src)
+    assert m_period, "spk_period 应与 SPK_PERIOD_SAMPLES 同源"
+    m_samples = re.search(r"#define SPK_PERIOD_SAMPLES (\d+)", c_src)
+    assert m_samples, "找不到 SPK_PERIOD_SAMPLES 定义"
+    card_ms = (int(m_periods.group(1)) * int(m_samples.group(1))
+               / 24000 * 1000)
+
+    cfg = yaml.safe_load((PORT / "gateway-board.yaml").read_text(encoding="utf-8"))
+    lead_ms = int(cfg.get("tts_lead_ms", 0) or 0)
+    assert card_ms >= lead_ms, (
+        f"卡缓冲 {card_ms:.0f}ms < tts_lead_ms {lead_ms}ms: "
+        f"lead 超出卡容量, 多余提前量堵在前端环")

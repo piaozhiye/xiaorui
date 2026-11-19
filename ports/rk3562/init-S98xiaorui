@@ -23,7 +23,10 @@ case "$1" in
         #    板子没网(eth0/wlan0 都 NO-CARRIER), chronyd 校不上; RTC 出厂值是
         #    2017-08-04 -> 日志时间戳全错。board-time.sh 按 RTC -> last-good-epoch
         #    的顺序恢复时间, 并把时区固定成 Asia/Shanghai(网关报时走本地时区)。
-        if [ -x /data/xiaorui/board-time.sh ]; then
+        # ★ 脚本门禁用 -f 不用 -x: /data 上的执行位会在重启后丢失(2026-11-19
+        #   实测两次, deploy 时的 chmod +x 不保真), -x 门导致 S98 静默跳过
+        #   起栈, 板子看起来"开机了但全 DOWN"。下面脚本全是 sh 调用, -f 即可。
+        if [ -f /data/xiaorui/board-time.sh ]; then
             sh /data/xiaorui/board-time.sh setup
         fi
 
@@ -32,12 +35,12 @@ case "$1" in
         #    RKLLM 604MB 常驻不可回收, 余量不够时内核 OOM 会干掉 init ->
         #    整机黑屏(2026-11-18 实测三次)。
         #    zstd 而非默认 lzo: lzo 在这些页上压缩比≈1.0(白换), zstd 能压到 1/4.4。
-        if [ -x /data/setup-zram.sh ]; then
+        if [ -f /data/setup-zram.sh ]; then
             sh /data/setup-zram.sh || echo "[S98] zram 配置失败(内存兜底没了)"
         fi
 
         # 3) 板内栈 (NPU 大模型 + 网关)
-        if [ -x /data/xiaorui-gateway/start-board-stack.sh ]; then
+        if [ -f /data/xiaorui-gateway/start-board-stack.sh ]; then
             # 幂等: 网关已经在跑就别再起一套。2026-11-18 实测过双起 ——
             # 两个 RKLLM(各 604MB)+ 两个网关 = 1.2GB, 2GB 板子直接 OOM 黑屏。
             if pgrep -f "/data/xiaorui-gateway/server/app.py" >/dev/null 2>&1; then
@@ -61,7 +64,7 @@ case "$1" in
         #     要开就创建 /data/xiaorui/.ha_enabled, 开机自启 + crond 看护都跟着开。
         #     start-ha.sh 幂等: zram swap -> HA(--skip-pip) -> OOM 优先级。
         if [ -f /data/xiaorui/.ha_enabled ]; then
-            if [ -x /data/xiaorui-server/start-ha.sh ]; then
+            if [ -f /data/xiaorui-server/start-ha.sh ]; then
                 # HA 启动 ~40s 且不阻塞语音链路, 所以放后台不等就绪。
                 (setsid sh /data/xiaorui-server/start-ha.sh >/dev/null 2>&1 </dev/null &)
             fi
@@ -75,7 +78,7 @@ case "$1" in
         fi
 
         # 4) 前端
-        if [ -x /data/xiaorui/start-frontend.sh ] \
+        if [ -f /data/xiaorui/start-frontend.sh ] \
             && ! pgrep -x xiaorui_live >/dev/null 2>&1; then
             # RK809 混音设置。
             # ★ 卡号必须是 1(rockchiprk809co); card 0 是 spdif 卡, 没有这些控件,
