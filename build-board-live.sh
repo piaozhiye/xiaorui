@@ -43,7 +43,7 @@ fi
     "$DIR/board/backend_hybrid.c" \
     "$DIR/board/ws_transport.c" \
     "$DIR/board/runtime_config.c" \
-    "$OPUS_ROOT/lib/libopus.a" -lm -ldl -lpthread \
+    "$OPUS_ROOT/lib/libopus.a" -lm -ldl -lpthread -lrt \
     -o "$DIR/board/xiaorui_live"
 
 file "$DIR/board/xiaorui_live"

@@ -39,8 +39,10 @@ CC="${HOST_CC:-cc}"
 # 瑞芯微 VQE 内置唤醒: 状态文件解析 + 唤醒边沿检测
 "$CC" -std=c11 -O2 -Wall -Wextra -Werror -I"$DIR/board" \
     "$DIR/board/xr_vqe_wake.c" "$DIR/board/xr_vqe_wake_test.c" \
-    -lpthread -o "$TEST_DIR/vqe_wake"
-"$TEST_DIR/vqe_wake"
+    -lpthread -lrt -o "$TEST_DIR/vqe_wake"
+# 两条读法都测: 共享内存(插件主路径) + 状态文件(降级路径)
+"$TEST_DIR/vqe_wake" file
+"$TEST_DIR/vqe_wake" shm
 
 # es8388 阶段2 采集适配: 通道抽取/抗混叠抽取(混叠抑制/连续性/边界)
 "$CC" -std=c11 -O2 -Wall -Wextra -Werror -I"$DIR/board" \
