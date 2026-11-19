@@ -22,11 +22,12 @@ fi
 #   (xr_request_reboot 首条指令 0x404c74 casal, fork 都没到)。防回归另见
 #   tools/check-no-lse.sh 门禁。
 "$CC" -std=c11 -O2 -g -Wall -Wextra -march=armv8-a ${XR_CFLAGS_EXTRA:-} \
-    -ffile-prefix-map="$DIR"=. -Werror \
+    -ffile-prefix-map="$DIR"=. -Werror -DXR_CRASH_BT \
     -I"$DIR/board" -I"$OPUS_ROOT/include/opus" \
     "$DIR/board/xiaorui_live.c" \
     "$DIR/board/audio_player.c" \
     "$DIR/board/audio_capture.c" \
+    "$DIR/board/cap_accum.c" \
     "$DIR/board/audio_cue.c" \
     "$DIR/board/music_controls.c" \
     "$DIR/board/playback_control.c" \

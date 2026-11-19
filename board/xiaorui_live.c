@@ -41,6 +41,7 @@ extern long syscall(long, ...);   /* -std=c11 下 glibc 不声明, reboot 子进
 #include "xr_vqe_wake.h"
 #include "audio_player.h"
 #include "audio_capture.h"
+#include "cap_accum.h"
 #include "xr_mic4.h"
 #include "xr_volume.h"
 #include <fcntl.h>
@@ -251,38 +252,28 @@ static int wake_flush(void)
 #define PENDING_STEP_SAMPLES 256
 static int16_t g_pending[PENDING_MAX_FRAMES][FRAME_SAMPLES];
 static int g_pending_n;
-/* 采集累加器: 设备侧一次只读一个 VQE 周期(256 样本 = 16ms), 攒够 100ms
-   一帧再喂下游(VAD/KWS/上传)。
-   ★ 硬件缓冲只有 4 个周期(64ms), 一次要 100ms 会等不到下一个周期 ->
-     缓冲反复见底 -> EPIPE -> prepare 丢掉积压(实测日志 222 次 mic 错误,
-     丢掉的音频直接毁掉送进 RockASR 的内容)。
-   ★ 也不能一次读 100ms: 读会阻塞 ws 轮询, opus 音频包拉不动 ->
-     播放器欠载 -> TTS 卡顿。所以按周期小步读, 两头都顾。 */
-static int16_t g_cap_acc[FRAME_SAMPLES];
-static int g_cap_acc_n;
+/* 采集累加器: 拆成 cap_accum 模块(带回归测试)。
+ * 2026-11-19 板端 rc=139 x2: 旧内嵌实现 n=1536 时再写 256 写穿 384 字节,
+ * 砸中 BSS 紧邻全局(g_cap_acc_n/g_pending_n/g_original_argv/看门狗心跳),
+ * 每轮回答期必炸。契约见 cap_accum.h。 */
+static cap_accum_t g_cap_acc;
 
-/* 从设备读一个周期(16ms)进累加器; 返回读到的样本数, <0 是错误 */
-static int cap_pull(snd_pcm_t *mic)
+static long cap_read_adapter(void *dev, int16_t *dst, unsigned long want)
 {
-    long r = xr_capture_read(mic, g_cap_acc + g_cap_acc_n, PENDING_STEP_SAMPLES);
-    if (r < 0) {
-        g_cap_acc_n = 0;
-        return (int)r;
-    }
-    g_cap_acc_n += (int)r;
-    return (int)r;
+    return xr_capture_read(dev, dst, want);
 }
 
-/* 累加器里够一帧(100ms)了吗 */
-static int cap_frame_ready(void) { return g_cap_acc_n >= FRAME_SAMPLES; }
+static int cap_pull(snd_pcm_t *mic)
+{
+    return cap_accum_pull(&g_cap_acc, cap_read_adapter, mic,
+                          PENDING_STEP_SAMPLES);
+}
 
-/* 取走一帧(100ms), 剩余的留在累加器 */
+static int cap_frame_ready(void) { return cap_accum_ready(&g_cap_acc); }
+
 static void cap_frame_take(int16_t *out)
 {
-    memcpy(out, g_cap_acc, (size_t)FRAME_SAMPLES * 2);
-    memmove(g_cap_acc, g_cap_acc + FRAME_SAMPLES,
-            (size_t)(g_cap_acc_n - FRAME_SAMPLES) * 2);
-    g_cap_acc_n -= FRAME_SAMPLES;
+    cap_accum_take(&g_cap_acc, out);
 }
 
 /* 声学临时窗口: KWS 命中时开, 等服务端文本确认。
@@ -404,7 +395,7 @@ static int g_mic_drained_by_control;
 static int capture_finish_turn(snd_pcm_t *mic) {
     if (!mic) return 0;
     g_pending_n = 0;         /* 上一轮积压的帧作废, 别喂进下一轮 */
-    g_cap_acc_n = 0;         /* 采集累加器里的半帧也作废 */
+    cap_accum_init(&g_cap_acc); /* 采集累加器里的半帧也作废 */
     if (g_mic_drained_by_control) {   /* 缓冲已被读走: 不动流 */
         g_mic_drained_by_control = 0;
         return 0;
@@ -455,20 +446,43 @@ static long mic_read_raw(snd_pcm_t *mic, int16_t *out16k, int frames16k) {
     }
     if (g_vqe_mic) {
         /* xr_vqe_16k = ALSA plug(48k→16k 由 plug 层完成), 前端 16k/1ch 直读。
-         * ★ 小步读: 一次一个 VQE 周期(16ms), 攒够 frames16k 再返回。
-         *   硬件缓冲只有 4 个周期(64ms), 一次要 100ms 会等不到下一个周期 ->
-         *   缓冲反复见底 -> EPIPE -> prepare 丢掉积压(实测日志 222 次 mic
-         *   错误, 丢掉的音频直接毁掉送进 RockASR 的内容)。 */
-        while (!cap_frame_ready()) {
-            int r = cap_pull(mic);
+         * ★ 自适应步长: 按 VQE 实际开的 period 读。
+         *   RK809 板 period=256: 一次读 100ms 会等不到 -> EPIPE(222 次),
+         *     小步(256)能修; ES8388 板 period=1600: 小步(256)反而崩
+         *     (前端静默退出), 大步(一次读完)没问题。
+         *   所以按 period 大小选: <=512 用小步攒帧, >512 直接一次读完。 */
+        static int vqe_small_step = -1;
+        if (vqe_small_step < 0) {
+            const char *e = getenv("XR_VQE_SMALL_STEP");
+            vqe_small_step = (e && atoi(e) > 0) ? 1 : 0;
+            fprintf(stderr, "[xr] VQE 采集: %s\n",
+                    vqe_small_step ? "小步读" : "大步读");
+        }
+        if (vqe_small_step) {
+            while (!cap_frame_ready()) {
+                int r = cap_pull(mic);
+                if (r < 0) {
+                    xr_capture_prepare(mic);
+                    memset(out16k, 0, (size_t)frames16k * 2);
+                    return 0;
+                }
+            }
+            cap_frame_take(out16k);
+            return frames16k;
+        }
+        /* period 大的板: 直接一次读完(原来的做法, ES8388 实测稳定) */
+        long got = 0;
+        while (got < frames16k) {
+            long r = xr_capture_read(mic, (char *)out16k + got * 2,
+                                     (unsigned long)(frames16k - got));
             if (r < 0) {
                 xr_capture_prepare(mic);
                 memset(out16k, 0, (size_t)frames16k * 2);
                 return 0;
             }
+            got += r;
         }
-        cap_frame_take(out16k);
-        return frames16k;
+        return got;
     }
     if (!g_mic4) return xr_capture_read(mic, out16k, (unsigned long)frames16k);
     static int16_t raw4[FRAME_SAMPLES * 3 * 4];

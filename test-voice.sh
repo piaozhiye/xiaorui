@@ -90,5 +90,11 @@ done
     "$DIR/board/json_escape_test.c" -o "$TEST_DIR/json_escape"
 "$TEST_DIR/json_escape"
 python3 "$DIR/tests/test_capture_cadence.py"
+# 采集累加器: 2026-11-19 板端 rc=139 回归(小步攒帧写穿 g_cap_acc[1600],
+# 砸中 BSS 紧邻全局, 每轮回答期段错误)
+"$CC" -std=c11 -O2 -Wall -Wextra -Werror -I"$DIR/board" \
+    "$DIR/board/cap_accum.c" "$DIR/board/cap_accum_test.c" \
+    -o "$TEST_DIR/cap_accum"
+"$TEST_DIR/cap_accum"
 python3 "$DIR/tests/test_cloud_only_acceptance.py"
 python3 "$DIR/tests/test_wake_live_acceptance.py"
