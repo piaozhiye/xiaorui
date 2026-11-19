@@ -23,6 +23,11 @@ MODEL=${XR_RKLLM_MODEL:-$SRV/qwen2.5-0.5b-instruct-rk3562-w8a8.rkllm}
 # LP4X V10 / Buildroot 2026.02) 没自带, 要用 /data/xiaorui-server/lib 里那份。
 # 目录不存在时这个赋值无害(动态链接器会忽略不存在的路径)。
 export LD_LIBRARY_PATH="$SRV/lib:${LD_LIBRARY_PATH:-}"
+# 同一 NPU 上互斥推理，避免 RKLLM 与 RockTTS 重叠时产生沙哑的原始音频。
+export XR_NPU_LOCK_FILE="${XR_NPU_LOCK_FILE:-/tmp/xiaorui-npu.lock}"
+# 协作式调度(2026-11-19): TTS 请求 NPU 时, RKLLM 在 token 边界主动让出 NPU,
+# TTS 合成完再续写。避免"LLM 整轮生成完(35s) TTS 才能开始"的长等待。
+export XR_NPU_COOPERATIVE="${XR_NPU_COOPERATIVE:-1}"
 # 人设里写明跑在 RK3562 的 NPU 上(llm_rkllm.py 默认写的是 RK3576)
 export XR_RKLLM_PERSONA="${XR_RKLLM_PERSONA:-你是小瑞，运行在 RK3562 开发板上的端侧语音助手，大脑在本机 NPU 上本地推理。回答控制在两三句话内，适合语音播报，不要用列表。}"
 

@@ -13,6 +13,8 @@
 2026-11-18 实测 10s 音频 1.1s 识别完(RTF 0.11), 质量优于半流式。
 """
 import argparse
+import fcntl
+from contextlib import contextmanager
 import json
 import os
 import sys
@@ -25,6 +27,22 @@ import rockx  # noqa: E402
 
 SAMPLE_RATE = 16000
 
+
+
+# RK3562: RKLLM 与 RockX 并行推理会改变 TTS 原始波形。
+# 通过同一文件的 flock 协调独立进程；未配置时保持其他平台的行为。
+@contextmanager
+def npu_exclusive():
+    path = os.environ.get("XR_NPU_LOCK_FILE")
+    if not path:
+        yield
+        return
+    with open(path, "a") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 class AsrEngine:
     def __init__(self, lib_dir, data_dir, auth_config, lang="zh"):
@@ -58,7 +76,8 @@ class AsrEngine:
         self.rx.set_int(self.handle, None, "src_sample_rate", SAMPLE_RATE)
         self.rx.set_ptr(self.handle, "ASR", "param",
                         rockx.ctypes.byref(init_param), 1)
-        self.rx.init(self.handle)
+        with npu_exclusive():
+            self.rx.init(self.handle)
         self.rx.set_output_info(self.handle, "out", ["asr_result"],
                                 rockx.ctypes.cast(self.dummy, rockx.ctypes.c_void_p))
 
@@ -80,6 +99,10 @@ class AsrEngine:
                 self._done.set()
 
     def transcribe(self, pcm, timeout_s):
+        with npu_exclusive():
+            return self._transcribe(pcm, timeout_s)
+
+    def _transcribe(self, pcm, timeout_s):
         if not pcm or len(pcm) < 2:
             return "", 0.0
         self._events = []

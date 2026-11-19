@@ -13,6 +13,8 @@
 模型常驻(加载 ~3.5s 只付一次); 实测首包 0.467s, 整句 0.476s(12 字)。
 """
 import argparse
+import fcntl
+from contextlib import contextmanager
 import os
 import sys
 import threading
@@ -23,6 +25,35 @@ import framing  # noqa: E402
 import rockx  # noqa: E402
 
 SAMPLE_RATE = 24000
+
+
+
+# RK3562: RKLLM 与 RockX 并行推理会改变 TTS 原始波形。
+# 通过同一文件的 flock 协调独立进程；未配置时保持其他平台的行为。
+@contextmanager
+def npu_exclusive():
+    path = os.environ.get("XR_NPU_LOCK_FILE")
+    if not path:
+        yield
+        return
+    marker = None
+    if os.environ.get("XR_NPU_COOPERATIVE", "0") == "1":
+        marker = f"{path}.tts-{os.getpid()}.pending"
+        with open(marker, "w") as pending:
+            pending.write(str(time.monotonic()))
+    try:
+        with open(path, "a") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    finally:
+        if marker:
+            try:
+                os.unlink(marker)
+            except FileNotFoundError:
+                pass
 
 
 class TtsEngine:
@@ -39,7 +70,8 @@ class TtsEngine:
         # 注意: node 必须是 RKTTSPipelineV1(demo 源码里的 node 名是错的)
         self.rx.set_ptr(self.handle, "RKTTSPipelineV1", "RKTTSPipelineV1Callback",
                         rockx.ctypes.cast(self.cb, rockx.ctypes.c_void_p), 0)
-        self.rx.init(self.handle)
+        with npu_exclusive():
+            self.rx.init(self.handle)
         self.rx.set_output_info(self.handle, "out", ["wav_data"],
                                 rockx.ctypes.cast(self.dummy, rockx.ctypes.c_void_p))
 
@@ -55,6 +87,10 @@ class TtsEngine:
             self._done.set()
 
     def synthesize(self, text, alpha, timeout_s):
+        with npu_exclusive():
+            return self._synthesize(text, alpha, timeout_s)
+
+    def _synthesize(self, text, alpha, timeout_s):
         if not text.strip():
             raise rockx.RockXError("空文本")
         self._chunks = []

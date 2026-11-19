@@ -8,6 +8,9 @@
 首次加载模型约 20-40 s, 出现 ready 后再接入服务端.
 """
 import argparse
+import fcntl
+import glob
+from contextlib import contextmanager
 import ctypes
 import json
 import os
@@ -15,6 +18,44 @@ import queue
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+# RK3562: RKLLM 与 RockX 并行推理会改变 TTS 原始波形。
+# 通过同一文件的 flock 协调独立进程；未配置时保持其他平台的行为。
+@contextmanager
+def npu_exclusive():
+    path = os.environ.get("XR_NPU_LOCK_FILE")
+    if not path:
+        yield
+        return
+    with open(path, "a") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+def tts_waiting():
+    path = os.environ.get("XR_NPU_LOCK_FILE")
+    if not path:
+        return False
+    waiting = False
+    for marker in glob.glob(path + ".tts-*.pending"):
+        try:
+            pid = int(marker.rsplit(".tts-", 1)[1].split(".", 1)[0])
+            os.kill(pid, 0)
+            waiting = True
+        except ProcessLookupError:
+            try:
+                os.unlink(marker)
+            except FileNotFoundError:
+                pass
+        except (ValueError, FileNotFoundError):
+            continue
+        except PermissionError:
+            waiting = True
+    return waiting
+
 
 PORT = 8112
 RUN_LOCK = threading.Lock()  # RKLLM 句柄不支持并发推理
@@ -89,9 +130,44 @@ class RKLLMCallback(ctypes.Structure):
                 ("embed_callback", ctypes.c_void_p), ("embed_userdata", ctypes.c_void_p)]
 
 
+class RKLLMTokenInput(ctypes.Structure):
+    _fields_ = [("input_ids", ctypes.POINTER(ctypes.c_int32)), ("n_tokens", ctypes.c_size_t)]
+
+
+class RKLLMEmbedInput(ctypes.Structure):
+    _fields_ = [("embed", ctypes.POINTER(ctypes.c_float)), ("n_tokens", ctypes.c_size_t)]
+
+
+class RKLLMImageInput(ctypes.Structure):
+    _fields_ = [("image_embed", ctypes.POINTER(ctypes.c_float)),
+                ("n_image_tokens", ctypes.c_size_t), ("n_image", ctypes.c_size_t),
+                ("image_start", ctypes.c_char_p), ("image_end", ctypes.c_char_p),
+                ("image_content", ctypes.c_char_p),
+                ("image_width", ctypes.c_size_t), ("image_height", ctypes.c_size_t)]
+
+
+class RKLLMVideoInput(ctypes.Structure):
+    _fields_ = [("video_embed", ctypes.POINTER(ctypes.c_float)),
+                ("n_video_tokens", ctypes.c_size_t), ("n_frame_tokens", ctypes.c_size_t),
+                ("n_video", ctypes.c_size_t), ("n_frame", ctypes.c_size_t)]
+
+
+class RKLLMAudioInput(ctypes.Structure):
+    _fields_ = [("audio_embed", ctypes.POINTER(ctypes.c_float)),
+                ("n_audio_tokens", ctypes.c_size_t), ("n_audio", ctypes.c_size_t),
+                ("audio_start", ctypes.c_char_p), ("audio_end", ctypes.c_char_p),
+                ("audio_content", ctypes.c_char_p)]
+
+
+class RKLLMMultimodalInput(ctypes.Structure):
+    _fields_ = [("prompt", ctypes.c_char_p), ("image", RKLLMImageInput),
+                ("video", RKLLMVideoInput), ("audio", RKLLMAudioInput)]
+
+
 class RKLLMInput(ctypes.Structure):
     class _U(ctypes.Union):
-        _fields_ = [("prompt_input", ctypes.c_char_p)]
+        _fields_ = [("prompt_input", ctypes.c_char_p), ("token_input", RKLLMTokenInput),
+                    ("embed_input", RKLLMEmbedInput), ("multimodal_input", RKLLMMultimodalInput)]
     _fields_ = [("role", ctypes.c_char_p), ("enable_thinking", ctypes.c_bool),
                 ("input_type", ctypes.c_int32), ("u", _U)]
 
@@ -114,6 +190,10 @@ class RkLlm:
                                    ctypes.POINTER(RKLLMCallback)]
         lib.rkllm_run.argtypes = [HANDLE_T, ctypes.POINTER(RKLLMInput),
                                   ctypes.POINTER(RKLLMInferParam), ctypes.c_void_p]
+        lib.rkllm_is_running.argtypes = [HANDLE_T]
+        lib.rkllm_abort.argtypes = [HANDLE_T]
+        lib.rkllm_clear_kv_cache.argtypes = [HANDLE_T, ctypes.c_int,
+                                           ctypes.c_void_p, ctypes.c_void_p]
         self.lib = lib
 
         param = lib.rkllm_createDefaultParam()
@@ -127,13 +207,28 @@ class RkLlm:
 
         self.q = queue.Queue()
         self.done = threading.Event()
+        self.cancel = threading.Event()
+        self.cooperative = os.environ.get("XR_NPU_COOPERATIVE", "0") == "1"
+        self.generated_tokens = 0
+        self.last_token = -1
+        self.pause_requested = False
+        self.token_budget = 256
 
         @LLMResultCallback
         def on_result(result, _userdata, state):
             try:
                 if state in (RKLLM_RUN_NORMAL, RKLLM_RUN_WAITING):
-                    if result and result.contents.text:
-                        self.q.put(result.contents.text.decode("utf-8", "ignore"))
+                    if result and result.contents.token_id >= 0:
+                        self.last_token = result.contents.token_id
+                        self.generated_tokens += 1
+                    text = result.contents.text if result else None
+                    if text:
+                        self.q.put(text.decode("utf-8", "ignore"))
+                    # 只有已有完整文本回调时暂停，避免在 EOS 或半个 UTF-8 字符上续写。
+                    if self.cancel.is_set() or (self.cooperative and text
+                            and self.generated_tokens < self.token_budget and tts_waiting()):
+                        self.pause_requested = True
+                        return 1
                 elif state == RKLLM_RUN_FINISH:
                     self.done.set()
                 elif state == RKLLM_RUN_ERROR:
@@ -148,7 +243,8 @@ class RkLlm:
                            tokenizer_callback=None, tokenizer_userdata=None,
                            embed_callback=None, embed_userdata=None)
         self.handle = HANDLE_T()
-        st = lib.rkllm_init(ctypes.byref(self.handle), ctypes.byref(param), ctypes.byref(cb))
+        with npu_exclusive():
+            st = lib.rkllm_init(ctypes.byref(self.handle), ctypes.byref(param), ctypes.byref(cb))
         if st != 0:
             raise RuntimeError(f"rkllm_init failed: {st}")
         lib.rkllm_set_chat_template(
@@ -176,26 +272,73 @@ class RkLlm:
         infer.max_new_tokens = 256
 
         self.done.clear()
+        self.cancel.clear()
+        self.generated_tokens = 0
+        self.last_token = -1
+        self.token_budget = 256
+        self.q = queue.Queue()
         run_err = []
 
         def runner():
-            st = self.lib.rkllm_run(self.handle, ctypes.byref(inp), ctypes.byref(infer), None)
-            if st != 0:
-                run_err.append(st)
-            self.done.set()
-
-        threading.Thread(target=runner, daemon=True).start()
-        while True:
+            nonlocal inp
+            # 恢复时需要最后一个已采样 token（不是空输入），保留其 Python 引用。
+            resume_tokens = None
             try:
-                piece = self.q.get(timeout=0.2)
-                if piece == "[RKLLM_ERROR]":
-                    raise RuntimeError("rkllm inference error")
-                yield piece
-            except queue.Empty:
-                if self.done.is_set():
-                    break
-        if run_err:
-            raise RuntimeError(f"rkllm_run failed: {run_err[0]}")
+                while not self.cancel.is_set():
+                    self.pause_requested = False
+                    with npu_exclusive():
+                        if self.cancel.is_set():
+                            break
+                        st = self.lib.rkllm_run(self.handle, ctypes.byref(inp), ctypes.byref(infer), None)
+                        if self.lib.rkllm_is_running(self.handle):
+                            self.lib.rkllm_abort(self.handle)
+                            raise RuntimeError("rkllm_run returned before native task stopped")
+                    if st:
+                        raise RuntimeError(f"rkllm_run failed: {st}")
+                    if not self.pause_requested or self.cancel.is_set():
+                        break
+                    wait_start = time.monotonic()
+                    while tts_waiting() and not self.cancel.is_set():
+                        if time.monotonic() - wait_start > 60:
+                            raise RuntimeError("TTS NPU turn exceeded 60s")
+                        time.sleep(0.005)
+                    if self.cancel.is_set():
+                        break
+                    print(f"[rkllm] cooperative yield tokens={self.generated_tokens} "
+                          f"wait={time.monotonic()-wait_start:.3f}s", flush=True)
+                    if self.last_token < 0 or self.generated_tokens >= self.token_budget:
+                        break
+                    resume_tokens = (ctypes.c_int32 * 1)(self.last_token)
+                    inp = RKLLMInput()
+                    inp.role = b"user"
+                    inp.input_type = 1  # RKLLM_INPUT_TOKEN：续上最后一个已采样 token。
+                    inp.u.token_input = RKLLMTokenInput(resume_tokens, 1)
+                    infer.max_new_tokens = self.token_budget - self.generated_tokens
+            except Exception as exc:
+                run_err.append(str(exc))
+            finally:
+                self.done.set()
+
+        worker = threading.Thread(target=runner, daemon=True)
+        worker.start()
+        try:
+            while True:
+                try:
+                    piece = self.q.get(timeout=0.05)
+                    if piece == "[RKLLM_ERROR]":
+                        raise RuntimeError("rkllm inference error")
+                    yield piece
+                except queue.Empty:
+                    if self.done.is_set():
+                        break
+            if run_err:
+                raise RuntimeError(run_err[0])
+        finally:
+            self.cancel.set()
+            # RUN_LOCK 在 runner 收尾之前不能让下一轮重置上述回调状态。
+            if worker.is_alive() and self.lib.rkllm_is_running(self.handle):
+                self.lib.rkllm_abort(self.handle)
+            worker.join()
 
 
 PERSONA = os.environ.get("XR_RKLLM_PERSONA") or (
