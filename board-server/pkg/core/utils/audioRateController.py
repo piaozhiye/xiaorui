@@ -170,6 +170,11 @@ class AudioRateController:
           lead=0 时窗口=prebuffer, 与旧行为一致。
         """
         window_s = (self.prebuffer_ms + self.lead_ms) / 1000.0
+        if self.prebuffer_ms <= 0:
+            # 未启用预缓冲: 直接放行, 不打误导性的"放行"日志
+            # (每个音频包都会走到这里, 2026-11-19 二次 review Minor)。
+            self._prebuffer_done = True
+            return
         while (self.prebuffer_ms > 0
                and self._queued_audio_ms() < self.prebuffer_ms
                and not self._production_finished

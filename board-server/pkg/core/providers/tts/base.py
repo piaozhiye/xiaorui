@@ -593,14 +593,19 @@ class TTSProviderBase(ABC):
         SOFT_PUNCT = ("，", ",", "、", "：", "；", ";")
         if (last_punct_pos == -1 and not self.is_first_sentence
                 and len(current_text) >= SOFT_MAX):
+            soft_cut = False
             for punct in SOFT_PUNCT:
                 pos = current_text.rfind(punct)
                 if pos != -1 and pos + 1 > last_punct_pos:
                     last_punct_pos = pos
-                    self._soft_cut_hits = getattr(self, "_soft_cut_hits", 0) + 1
-                    logger.bind(tag=TAG).debug(
-                        f"软切生效(无强标点攒到{SOFT_MAX}字按{punct}切): "
-                        f"累计 {self._soft_cut_hits} 次")
+                    soft_cut = True
+            # 计数按"一次切分"算, 不是按候选标点个数(二次 review Minor:
+            # 原实现内层累加, 一次软切最多计 6 次)。
+            if soft_cut:
+                self._soft_cut_hits = getattr(self, "_soft_cut_hits", 0) + 1
+                logger.bind(tag=TAG).debug(
+                    f"软切生效(无强标点攒到{SOFT_MAX}字按软标点切于"
+                    f"{last_punct_pos}): 累计 {self._soft_cut_hits} 次")
 
         if last_punct_pos != -1:
             # 首段太短(<6字≈0.6s音频)播完时, 次句往往还在合成(单worker池~1.2s/句),

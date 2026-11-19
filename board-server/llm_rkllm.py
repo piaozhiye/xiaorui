@@ -192,8 +192,6 @@ class RkLlm:
                                   ctypes.POINTER(RKLLMInferParam), ctypes.c_void_p]
         lib.rkllm_is_running.argtypes = [HANDLE_T]
         lib.rkllm_abort.argtypes = [HANDLE_T]
-        lib.rkllm_clear_kv_cache.argtypes = [HANDLE_T, ctypes.c_int,
-                                           ctypes.c_void_p, ctypes.c_void_p]
         self.lib = lib
 
         param = lib.rkllm_createDefaultParam()

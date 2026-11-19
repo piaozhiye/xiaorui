@@ -227,8 +227,9 @@ def _get_or_create_rate_controller(
         )
         # ★ lead 单独开启时必须有意积上限: 句间隙把客户端积压越积越多
         #   (re-anchor 后 lead 重建, 每个间隙净攒 lead-间隙 的量), 没有上限
-        #   长回答会溢出客户端环形缓冲 -> 静音丢整段音频。显式配了
-        #   tts_max_ahead_ms 就尊重配置; 没配就兜一个与 lead 匹配的值。
+        #   长回答会溢出客户端环形缓冲 -> 静音丢整段音频。
+        #   显式配了 tts_max_ahead_ms 就尊重配置; 没配(含显式 0, 语义为
+        #   "auto"——`or 0` 会把 0 与未配等同)就兜一个与 lead 匹配的值。
         if (conn.audio_rate_controller.lead_ms > 0
                 and conn.audio_rate_controller.max_ahead_ms <= 0):
             conn.audio_rate_controller.max_ahead_ms = max(
