@@ -43,6 +43,35 @@ class StripWakePrefixTests(unittest.TestCase):
         self.assertIsNone(rest)
         self.assertIsNone(word)
 
+    # 2026-11-19 板端实测(RockASR): 唤醒词会被转成**混合形** ——
+    # 第一单元听岔、第二单元是对的("小绿小瑞"/"小看小爱"/"小是小瑞")。
+    # 词表里没有这些, 以前只匹到**单字**变体("小绿") -> 只剥 2 字,
+    # 剩下"小瑞"落到命令链 -> "转写过短, 回没听清" -> 板子抢答。
+    # 正确行为: 匹到 4 字的双单元形态, 剥完剩空 = 纯唤醒 -> 静默。
+    def test_mixed_form_strips_four_chars(self):
+        for text, word in (
+            ("小绿小瑞。", "小绿小瑞"),
+            ("小看小爱。", "小看小爱"),
+            ("小是小瑞。", "小是小瑞"),
+            ("小帅小帅。", "小帅小帅"),
+            ("小小瑞。", "小小瑞"),
+        ):
+            rest, hit = strip_wake_prefix(text, WORDS)
+            self.assertIsNotNone(rest, text)
+            self.assertEqual(rest, "", f"{text}: 剥完应为空(纯唤醒), 实际 {rest!r}")
+            self.assertEqual(hit, word, text)
+
+    def test_mixed_form_with_command_keeps_command(self):
+        rest, word = strip_wake_prefix("小绿小瑞现在几点了", WORDS)
+        self.assertEqual(rest, "现在几点了")
+        self.assertEqual(word, "小绿小瑞")
+
+    def test_normal_sentence_not_mistaken_for_wake(self):
+        for text in ("帮我开灯", "小明小刚来了", "今天天气怎么样"):
+            rest, word = strip_wake_prefix(text, WORDS)
+            self.assertIsNone(rest, text)
+            self.assertIsNone(word, text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -196,29 +196,33 @@ static long music_read(void *context, int16_t *pcm, size_t samples) {
     if (n == -EPIPE) { xr_capture_prepare(context); return 0; }
     return n;
 }
-/* 唤醒源: 默认瑞芯微 rkaudio_vqe 内置唤醒(和 AEC/降噪同一条 VQE 链路,
-   不占额外 CPU); XR_WAKE_SOURCE=sherpa 可一键退回 CPU zipformer KWS,
-   现场出问题时不用重编。
-   VQE 状态文件拿不到(插件没起/路径不对)时自动退回 CPU KWS ——
-   宁可慢一点, 也不能让板子变成"唤不醒"。 */
+/* 唤醒源(2026-11-19 定): 默认 sherpa-onnx zipformer KWS。
+ * 瑞芯微 VQE 内置唤醒的接入代码都留着(board/xr_vqe_wake.c, 读
+ * /dev/shm/rkaudio_vqe_status 的 wakeup 边沿), 但**默认不开**:
+ * 实测它在本板这套采集参数下 0/10 触发(6mic 波束 + 16ms 周期, VQE 每帧
+ * 要 16~19ms, 唤醒 FSM 拿不到连续帧), 而 sherpa KWS 命中 124 次。
+ * 想试 VQE: XR_WAKE_SOURCE=vqe。
+ * 真正的唤醒判定权在**网关侧**(RockASR 转写 + 唤醒词门), 前端这个只是
+ * 声学证据, 用来开跟说窗和提前起采集。 */
 static int wake_use_vqe(void)
 {
     static int cached = -1;
     if (cached >= 0) return cached;
     const char *s = getenv("XR_WAKE_SOURCE");
-    if (s && !strcmp(s, "sherpa")) {
-        cached = 0;
-        fprintf(stderr, "[xr] 唤醒源: sherpa KWS (XR_WAKE_SOURCE=sherpa)\n");
+    if (s && !strcmp(s, "vqe")) {
+        /* VQE 插件在打开采集设备时写共享内存; 万一还没写出来, 等最多 3s */
+        for (int i = 0; i < 30 && !xr_vqe_wake_available(); i++) {
+            struct timespec ts = { .tv_sec = 0, .tv_nsec = 100 * 1000 * 1000 };
+            nanosleep(&ts, NULL);
+        }
+        cached = xr_vqe_wake_available();
+        fprintf(stderr, "[xr] 唤醒源: %s\n",
+                cached ? "rkaudio_vqe 内置" : "sherpa KWS (VQE 状态不可用)");
         return cached;
     }
-    /* VQE 插件在打开采集设备时写状态文件; 万一还没写出来, 等最多 3s */
-    for (int i = 0; i < 30 && !xr_vqe_wake_available(); i++) {
-        struct timespec ts = { .tv_sec = 0, .tv_nsec = 100 * 1000 * 1000 };
-        nanosleep(&ts, NULL);
-    }
-    cached = xr_vqe_wake_available();
-    fprintf(stderr, "[xr] 唤醒源: %s\n",
-            cached ? "rkaudio_vqe 内置" : "sherpa KWS (VQE 状态文件不可用)");
+    cached = 0;
+    fprintf(stderr, "[xr] 唤醒源: sherpa KWS%s\n",
+            (s && !strcmp(s, "sherpa")) ? " (XR_WAKE_SOURCE=sherpa)" : " (默认)");
     return cached;
 }
 static int wake_available(void)
@@ -248,6 +252,10 @@ static int wake_feed(const int16_t *pcm, int samples)
 {
     return wake_poll(pcm, samples);
 }
+
+/* 唤醒词独占一句的时长上限(秒): 唤醒词本身 1.2s, 加预滚 ~1.7s;
+   "唤醒词+指令"连说一定超过 2s。 */
+#define WAKE_ONLY_MAX_S 2.0
 
 static const xr_music_control_ops_t MUSIC_OPS = {
     music_read, wake_feed, wake_reset, xr_speech_recognize
@@ -1215,6 +1223,18 @@ inject_wait:
         if (wake_available()) {
             if (wake_poll(frame, (int)n)) {
                 kws_wake_this_utt = 1;      /* 声学证据: 后续文本判定兜底用 */
+                /* ★ 声学唤醒命中 -> 本地**立刻**开跟说窗, 不等服务端判。
+                   服务端判唤醒要等: VAD 静音 1.2~1.6s 判"说完" + RockASR 1.4s
+                   + 一来一回, 约 3s。这 3s 里用户紧接着说的指令整段丢失
+                   (麦克风在录, 但窗口没开, 路由把它当冷启动轮丢掉) ——
+                   就是"反应慢 / 认不到"的根因(2026-11-19 声学套件实测:
+                   唤醒词后 1s 说的指令根本没被采到, 网关只听到"小瑞小瑞")。
+                   窗口本地先开好, 指令就能被接住; 确认音仍由服务端回执播,
+                   避免本地抢答。 */
+                if (!xr_session_in_window(&ses, now_s())) {
+                    xr_session_awake(&ses, now_s());
+                    fprintf(stderr, "[xr] 声学唤醒: 本地开跟说窗(不等服务端)\n");
+                }
                 /* KWS 命中即开采集: 唤醒词音频可能电平临界没过能量门,
                    声学证据优先 -- 命中帧起收集(预滚已环存) */
                 int started = 0;
@@ -1244,6 +1264,28 @@ inject_wait:
         size_t utt_n = 0;
         const int16_t *utt = xr_vad_utterance(&vad, &utt_n);
         fprintf(stderr, "[xr] 说完 (%.1fs), 识别中\n", (double)utt_n / RATE);
+
+        /* ★ 本地唤醒闭环: 这一句只有唤醒词(短)就不上送。
+           - 孤立唤醒词(1.2s)送去 ASR, 转出来是垃圾("俾。"/"吧。"/"啊有。"),
+             服务端判不成唤醒词就会当成普通查询 -> 板子抢答;
+           - 上送后服务端的"纯唤醒"回执(约 3s 后到)会让前端 drain 麦克风,
+             把用户紧接着说的指令整段丢掉 —— "反应慢 / 认不到"的根因。
+           唤醒词+指令连着说(>= WAKE_ONLY_MAX_S)则照常上送, 由服务端剥前缀。 */
+        if (kws_wake_this_utt && utt_n > 0
+            && (double)utt_n / RATE <= WAKE_ONLY_MAX_S) {
+            fprintf(stderr, "[xr] 本句只有唤醒词(%.1fs): 本地回执, 不上送\n",
+                    (double)utt_n / RATE);
+            xr_session_awake(&ses, now_s());
+            if (xr_player_start() == 0 && ack_pcm) {
+                xr_player_push_pcm(ack_pcm, ack_n);
+                xr_session_note_ack(&ses, now_s(), (double)ack_n / 24000.0,
+                                    config->ack_cool_ms / 1000.0);
+            }
+            kws_wake_this_utt = 0;
+            xr_vad_clear_preroll(&vad);
+            xr_vad_reset_gate(&vad);
+            continue;
+        }
         if (g_dump_dir && *g_dump_dir) {
             static int dump_seq;
             char dpath[512];

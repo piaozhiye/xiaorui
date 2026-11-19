@@ -60,13 +60,16 @@ s = d["skv_configs"]
 # 本板要的开关(2026-11-19):
 #  aec    enable  6mic+2ref: ref = RK809 播放回采, AEC 的命门
 #  agc    enable  PDM 麦电平低, 靠 AGC 拉起来
-#  wakeup enable  用瑞芯微 VQE 内置唤醒(和 AEC 同一条链路, 不占额外 CPU),
-#                   不再让前端跑 sherpa-onnx zipformer KWS
+#  wakeup disable 瑞芯微 VQE 内置唤醒实测 0/10 触发(6mic 波束 + 16ms 周期,
+#                   VQE 每帧 16~19ms, 唤醒 FSM 拿不到连续帧) -> 白占 CPU, 关掉。
+#                   唤醒判定权在网关侧(RockASR 转写 + 唤醒词门, 实测 10/10);
+#                   前端用 sherpa-onnx zipformer KWS 做声学证据。
+#                   想试 VQE 唤醒: XR_WAKE_SOURCE=vqe + 这里改回 enable。
 #  unkws  disable 任意词表检测要常驻跑 MNN, 白占 CPU, 本板不需要
 #  command disable 固定指令词用不上
 s["aec"]["status"] = "enable"
 s["agc"]["status"] = "enable"
-s["wakeup"]["status"] = "enable"
+s["wakeup"]["status"] = "disable"
 s["unkws"]["status"] = "disable"
 s["command"]["status"] = "disable"
 json.dump(d, open(dst, "w", encoding="utf-8"), indent=1, ensure_ascii=False)

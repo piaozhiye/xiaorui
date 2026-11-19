@@ -146,14 +146,19 @@ int main(void) {
     CHECK(g_kws_resets == 1, "命中后应立即 reset");
     CHECK(xr_speech_kws_feed(frame, 1600) == 0, "命中并 reset 后不应重复命中");
 
-    /* 4. 空 keyword => 不算命中; flush 无论命中与否都 reset */
+    /* 4. 空 keyword => 不算命中; flush 不命中时**不**reset
+     *    2026-11-19: 原来 flush 无论命中与否都 reset, 把还没凑齐 chunk 的
+     *    唤醒假设扔了 -> 孤立唤醒词永远不命中(实测 0/26)。现在不命中就不
+     *    reset, 让 chunk 凑齐时自然出命中; 真要丢弃半截假设走
+     *    xr_speech_kws_reset()。
+     */
     fake_reset();
     CHECK(xr_speech_init(&FAKE_OPS) == 0, "init 应为 0");
     g_kws_ready = 1; g_kw[0] = 0;
     CHECK(xr_speech_kws_feed(frame, 1600) == 0, "空 keyword 不应算命中");
     g_kw[0] = 0; g_kws_ready = 1; g_kws_resets = 0;
     CHECK(xr_speech_kws_flush() == 0, "空 keyword 的 flush 不应命中");
-    CHECK(g_kws_resets == 1, "flush 无论命中与否都应 reset");
+    CHECK(g_kws_resets == 0, "flush 不命中时不应 reset(要保住未成形的假设)");
 
     /* 5. flush 命中 */
     fake_reset();

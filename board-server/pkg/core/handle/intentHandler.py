@@ -139,7 +139,8 @@ def is_noise_token(text) -> bool:
 # 本地给"小想"/"小看看看"。枚举词表追不上, 双单元形状是稳定的。
 # 2026-10-21 补 弟/肉/猪/蜜: 快速说"小瑞小瑞"时云 ASR 把"瑞"吞成近音
 # (实测 小小弟 / 小小肉 / 小小猪)。
-_WAKE_VARIANTS = set("瑞翠队子薇妹绿贵月院丽热略玉思想看度弟肉猪蜜")
+# 2026-11-19 板端实测(RockASR 转写)新增: 爱/帅/是/治/日/店/得
+_WAKE_VARIANTS = set("瑞翠队子薇妹绿贵月院丽热略玉思想看度弟肉猪蜜爱帅是治日店得")
 
 
 def _clean_wake_rest(rest: str) -> str:
@@ -168,7 +169,17 @@ def _wake_shape_at(text, start):
                 return _clean_wake_rest(seg[3:]), seg[:3]
         return None, None
     a, b = seg[1], seg[3]
-    if a != b and (a not in _WAKE_VARIANTS or b not in _WAKE_VARIANTS):
+    if a != b:
+        # 2026-11-19 板端实测(RockASR): 唤醒词常被转成**混合形** ——
+        # 第一单元听岔、第二单元是对的("小绿小瑞"/"乔治小瑞"/"小是小瑞"/"小帅小帅")。
+        # 这种以前匹不到(两个单元都得在听岔表里), 结果只被单字词表剥掉 2 个字,
+        # 剩下的"小瑞"落到命令链 -> "转写过短, 回没听清" -> 板子抢答,
+        # 用户后面真说的指令还被回声保护吃掉 -> "认不到"。
+        # 现在: 第二单元是"瑞"(真唤醒词的后一个字)就认 —— 剥 4 字剩空 = 纯唤醒,
+        # 静默。第一单元是"瑞"的("小瑞小X")仍要求 X 在听岔表里, 免得
+        # "小瑞小心点"被当唤醒把指令吃掉。
+        if b == "瑞" or (a in _WAKE_VARIANTS and b in _WAKE_VARIANTS):
+            return _clean_wake_rest(seg[4:]), seg[:4]
         return None, None
     return _clean_wake_rest(seg[4:]), seg[:4]
 
@@ -213,12 +224,29 @@ def strip_wake_prefix(text, words):
     时, 枚举词表永远追不上, 但形状稳定。
     """
     lowered = text.lower()
+    # 词表匹配(最长优先)
+    word_rest, word_hit = None, None
     for w in sorted(words, key=len, reverse=True):
         if lowered.startswith(w.lower()):
-            return text[len(w):], w
-    rest = match_wake_shape(text)
-    if rest is not None:
-        return rest, text[: len(text) - len(rest)]
+            word_rest, word_hit = text[len(w):], w
+            break
+    # 形状匹配(小X小Y)。用内部函数直接拿命中词: 公开的 match_wake_shape 只返回
+    # 剩余文本, 这里按 len 反推命中词会把句尾标点也算进去("小绿小瑞。" -> 命中
+    # "小绿小瑞。")。
+    shape_rest, shape_hit = _match_wake_shape(text)
+    # 取命中更长的那个。
+    # 2026-11-19 板端实测: RockASR 把"小瑞小瑞"转成混合形("小绿小瑞"/
+    # "乔治小瑞"/"小帅小帅"/"小看小爱"), 词表里没有这些, 词表只能匹到
+    # **单字**变体(如"小绿") -> 只剥 2 字, 剩下"小瑞"被当成短命令 ->
+    # "转写过短, 回没听清" -> 板子抢答, 用户后面真说的指令被回声保护吃掉。
+    # 形状匹配能匹到 4 字("小绿小瑞"), 剥完剩空 = 纯唤醒 -> 静默。
+    if shape_hit is not None and (word_hit is None
+                                  or len(shape_hit) > len(word_hit)):
+        return shape_rest, shape_hit
+    if word_hit is not None:
+        return word_rest, word_hit
+    if shape_hit is not None:
+        return shape_rest, shape_hit
     return None, None
 
 

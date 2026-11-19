@@ -299,7 +299,17 @@ int xr_speech_kws_feed(const int16_t *pcm, int n) {
     return hit;
 }
 
-/* 照搬 xiaorui_live.c:552-561: is_ready 才 decode, 无论命中与否都 reset */
+/* 句尾收割: is_ready 才 decode。
+ *
+ * ★ 2026-11-19 不再在这里 reset(原来"无论命中与否都 reset"):
+ *   sherpa 关键词模型要**唤醒词之后**再攒 ~640ms 才凑齐 chunk 出结果。
+ *   孤立唤醒词(1.16s)在 1.8s 句尾时刚好还没凑齐 -> reset 把没成形的假设
+ *   扔了 -> 永远不命中(实测 0/26)。而"唤醒词+长音频"的素材 chunk 早凑齐,
+ *   所以一直命中(124 次) —— 差别就在这。
+ *   不 reset 的话, chunk 凑齐时自然出命中, 命中后 spotter 自己会 reset
+ *   (见 xr_speech_kws_feed 的 kws_reset)。真正要丢弃半截假设的场合
+ *   (打断/弃轮/超时)走 xr_speech_kws_reset()。
+ */
 int xr_speech_kws_flush(void) {
     if (!kws_stream) return 0;
     int hit = 0;
@@ -311,8 +321,8 @@ int xr_speech_kws_flush(void) {
             hit = 1;
         }
         if (kr) kws_destroy_result(kr);
+        if (hit) kws_reset(kws_spotter, kws_stream);
     }
-    kws_reset(kws_spotter, kws_stream);
     return hit;
 }
 
