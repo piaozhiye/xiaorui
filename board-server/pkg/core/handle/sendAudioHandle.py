@@ -87,6 +87,7 @@ async def _wait_for_audio_completion(conn: "ConnectionHandler"):
         conn.logger.bind(tag=TAG).debug(
             f"等待音频发送完成，队列中还有 {len(rate_controller.queue)} 个包"
         )
+        rate_controller.finish_production()
         await rate_controller.queue_empty_event.wait()
 
         if send_delay_ms > 0:
@@ -212,6 +213,27 @@ def _get_or_create_rate_controller(
         else:
             conn.audio_rate_controller.reset()
 
+        # 起播预缓冲: 攒够这么多音频再发首包(吸收逐句合成的突发, 防断音)
+        conn.audio_rate_controller.prebuffer_ms = int(
+            conn.config.get("tts_prebuffer_ms", 0) or 0
+        )
+        conn.audio_rate_controller.max_ahead_ms = int(
+            conn.config.get("tts_max_ahead_ms", 0) or 0
+        )
+        # 持久提前量: 保持声卡缓冲深度, 吸收 TTS 句间供给间隙(实验 D/E)。
+        # 默认 0(旧行为); 板端实测 2000ms 时 14 处 0.6s 间隙 0 击穿。
+        conn.audio_rate_controller.lead_ms = int(
+            conn.config.get("tts_lead_ms", 0) or 0
+        )
+        # ★ lead 单独开启时必须有意积上限: 句间隙把客户端积压越积越多
+        #   (re-anchor 后 lead 重建, 每个间隙净攒 lead-间隙 的量), 没有上限
+        #   长回答会溢出客户端环形缓冲 -> 静音丢整段音频。显式配了
+        #   tts_max_ahead_ms 就尊重配置; 没配就兜一个与 lead 匹配的值。
+        if (conn.audio_rate_controller.lead_ms > 0
+                and conn.audio_rate_controller.max_ahead_ms <= 0):
+            conn.audio_rate_controller.max_ahead_ms = max(
+                6 * conn.audio_rate_controller.lead_ms, 12000)
+
         # 初始化 flow_control
         conn.audio_flow_control = {
             "packet_count": 0,
@@ -268,8 +290,10 @@ async def _send_audio_with_rate_control(
 
         conn.last_activity_time = time.time() * 1000
 
-        if send_delay_ms > 0:
-            # 自定义节奏模式：所有包入队按 send_delay 发（关闭预缓冲）
+        if (send_delay_ms > 0 or rate_controller.prebuffer_ms > 0
+                or rate_controller.max_ahead_ms > 0
+                or rate_controller.lead_ms > 0):
+            # 显式预缓冲时所有包都必须入队，不能由前五包直发绕过。
             rate_controller.add_audio(packet)
         else:
             # 默认节奏模式（60ms/包）：前 N 包预缓冲直接发，后续入队由后台任务按 interval_ms 节奏发

@@ -21,6 +21,17 @@ enable_websocket_ping: true
 enable_wakeup_words_response_cache: false
 enable_greeting: true
 
+# 逐句合成按真实音频时长 1x 送往播放器; send_delay 只是两包最小间隔。
+tts_audio_send_delay: 20
+tts_prebuffer_ms: 4000
+# 持久 wire 提前量: 1x 节拍下声卡 just-in-time 空转, TTS 句间供给间隙
+# (0.4~0.8s)会击穿声卡 -> 排空/EPIPE 丢 1.92s。保持 2s lead 让声卡常年
+# 有余量(同包回放实验 D/E: 14 处 0.6s 间隙, 无 lead 14 处写停顿全中,
+# lead=2s 后 0 击穿 0 EPIPE)。
+tts_lead_ms: 2000
+# 留出客户端 30s 环及 ALSA 缓冲余量，长回答也不能无限灌入。
+tts_max_ahead_ms: 12000
+
 # >>> wakeup_words <<<
 # 这一段由 deploy-board-gateway.sh 从 board-server/config/wakeup_words.xiaorui.yaml
 # 注入(那个文件是唯一真源, 见 tests/test_wakeup_config.py)。
