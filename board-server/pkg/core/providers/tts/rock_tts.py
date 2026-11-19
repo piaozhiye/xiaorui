@@ -17,6 +17,7 @@ config:
 """
 import asyncio
 import os
+import time
 import wave
 
 from core.providers.tts.base import TTSProviderBase
@@ -67,6 +68,15 @@ class TTSProvider(TTSProviderBase):
         self.slot.prefetch()
 
     def _warm(self):
+        # 延后预热: NPU 模型缓冲是 tmpfs(shmem)硬占用, 三个模型不能同时装
+        # (2026-11-19 板端 OOM: ASR helper 加载时被内核杀)。
+        # ASR 在每轮关键路径上, 先让它装; TTS 等 LLM 出第一句时才用, 晚装无妨。
+        # 默认 0 = 不预热: 2GB 板子装不下 LLM+ASR+TTS 三个 NPU 模型
+        # (稳态就要 1862MB/1963MB), TTS 等真要合成时按需加载。
+        # ASR 每轮都在关键路径上, 由它先占住 NPU 那块内存。
+        delay = float(os.environ.get("XR_ROCK_TTS_WARM_DELAY", "0"))
+        if delay > 0:
+            time.sleep(delay)
         try:
             self.slot.acquire()
             logger.bind(tag=TAG).info("RockTTS helper 就绪")

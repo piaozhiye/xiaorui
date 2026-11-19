@@ -67,10 +67,10 @@ class SlotTests(unittest.TestCase):
                                idle_timeout_s=0)
         tts = runtime.get_slot("tts", self.factory, footprint_mb=250,
                                idle_timeout_s=0)
-        with patch.object(runtime, "mem_available_mb", return_value=2000):
+        with patch.object(runtime, "mem_available_raw_mb", return_value=2000):
             asr.acquire()
         # TTS 需要 650MB；停止 ASR 后空闲预算增至 1000MB。
-        with patch.object(runtime, "mem_available_mb",
+        with patch.object(runtime, "mem_available_raw_mb",
                           side_effect=lambda: 100 if self.helpers[0].alive else 1000):
             tts.acquire()
         # ASR 被 TTS 挤掉, TTS 活着
@@ -84,7 +84,7 @@ class SlotTests(unittest.TestCase):
                                idle_timeout_s=0)
         tts = runtime.get_slot("tts", self.factory, footprint_mb=250,
                                idle_timeout_s=0)
-        with patch.object(runtime, "mem_available_mb", return_value=2000):
+        with patch.object(runtime, "mem_available_raw_mb", return_value=2000):
             asr.acquire()
             tts.acquire()
         self.assertTrue(all(h.alive for h in self.helpers))
@@ -93,7 +93,7 @@ class SlotTests(unittest.TestCase):
         """空闲到期但内存宽裕 -> 留着, 省下次的加载延迟。"""
         slot = runtime.get_slot("asr", self.factory, footprint_mb=600,
                                 idle_timeout_s=0)
-        with patch.object(runtime, "mem_available_mb", return_value=2000):
+        with patch.object(runtime, "mem_available_raw_mb", return_value=2000):
             h = slot.acquire()
             slot._idle_stop()
         self.assertTrue(h.alive)
@@ -103,9 +103,9 @@ class SlotTests(unittest.TestCase):
         """空闲到期且内存紧张 -> 卸载, 把 NPU 内存还给系统。"""
         slot = runtime.get_slot("asr", self.factory, footprint_mb=600,
                                 idle_timeout_s=0)
-        with patch.object(runtime, "mem_available_mb", return_value=2000):
+        with patch.object(runtime, "mem_available_raw_mb", return_value=2000):
             h = slot.acquire()
-        with patch.object(runtime, "mem_available_mb", return_value=100):
+        with patch.object(runtime, "mem_available_raw_mb", return_value=100):
             slot._idle_stop()
         self.assertFalse(h.alive)
         self.assertEqual(h.stopped, 1)
@@ -115,7 +115,7 @@ class SlotTests(unittest.TestCase):
                                idle_timeout_s=0)
         tts = runtime.get_slot("tts", self.factory, footprint_mb=250,
                                idle_timeout_s=0)
-        with patch.object(runtime, "mem_available_mb", return_value=5000):
+        with patch.object(runtime, "mem_available_raw_mb", return_value=5000):
             asr.acquire()
             tts.acquire()
         runtime.stop_all()
@@ -135,7 +135,7 @@ class SlotTests(unittest.TestCase):
 
     def test_insufficient_memory_does_not_start_helper(self):
         slot = runtime.get_slot("asr", self.factory, 600, 0)
-        with patch.object(runtime, "mem_available_mb", return_value=0):
+        with patch.object(runtime, "mem_available_raw_mb", return_value=0):
             with self.assertRaises(runtime.HelperError):
                 slot.acquire()
         self.assertEqual(self.helpers, [])

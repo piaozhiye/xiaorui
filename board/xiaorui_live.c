@@ -242,10 +242,60 @@ static int wake_flush(void)
     if (wake_use_vqe()) return xr_vqe_wake_active();
     return xr_speech_kws_flush();
 }
+/* RESPOND 等待服务端判定期间积压的音频(3s @100ms/帧)。
+   VQE 硬件缓冲只有 ~400ms(见 xr_vad 注释), 等待期不采音就会 overrun,
+   prepare 丢掉积压 -> "喊完立刻说指令"那句整段没了。
+   攒着, 等回执到了补喂 VAD(比当前帧更早, 所以要先喂)。 */
+#define PENDING_MAX_FRAMES 30
+/* 小步采音的步长: 一个 VQE 周期(256 样本 = 16ms) */
+#define PENDING_STEP_SAMPLES 256
+static int16_t g_pending[PENDING_MAX_FRAMES][FRAME_SAMPLES];
+static int g_pending_n;
+/* 采集累加器: 设备侧一次只读一个 VQE 周期(256 样本 = 16ms), 攒够 100ms
+   一帧再喂下游(VAD/KWS/上传)。
+   ★ 硬件缓冲只有 4 个周期(64ms), 一次要 100ms 会等不到下一个周期 ->
+     缓冲反复见底 -> EPIPE -> prepare 丢掉积压(实测日志 222 次 mic 错误,
+     丢掉的音频直接毁掉送进 RockASR 的内容)。
+   ★ 也不能一次读 100ms: 读会阻塞 ws 轮询, opus 音频包拉不动 ->
+     播放器欠载 -> TTS 卡顿。所以按周期小步读, 两头都顾。 */
+static int16_t g_cap_acc[FRAME_SAMPLES];
+static int g_cap_acc_n;
+
+/* 从设备读一个周期(16ms)进累加器; 返回读到的样本数, <0 是错误 */
+static int cap_pull(snd_pcm_t *mic)
+{
+    long r = xr_capture_read(mic, g_cap_acc + g_cap_acc_n, PENDING_STEP_SAMPLES);
+    if (r < 0) {
+        g_cap_acc_n = 0;
+        return (int)r;
+    }
+    g_cap_acc_n += (int)r;
+    return (int)r;
+}
+
+/* 累加器里够一帧(100ms)了吗 */
+static int cap_frame_ready(void) { return g_cap_acc_n >= FRAME_SAMPLES; }
+
+/* 取走一帧(100ms), 剩余的留在累加器 */
+static void cap_frame_take(int16_t *out)
+{
+    memcpy(out, g_cap_acc, (size_t)FRAME_SAMPLES * 2);
+    memmove(g_cap_acc, g_cap_acc + FRAME_SAMPLES,
+            (size_t)(g_cap_acc_n - FRAME_SAMPLES) * 2);
+    g_cap_acc_n -= FRAME_SAMPLES;
+}
+
+/* 声学临时窗口: KWS 命中时开, 等服务端文本确认。
+   命中前��� awake_until 记在这里, 服务端回 nowake/噪声时恢复回去 ——
+   否则 KWS 误触留下的窗口还在, 屋里下一句随口话就能免唤醒进命令链。
+   -1 = 没有待确认的声学窗口。 */
+static double g_awake_before_acoustic = -1.0;
+
 static void wake_reset(void)
 {
     if (wake_use_vqe()) xr_vqe_wake_reset();
     else xr_speech_kws_reset();
+    g_awake_before_acoustic = -1.0;   /* 声学临时窗口作废 */
 }
 /* 播放期控制线程用的适配(ops 表要的是 (pcm, samples) 签名) */
 static int wake_feed(const int16_t *pcm, int samples)
@@ -353,6 +403,8 @@ static int g_mic_drained_by_control;
  * 什么都不做也是合法收尾(VQE + 控制线程读过麦的情形)。 */
 static int capture_finish_turn(snd_pcm_t *mic) {
     if (!mic) return 0;
+    g_pending_n = 0;         /* 上一轮积压的帧作废, 别喂进下一轮 */
+    g_cap_acc_n = 0;         /* 采集累加器里的半帧也作废 */
     if (g_mic_drained_by_control) {   /* 缓冲已被读走: 不动流 */
         g_mic_drained_by_control = 0;
         return 0;
@@ -402,16 +454,21 @@ static long mic_read_raw(snd_pcm_t *mic, int16_t *out16k, int frames16k) {
         return frames16k;
     }
     if (g_vqe_mic) {
-        /* xr_vqe_16k = ALSA plug(48k→16k 由 plug 层完成), 前端 16k/1ch 直读 */
-        long got = 0;
-        while (got < frames16k) {
-            long r = xr_capture_read(mic, (char *)out16k + got * 2,
-                                     (unsigned long)(frames16k - got));
-            if (r < 0) { xr_capture_prepare(mic);
-                         memset(out16k, 0, (size_t)frames16k * 2); return 0; }
-            got += r;
+        /* xr_vqe_16k = ALSA plug(48k→16k 由 plug 层完成), 前端 16k/1ch 直读。
+         * ★ 小步读: 一次一个 VQE 周期(16ms), 攒够 frames16k 再返回。
+         *   硬件缓冲只有 4 个周期(64ms), 一次要 100ms 会等不到下一个周期 ->
+         *   缓冲反复见底 -> EPIPE -> prepare 丢掉积压(实测日志 222 次 mic
+         *   错误, 丢掉的音频直接毁掉送进 RockASR 的内容)。 */
+        while (!cap_frame_ready()) {
+            int r = cap_pull(mic);
+            if (r < 0) {
+                xr_capture_prepare(mic);
+                memset(out16k, 0, (size_t)frames16k * 2);
+                return 0;
+            }
         }
-        return got;
+        cap_frame_take(out16k);
+        return frames16k;
     }
     if (!g_mic4) return xr_capture_read(mic, out16k, (unsigned long)frames16k);
     static int16_t raw4[FRAME_SAMPLES * 3 * 4];
@@ -865,6 +922,32 @@ inject_wait:
             continue;
         }
         if (ses.state == XR_SESSION_RESPOND) {
+            /* 等待期也要采音: VQE 缓冲浅(~400ms), 停采会 overrun 丢音频。
+               ★ 只读一个周期(256 样本 = 16ms): 大步读会阻塞 ws 轮询,
+                 opus 音频包拉不动 -> 播放器欠载 -> TTS 卡顿(2026-11-19 实测)。
+               板子正在播报时不攒(那是回声, 回声护栏会兜)。 */
+            /* 等待期也要采音: VQE 缓冲浅(~400ms), 停采会 overrun 丢音频。
+               板子正在播报时不攒(那是回声, 回声护栏会兜)。 */
+            if (xr_player_queued_samples() == 0) {
+                int pr = cap_pull(mic);
+                if (pr < 0) {
+                    /* 缓冲见底(EIPE): 立刻恢复流, 别让下一次读带着旧积压 */
+                    xr_capture_prepare(mic);
+                } else if (cap_frame_ready()) {
+                    int16_t tmpf[FRAME_SAMPLES];
+                    cap_frame_take(tmpf);
+                    if (g_pending_n < PENDING_MAX_FRAMES) {
+                        memcpy(g_pending[g_pending_n++], tmpf,
+                               (size_t)FRAME_SAMPLES * 2);
+                    } else {
+                        /* 满了丢最老的, 保留最近的 */
+                        memmove(g_pending[0], g_pending[1],
+                                (size_t)(PENDING_MAX_FRAMES - 1) * FRAME_SAMPLES * 2);
+                        memcpy(g_pending[PENDING_MAX_FRAMES - 1], tmpf,
+                               (size_t)FRAME_SAMPLES * 2);
+                    }
+                }
+            }
             xr_playback_control_tick(&playback_control, g_vol_pct);
             xr_music_command_t music_command;
             if (xr_playback_control_poll(&music_command)) {
@@ -919,7 +1002,9 @@ inject_wait:
                一次状态, 2s 内问过就算"有人在看"; 没 UI 时回到 1000ms, 即
                UI 提交之前的行为, 回答期不必 20Hz 空转。
                注: 空闲采集期本来就是 timeout 0 非阻塞轮询, 与 UI 在不在无关。 */
-            int ui_poll_ms = (ui.server && xr_ui_server_client_active(ui.server, 2000)) ? 50 : 1000;
+            /* 轮询上限压到 200ms: 采音节律必须短于 VQE 的 ~400ms 硬件缓冲,
+               否则等待期还是会 overrun(1000ms 一次轮询就撑爆了)。 */
+            int ui_poll_ms = (ui.server && xr_ui_server_client_active(ui.server, 2000)) ? 50 : 200;
             backend_ev_t ev = be_poll_event(be, wsbuf, sizeof(wsbuf), &l,
                                             ev_text, sizeof(ev_text), ui_poll_ms);
             if (ev == EV_ERROR) { fprintf(stderr, "[xr] ws 断(播放期)\n"); goto restart; }
@@ -1003,10 +1088,17 @@ inject_wait:
                 int is_wake = !strcmp(ev_text, "wake");
                 xr_playback_control_stop(&playback_control, g_vol_pct);
                 xr_player_drop();
+                /* 文本没确认唤醒(KWS 误触/噪声): 撤销声学临时窗口, 恢复命中前
+                   的状态 —— 否则误触留下的窗口让下一句随口话免唤醒进命令链。 */
+                double saved_awake = g_awake_before_acoustic;
                 if (!is_wake) {
                     if (capture_finish_turn(mic) < 0) goto restart;
                     xr_vad_clear_preroll(&vad);
                     wake_reset();
+                    if (saved_awake >= 0.0) {
+                        ses.awake_until = saved_awake;
+                        fprintf(stderr, "[xr] 服务端未确认唤醒: 撤销声学临时窗口\n");
+                    }
                 }
                 xr_session_end_turn_silent(&ses, now_s(),
                                            is_wake ? 0.0 : config->abandon_cool_ms / 1000.0);
@@ -1229,9 +1321,11 @@ inject_wait:
                    唤醒词后 1s 说的指令根本没被采到, 网关只听到"小瑞小瑞")。
                    窗口本地先开好, 指令就能被接住; 确认音仍由服务端回执播,
                    避免本地抢答。 */
+                /* 记住命中前的窗口: 服务端文本没确认时要恢复回来 */
+                g_awake_before_acoustic = ses.awake_until;
                 if (!xr_session_in_window(&ses, now_s())) {
                     xr_session_awake(&ses, now_s());
-                    fprintf(stderr, "[xr] 声学唤醒: 本地开跟说窗(不等服务端)\n");
+                    fprintf(stderr, "[xr] 声学唤醒: 本地开跟说窗(等服务端文本确认)\n");
                 }
                 /* KWS 命中即开采集: 唤醒词音频可能电平临界没过能量门,
                    声学证据优先 -- 命中帧起收集(预滚已环存) */
@@ -1247,7 +1341,21 @@ inject_wait:
         }
 
         int vad_started = 0;
-        xr_vad_result_t vr = xr_vad_feed(&vad, frame, (int)n, db, &vad_started);
+        xr_vad_result_t vr = XR_VAD_CONTINUE;
+        /* 上一轮等待服务端判定期间积压的帧: **先**补喂(它们比当前帧更早),
+           VAD 的预滚环会把开头半个字回补, 端点判定照常 -> 指令不会被吞。 */
+        if (g_pending_n > 0) {
+            for (int i = 0; i < g_pending_n; i++) {
+                double pdb = xr_vad_frame_db(g_pending[i], FRAME_SAMPLES);
+                int pst = 0;
+                vr = xr_vad_feed(&vad, g_pending[i], FRAME_SAMPLES, pdb, &pst);
+                if (vr != XR_VAD_CONTINUE) break;
+            }
+            g_pending_n = 0;
+            if (vr == XR_VAD_TOO_SHORT) continue;
+            if (vr == XR_VAD_UTT_DONE) goto utterance_ready;
+        }
+        vr = xr_vad_feed(&vad, frame, (int)n, db, &vad_started);
         if (vr == XR_VAD_TOO_SHORT) {
             /* VAD已抬门；必须继续读麦。1.5s阻塞大于VQE的400ms硬件缓冲，
                会造成overrun并吞掉紧接着的短指令/KWS。采样节律由readi约束。 */
@@ -1255,6 +1363,7 @@ inject_wait:
         }
         if (vr != XR_VAD_UTT_DONE) continue;
 
+utterance_ready:
         /* 采集结束: 先收割 KWS 可能已触发的唤醒(触发点延后到尾静音区),
            再走文本识别 -- 否则这句的声学唤醒证据被丢 */
         if (wake_flush()) kws_wake_this_utt = 1;

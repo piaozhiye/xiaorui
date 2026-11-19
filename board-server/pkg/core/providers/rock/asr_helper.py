@@ -73,7 +73,10 @@ class AsrEngine:
             text = r.result.decode("utf-8", "replace") if r.result else ""
             self._events.append((r.state, text, now))
             self._last_event_at = now
-            if r.state == rockx.ASR_STATE_COMPLETE:
+            # 完成信号: SDK 的 FINISH(3)=识别结束 / COMPLETE(4)=识别完成。
+            # transcribe 模式实测发 FINISH(3), 不发 COMPLETE(4) —— 原来只等
+            # COMPLETE, 永远等不到, 才退到"800ms 静默"的启发式(见下面)。
+            if r.state in (rockx.ASR_STATE_FINISH, rockx.ASR_STATE_COMPLETE):
                 self._done.set()
 
     def transcribe(self, pcm, timeout_s):
@@ -93,17 +96,19 @@ class AsrEngine:
         if rc != rockx.ROCKX_RET_SUCCESS:
             raise rockx.RockXError(f"RockXProcessAsync 失败 ret={rc}")
 
-        # 完成判定(板上实测): COMPLETE 不一定发(transcribe 短音频),
-        # 用"结果静默"兜底 —— 收到过结果且 0.8s 无新事件即认为收尾。
+        # 完成判定: 等 SDK 的 FINISH/COMPLETE(唯一能证明推理结束的信号)。
+        # 不用"结果静默 N 毫秒"的启发式 —— 静默不代表推理结束, 提前销毁
+        # input 会让 SDK 读已释放的 PCM, 迟到回调串到下一轮。
         deadline = t0 + timeout_s
-        while time.monotonic() < deadline:
-            if self._done.is_set():
-                break
-            if self._events and (time.monotonic() - self._last_event_at) > 0.8:
-                break
-            time.sleep(0.05)
-        if time.monotonic() >= deadline and not self._done.is_set():
-            raise rockx.RockXError(f"ASR 超时 ({timeout_s}s)")
+        while not self._done.is_set() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if not self._done.is_set():
+            # 没等到完成信号: 抛错让 helper 进程退出(main 统一回收)。
+            # 这里**不**销毁 input —— 推理可能还在跑, 销毁才是串轮根因;
+            # 进程退出时 OS 会把 SDK 的内存全部回收。
+            raise rockx.RockXError(
+                f"ASR 未收到完成信号 FINISH/COMPLETE ({timeout_s}s)")
+        # 收到完成信号 -> 推理确已结束, 此时销毁 input(PCM 缓冲)才安全
         self.rx.input_destroy(self.handle, inp)
         elapsed = time.monotonic() - t0
 

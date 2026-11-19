@@ -60,8 +60,73 @@ def mem_available_mb():
     return info.get("MemAvailable", 0) + int(reclaim)
 
 
+def mem_available_raw_mb():
+    """MemAvailable(不含 zram 折算)。
+
+    NPU 模型缓冲是 tmpfs(shmem) 分配: tmpfs 默认不参与 swap, 内核**不能**
+    靠换出给它腾地方 -> 能不能装下模型只看真实可用量。
+    """
+    return _meminfo().get("MemAvailable", 0)
+
+
+def mem_free_mb():
+    """真正空闲的页(MemFree)。
+
+    ★ MemAvailable 会把**可回收的页缓存**算成可用, 但内核不会为了一次
+    525MB 的大分配同步去回收缓存 -> 看着"有 953MB", 实际空闲只有 ~394MB,
+    于是分配失败 -> OOM 杀 helper(2026-11-19 板端连续 5 次)。
+    所以判"要不要先丢缓存"要用 MemFree。
+    """
+    return _meminfo().get("MemFree", 0)
+
+
+def swap_out_llm():
+    """把 RKLLM 进程的匿名页换出到 zram(clear_refs 写 5), 腾出真实 RAM。
+
+    NPU 模型缓冲是 tmpfs(shmem): 不可回收、不可换出, 只能靠真实空闲页。
+    RKLLM 的 671MB 匿名页是可换出的 -> 换出去就等于腾出 671MB。
+    """
+    try:
+        pids = [p for p in os.listdir("/proc") if p.isdigit()]
+    except OSError:
+        return False
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmd = f.read().decode("utf-8", "ignore")
+        except OSError:
+            continue
+        if "llm_rkllm" not in cmd:
+            continue
+        try:
+            with open(f"/proc/{pid}/clear_refs", "w") as f:
+                f.write("5\n")
+            return True
+        except OSError:
+            continue
+    return False
+
+
+def drop_caches():
+    """丢页缓存, 把模型文件那几百 MB 的缓存让出来。
+
+    模型文件(asr.data 515MB / tts 模型)的页缓存在模型装进 NPU 缓冲后
+    就是纯浪费: 占着真实 RAM, 而 NPU 缓冲又不能靠 swap 腾地方。
+    """
+    try:
+        with open("/proc/sys/vm/drop_caches", "w") as f:
+            f.write("3\n")
+        return True
+    except OSError:
+        return False
+
+
 _SLOTS = {}
 _SLOTS_LOCK = threading.RLock()
+# 模型加载锁: 一次只让一个 helper 加载模型(见模块说明)。
+# ASR/TTS 两个 provider 各自起线程预热, 同时加载会把 2GB 板子顶爆
+# (2026-11-19 板端 dmesg: ASR helper 加载时被 OOM killer 杀)。
+_LOAD_LOCK = threading.Lock()
 
 
 class RockEngineSlot:
@@ -102,7 +167,8 @@ class RockEngineSlot:
         with _SLOTS_LOCK:
             with self._lock:
                 self._cancel_idle()
-                if mem_available_mb() >= RESERVE_MB:
+                # 用真实空闲 RAM 判断: NPU 缓冲不可换出, zram 余量帮不上忙
+                if mem_available_raw_mb() >= RESERVE_MB:
                     self._schedule_idle()
                     return
                 helper = self._helper
@@ -124,10 +190,14 @@ class RockEngineSlot:
         # 先停占内存大的, 一次能腾出最多
         others.sort(key=lambda s: s.footprint_mb, reverse=True)
         for other in others:
-            if mem_available_mb() >= need:
+            if mem_available_raw_mb() >= need:
                 break
             other.stop()
-        return mem_available_mb() >= need
+        # 还是不够: 模型文件的页缓存是纯浪费(装进 NPU 缓冲后就不看了),
+        # 丢了能腾出几百 MB。NPU 缓冲走 tmpfs, 内核不能靠 swap 给它腾地方。
+        if mem_available_raw_mb() < need and drop_caches():
+            return mem_available_raw_mb() >= need
+        return mem_available_raw_mb() >= need
 
     # ---------- 对外 ----------
     def acquire(self):
@@ -139,7 +209,24 @@ class RockEngineSlot:
                     if not self._make_room():
                         raise HelperError(f"{self.kind} 内存不足，拒绝加载 {self.footprint_mb}MB 模型")
                     helper = self._factory()
-                    helper.start()
+                    # 加载锁: 模型加载是内存峰值最高的时刻, 串行化
+                    raw = mem_available_raw_mb()
+                    need = self.footprint_mb + RESERVE_MB
+                    print(f"[rock-runtime] 加载 {self.kind}: 需要 {need}MB, "
+                          f"MemAvailable {raw}MB, MemFree {mem_free_mb()}MB",
+                          flush=True)
+                    # NPU 缓冲是 tmpfs 分配(不可换出), 内核也不会为了一次大分配
+                    # 同步回收页缓存 -> 看着够, 实际不够 -> OOM。
+                    # 真实空闲不够就先丢缓存(模型文件的缓存装进 NPU 后就没用了)。
+                    if mem_free_mb() < need + 256:
+                        # 先把 RKLLM 的匿名页换出到 zram(腾出几百 MB),
+                        # 再丢页缓存(模型文件的缓存装进 NPU 后就没用了)。
+                        swap_out_llm()
+                        drop_caches()
+                        print(f"[rock-runtime] {self.kind} 腾内存后 MemFree "
+                              f"{mem_free_mb()}MB", flush=True)
+                    with _LOAD_LOCK:
+                        helper.start()
                     self._helper = helper
                 self._schedule_idle()
                 return self._helper

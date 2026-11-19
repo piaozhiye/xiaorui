@@ -77,15 +77,20 @@ def test_invalid_body_length_is_rejected(length):
         framing.recv_msg(io.BytesIO(struct.pack('>I', len(header)) + header))
 
 
-def test_request_buffers_released_after_sdk_wait_and_input_destroy():
+def test_request_buffers_released_after_input_destroy():
+    """推理结束销毁 input -> PCM/字符串引用全部释放。
+
+    wait 句柄按 SDK 官方用法传 NULL: 两个 SDK 的 demo 都是
+    RockXProcessAsync(handle, input, NULL), 从不调 RockXWaitFinish;
+    传真实句柄再 WaitFinish 板端实测 ret=-1(ROCKX_RET_FAIL)。
+    """
     rx = rockx.RockX.__new__(rockx.RockX)
     rx.lib = Mock()
     rx.lib.RockXInputCreate.return_value = 10
     rx.lib.RockXInputGetPacketAt.return_value = 20
     rx.lib.RockXProcessAsync.return_value = 0
-    rx.lib.RockXWaitFinish.return_value = 0
     rx.lib.RockXInputDestroy.return_value = 0
-    rx._keepalive, rx._input_refs, rx._packet_inputs, rx._waits = [], {}, {}, {}
+    rx._keepalive, rx._input_refs, rx._packet_inputs = [], {}, {}
     for _ in range(100):
         inp = rx.input_create(1)
         pkt = rx.input_get_packet(inp)
@@ -93,10 +98,25 @@ def test_request_buffers_released_after_sdk_wait_and_input_destroy():
         rx.packet_set_string(pkt, '测试')
         assert len(rx._input_refs[inp]) == 2
         rx.process_async(1, inp)
-        rx.wait_finish(1, inp)
+        # wait 句柄必须是 NULL(SDK 官方用法)
+        assert rx.lib.RockXProcessAsync.call_args[0][2] is None
         rx.input_destroy(1, inp)
         assert rx._input_refs == {}
         assert rx._packet_inputs == {}
-        assert rx._waits == {}
         assert rx._keepalive == []
     assert rx.lib.RockXInputDestroy.call_count == 100
+
+
+def test_asr_completion_uses_sdk_finish_signal_not_silence_heuristic():
+    """ASR 完成信号必须是 SDK 的 FINISH/COMPLETE, 不能靠"结果静默 N 毫秒"。
+
+    静默不能证明异步推理已结束: 提前销毁 input 会让 SDK 读已释放的 PCM,
+    迟到回调把上一轮结果串进下一轮。
+    """
+    src = Path(__file__).resolve().parents[1] / (
+        'board-server/pkg/core/providers/rock/asr_helper.py')
+    text = src.read_text(encoding='utf-8')
+    assert 'ASR_STATE_FINISH' in text
+    assert 'ASR_STATE_COMPLETE' in text
+    # 不再用"结果静默 N 毫秒"当完成信号
+    assert '_last_event_at) > 0.8' not in text
