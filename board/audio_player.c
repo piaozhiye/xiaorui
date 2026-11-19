@@ -97,8 +97,11 @@ void xr_player_push_pcm(const int16_t *pcm, size_t n) {
 }
 
 static int spk_open(void) {
-    /* ALSA period 大小: 写卡必须凑够一个 period, 否则流起不来(EPIPE 循环)。
-     * 2880 样本 @24kHz = 120ms。 */
+    /* ALSA period 大小(2880 样本 @24kHz = 120ms): 决定单次写卡落下的
+     * "垫子"深度。注意这不是"流能否启动"的门槛 —— hw_params 装的默认
+     * sw 参数 start_threshold=1, 任何大小的写都能启动流(内核
+     * sound/core/pcm_native.c 默认 sw params, 本文件从未调 sw_params)。
+     * 凑整 period 写的真正收益见 player_thread 里的根因注释。 */
     const unsigned long spk_period = SPK_PERIOD_SAMPLES;
     spk_period_samples = spk_period;
     /* 预开常驻: 已有句柄直接复用。prepare 失败必须上报, 顺带丢掉僵尸句柄 ——
@@ -210,12 +213,16 @@ static void *player_thread(void *arg) {
             pthread_mutex_unlock(&ring_mu);
             break;
         }
-        /* ★ 2026-11-19 板端实机断音根因(2): 写入量必须 >= 一个 ALSA period。
-         *   period=2880(120ms), 但每包 opus 只解出 1440(60ms)。1 倍速下发时
-         *   环里常常只剩半个 period, 写进 ALSA 流 -> 流起不来 -> EPIPE ->
-         *   prepare 重来 -> 又 EPIPE, 陷入循环, 声卡停在 SETUP 不消费,
-         *   音频被反复丢弃(板端 writei 全部 ~0ms + 大量 -EPIPE)。
-         *   所以: 数据不足一个 period 时等下一包, 凑够才写。
+        /* ★ 2026-11-19 板端实机断音根因(2): 按 period 对齐写卡。
+         *   机制(2026-11-19 二次 review 对照内核源码核实): 历史上的
+         *   "半个 period 写入 -> EPIPE 循环" 并不是"流起不来"——ALSA
+         *   默认 sw 参数 start_threshold=1, 1440 样本的写也能启动流。
+         *   真正的病灶是**零垫子写节奏**: 每包 opus 只解出 1440(60ms),
+         *   写多少卡里就只剩多少, 供给一抖(句间合成空隙)卡立刻干转
+         *   XRUN -> prepare 丢余量 -> 又干转, writei 全部 ~0ms +
+         *   大量 -EPIPE。
+         *   按 period 凑整再写, 每次 writei 都给卡垫进整 120ms 余量,
+         *   供给抖动被垫子吸收。
          *   收尾(eof)时按实际有的写, 不能因为凑不满而丢尾巴。 */
         if (avail < spk_period_samples && !ring_eof) {
             /* 继续等下一包, 直到凑够一个 period。 */
@@ -231,16 +238,23 @@ static void *player_thread(void *arg) {
                 int rc = pthread_cond_timedwait(&ring_cv, &ring_mu, &ts);
                 avail = ring_w >= ring_r ? ring_w - ring_r : RING_SAMPLES - ring_r + ring_w;
                 if (rc == ETIMEDOUT && avail < spk_period_samples) {
-                    if (avail == 0) { tail_hold_ms = 0; continue; }
                     tail_hold_ms += 50;
                     if (tail_hold_ms < 300) continue;
                     /* ★ 尾巴滞留(2026-11-19 live10 实测): 上一轮余音不是
                      * 整 period(问候音 0.45s=3.76period)会卡住尾巴, 环不空
                      * -> 空环的 300ms 优雅排空不触发 -> 声卡在 RUNNING 态
                      * 播干 -> 下一轮首包凑满 period 写入撞 XRUN(EPIPE)。
-                     * 真空满 300ms: 排空+PREPARED 后跳出, 让下面的 take=
-                     * avail 把尾巴写进**未启动**的流(不足 start_threshold
-                     * 不起播); 下一轮数据到齐自动无缝起播。 */
+                     * 真空满 300ms: 先 drain+prepare 复位流, 再把尾巴写出。
+                     * 实际行为(默认 start_threshold=1, 二次 review 核实):
+                     * 这个 partial 写入会**立即起播**并在 ~90ms 内播完,
+                     * 随后静默 XRUN; 紧接着的空环 grace(pcm_active=1)
+                     * 会 drain-from-XRUN + prepare, 给下一轮留下干净的
+                     * PREPARED 流。听感无缝: 尾巴在它的自然时刻播掉,
+                     * 下一轮数据到达时全新起播。
+                     * 两条 grace 路径看着重复, 实际各司其职 —— 即使将来
+                     * 显式设了更大的 start_threshold, 内核 drain-init 会
+                     * 起播 PREPARED 流里的滞留数据, 之后仍由空环 grace
+                     * 收尾。别按"冗余"删掉任何一条。 */
                     pthread_mutex_unlock(&ring_mu);
                     (void)output.a_drain(spk);
                     if (player_running && output.a_prepare(spk) < 0)

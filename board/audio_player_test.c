@@ -16,12 +16,14 @@ static void sleep_ms(long ms) {
     while (nanosleep(&ts, &ts) == -1 && errno == EINTR) {}
 }
 
-/* ★ 2026-11-19 板端实机断音根因(2):
- *   网关改 1 倍速下发后, 板端环里数据来得慢, 播放线程常只凑到 1440 样本
- *   (半个 period), 写进 period=2880 的 ALSA 流 -> EPIPE -> prepare 重来,
- *   陷入 EPIPE 循环, 声卡状态停在 SETUP 不消费, 音频被反复丢弃。
- *   ALSA 要求: 写入量必须 >= 一个 period, 否则流无法启动。
- *   本测试用假 writei 记录每次写入量, 断言不会写出小于一个 period 的块。 */
+/* ★ 2026-11-19 板端实机断音根因(2): 按 period 对齐写卡。
+ *   机制澄清(二次 review 对照内核源码): ALSA 默认 sw 参数
+ *   start_threshold=1, 半个 period(1440)的写也能启动流 —— 历史
+ *   EPIPE 循环的病灶是零垫子的 60ms 写节奏(供给一抖卡就干转
+ *   XRUN), 不是"流起不来"。凑整 period 写 = 每次 writei 给卡
+ *   垫进整 120ms 余量。
+ *   本测试用假 writei 记录每次写入量, 断言不会写出小于一个
+ *   period 的块(eof 尾巴与 grace 排空路径除外)。 */
 
 static int opened, closed, prepared, inject_underrun;
 static size_t written;
@@ -85,21 +87,25 @@ static void test_half_period_is_not_written(void) {
     int16_t half[1440];
     for (size_t i = 0; i < 1440; ++i) half[i] = (int16_t)(i % 100);
     xr_player_push_pcm(half, 1440);          /* 只有半个 period */
-    sleep_ms(120);                            /* 给播放线程时间: 不该写出任何东西 */
+    sleep_ms(100);                           /* <<300ms grace: 不该写出任何东西 */
     assert(writes == 0);                    /* 半个 period 不许写卡 */
     assert(written == 0);
     xr_player_push_pcm(half, 1440);          /* 补齐第二个 half */
     sleep_ms(200);
     assert(writes >= 1);
-    /* 首次写入量必须 >= 一个 period: ALSA 收不到一个完整 period 就起不来流。 */
+    /* 首次写入量凑整 period: 每次 writei 给卡垫进整 120ms 余量
+     * (机制澄清见文件头注释 —— 不是"流起不来", 是零垫子怕抖动)。 */
     assert(first_write_count >= period_set);
     xr_player_drop();
 }
 
-/* 尾巴滞留: 不满一个 period 的余音在真空 >300ms 后必须写进未启动的流,
+/* 尾巴滞留: 不满一个 period 的余音在真空 >300ms 后必须被排空写出,
  * 而不是持着等下一轮 —— 否则声卡在 RUNNING 态播干, 下一轮首包凑满
  * period 写入时撞 XRUN(2026-11-19 live10 实测: 问候音 0.45s=3.76period,
- * 尾巴滞留 4.07s 后 EPIPE)。 */
+ * 尾巴滞留 4.07s 后 EPIPE)。
+ * 时序余量说明(二次 review): flush 名义上 300ms 触发, 但 50ms 轮询的
+ * 绝对 deadline 在负载下会迟到, 固定 470ms 断言会误报 —— 这里改成
+ * 轮询等最多 800ms, 触发即过。 */
 static void test_stale_tail_partial_is_flushed_to_prepared(void) {
     written = 0; checksum = 0; writes = 0; min_write_seen = 1 << 30;
     first_write_count = 0;
@@ -108,17 +114,22 @@ static void test_stale_tail_partial_is_flushed_to_prepared(void) {
     int16_t tail[1440];
     for (size_t i = 0; i < 1440; ++i) tail[i] = (int16_t)(i % 100);
     xr_player_push_pcm(tail, 1440);          /* 半个 period 的尾巴 */
-    sleep_ms(120);
-    assert(writes == 0);                     /* 300ms 内: 凑 period 优先 */
-    sleep_ms(350);                           /* 真空超 300ms: 尾巴滞留 */
-    assert(writes >= 1);                     /* 尾巴必须已写进未启动的流 */
+    sleep_ms(100);
+    assert(writes == 0);                     /* <<300ms: 凑 period 优先 */
+    int flushed = 0;
+    for (int i = 0; i < 80 && !flushed; i++) {
+        sleep_ms(10);                        /* 真空超 ~300ms: 尾巴滞留触发 */
+        if (writes >= 1) flushed = 1;
+    }
+    assert(flushed);                         /* 尾巴必须已被 grace 排空写出 */
     assert(first_write_count == 1440);       /* 写入量就是那个 partial */
     assert(prepared > prep_before);          /* 且写之前排空+prepare 过 */
     int w_after_tail = writes;
     int16_t next[2880];
     for (size_t i = 0; i < 2880; ++i) next[i] = (int16_t)(i % 100);
     xr_player_push_pcm(next, 2880);          /* 下一轮数据到齐 */
-    sleep_ms(200);
+    for (int i = 0; i < 40 && writes == w_after_tail; i++)
+        sleep_ms(10);
     assert(writes > w_after_tail);           /* 凑满 period 正常续播 */
     xr_player_drop();
 }
