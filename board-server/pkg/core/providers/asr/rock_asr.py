@@ -79,8 +79,7 @@ class ASRProvider(ASRProviderBase):
             logger.bind(tag=TAG).error(f"RockASR helper 预热失败: {e}")
 
     def _transcribe(self, pcm: bytes) -> str:
-        helper = self.slot.acquire()
-        header, _ = helper.request({"cmd": "asr"}, body=pcm,
+        header, _ = self.slot.request({"cmd": "asr"}, body=pcm,
                                     timeout=self.timeout_s + 30)
         text = header.get("text", "")
         logger.bind(tag=TAG).info(

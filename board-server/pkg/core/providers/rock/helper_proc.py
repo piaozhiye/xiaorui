@@ -3,7 +3,6 @@ import os
 import subprocess
 import sys
 import threading
-import time
 
 from core.providers.rock import framing
 
@@ -41,6 +40,7 @@ class HelperProcess:
         with self.lock:
             if self.alive:
                 return
+            self._reap()
             env = dict(os.environ)
             env.update(self.env_extra)
             # 板上 PATH 没有 python3, 必须用网关自己的解释器
@@ -52,69 +52,73 @@ class HelperProcess:
                 env=env,
                 cwd=HELPER_DIR,
             )
-            t0 = time.monotonic()
-            header, _ = framing.recv_msg(self.proc.stdout)
-            if not header.get("ok"):
-                err = header.get("error", "未知错误")
+            try:
+                header, _ = self._exchange(timeout=self.ready_timeout)
+                if not header.get("ok") or header.get("event") != "ready":
+                    raise HelperError(f"helper 握手失败: {header}")
+            except Exception:
                 self._reap()
-                raise HelperError(f"helper init 失败: {err}")
-            if header.get("event") != "ready":
-                self._reap()
-                raise HelperError(f"helper 握手异常: {header}")
-            elapsed = time.monotonic() - t0
+                raise
 
     def _reap(self):
-        if self.proc is not None:
+        proc, self.proc = self.proc, None
+        if proc is None:
+            return
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
+        for stream in (proc.stdin, proc.stdout):
+            if stream is not None:
+                stream.close()
+
+    def _exchange(self, header=None, body=b"", timeout=60.0):
+        # 捕获具体进程，超时线程不能意外读取下一代 helper 的 stdout。
+        proc = self.proc
+        result = {}
+
+        def exchange():
             try:
-                self.proc.kill()
-            except OSError:
-                pass
-            self.proc = None
+                if header is not None:
+                    framing.send_msg(proc.stdin, header, body)
+                result["msg"] = framing.recv_msg(proc.stdout)
+            except Exception as exc:
+                result["err"] = exc
+
+        worker = threading.Thread(target=exchange, daemon=True)
+        worker.start()
+        worker.join(timeout)
+        if worker.is_alive():
+            # 先 kill/wait，解除阻塞的管道读写，再关闭文件对象。
+            proc.kill()
+            proc.wait(timeout=5)
+            worker.join(5)
+            self._reap()
+            raise HelperError(f"helper 响应超时({timeout}s)")
+        if "err" in result:
+            self._reap()
+            raise HelperError(f"helper 读写帧失败: {result['err']}") from result["err"]
+        return result["msg"]
 
     def request(self, header, body=b"", timeout=60.0):
-        """发一帧收一帧; helper 崩溃/超时抛 HelperError(由上层决定回退)."""
+        """请求的超时覆盖管道写入及读取；SDK 异常后销毁进程隔离迟到回调。"""
         with self.lock:
             if not self.alive:
+                self._reap()
                 self.start()
-            try:
-                framing.send_msg(self.proc.stdin, header, body)
-            except (BrokenPipeError, OSError) as e:
+            response, payload = self._exchange(header, body, timeout)
+            if not response.get("ok"):
                 self._reap()
-                raise HelperError(f"helper 管道断裂: {e}") from e
-            # 帧协议自身没有超时: 依赖读写阻塞。用一个看门线程兜底。
-            import threading as _t
-
-            result = {}
-
-            def _read():
-                try:
-                    result["msg"] = framing.recv_msg(self.proc.stdout)
-                except Exception as e:  # noqa: BLE001
-                    result["err"] = e
-
-            reader = _t.Thread(target=_read, daemon=True)
-            reader.start()
-            reader.join(timeout)
-            if "msg" not in result:
-                self._reap()
-                raise HelperError(f"helper 响应超时({timeout}s)")
-            if "err" in result:
-                self._reap()
-                raise HelperError(f"helper 读帧失败: {result['err']}")
-            header, body = result["msg"]
-            if not header.get("ok"):
-                raise HelperError(header.get("error", "helper 返回失败"))
-            return header, body
+                raise HelperError(response.get("error", "helper 返回失败"))
+            return response, payload
 
     def stop(self):
         with self.lock:
-            if self.proc is not None:
-                try:
-                    self.proc.stdin.close()
-                except OSError:
-                    pass
-                try:
-                    self.proc.wait(timeout=5)
-                except Exception:  # noqa: BLE001
-                    self._reap()
-                self.proc = None
+            if self.proc is None:
+                return
+            try:
+                self.proc.stdin.close()
+                self.proc.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            finally:
+                self._reap()

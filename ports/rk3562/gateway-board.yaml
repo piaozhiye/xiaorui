@@ -29,9 +29,9 @@ enable_greeting: true
 
 selected_module:
   VAD: SileroVAD
-  ASR: RockASR
+  ASR: LocalSenseVoice
   LLM: LocalQwen
-  TTS: RockTTS
+  TTS: SherpaLocal
   Memory: nomem
   Intent: function_call
 

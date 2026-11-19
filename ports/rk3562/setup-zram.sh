@@ -44,7 +44,11 @@ if [ "$swapped" = "1" ] && [ "$cur_size" = "$want_bytes" ] \
     :
 else
     log "重设 zram (算法=$cur_algo 大小=$((cur_size / 1024 / 1024))MB 已挂=$swapped)"
-    [ "$swapped" = "1" ] && swapoff "$ZRAM_DEV" 2>/dev/null
+    if [ "$swapped" = "1" ]; then
+        swapoff "$ZRAM_DEV" 2>/dev/null || {
+            log "swapoff 失败，保留当前 swap，停止重设"; exit 1;
+        }
+    fi
     # reset 才能在非空状态下换算法; 老内核没这个节点就直接改(会在非空时失败)
     echo 1 > "$ZRAM_SYS/reset" 2>/dev/null || true
     if ! echo "$ALGO" > "$ZRAM_SYS/comp_algorithm" 2>/dev/null; then

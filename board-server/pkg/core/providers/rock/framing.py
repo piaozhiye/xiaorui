@@ -46,6 +46,10 @@ def recv_msg(rfile):
     if length <= 0 or length > 4 * 1024 * 1024:
         raise ProtocolError(f"帧头长度非法: {length}")
     header = json.loads(recv_exact(rfile, length).decode("utf-8"))
+    if not isinstance(header, dict):
+        raise ProtocolError("帧头必须是 JSON 对象")
     body_len = header.get("body_len", 0)
+    if type(body_len) is not int or not 0 <= body_len <= MAX_BODY:
+        raise ProtocolError(f"非法 body_len: {body_len!r}")
     body = recv_exact(rfile, body_len) if body_len else b""
     return header, body

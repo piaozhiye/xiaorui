@@ -75,7 +75,10 @@ class TtsEngine:
         if rc != rockx.ROCKX_RET_SUCCESS:
             raise rockx.RockXError(f"RockXProcessAsync 失败 ret={rc}")
 
-        self._done.wait(timeout_s)
+        if not self._done.wait(timeout_s):
+            raise rockx.RockXError(f"TTS 超时 ({timeout_s}s，未收到末帧)")
+        self.rx.wait_finish(self.handle, inp)
+        self.rx.input_destroy(self.handle, inp)
         elapsed = time.monotonic() - t0
         pcm = b"".join(self._chunks)
         if not pcm:
@@ -175,6 +178,7 @@ def main():
                                       "elapsed_s": round(elapsed, 3)}, body=pcm)
         except Exception as e:  # noqa: BLE001
             framing.send_msg(stdout, {"ok": False, "error": f"{type(e).__name__}: {e}"})
+            return 4
 
 
 if __name__ == "__main__":

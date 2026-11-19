@@ -173,6 +173,12 @@ class FakeRx:
     def input_create(self, handle):
         return ["pkt0", "pkt1"]
 
+    def wait_finish(self, handle, inp):
+        return 0
+
+    def input_destroy(self, handle, inp):
+        return 0
+
     def input_get_packet(self, inp, i):
         return inp[i]
 
@@ -287,6 +293,26 @@ class TtsHelperTests(unittest.TestCase):
         # "你好" = 6 字节 * 100 样本 * 2 字节
         self.assertEqual(len(body), 6 * 100 * 2)
         self.assertEqual(body[:4], b"\x64\x00\x64\x00")  # int16 100,100 LE
+
+    def test_partial_audio_without_last_frame_fails_and_exits(self):
+        self.proc.kill()
+        self.proc.wait()
+        fake = Path(self.d) / "rockx.py"
+        fake.write_text(fake.read_text().replace(
+            "n, True, None)", "n, False, None)"))
+        self.proc = subprocess.Popen(
+            [sys.executable, os.path.join(self.d, "tts_helper.py"),
+             "--lib-dir", "/fake/lib", "--data-dir", "/fake/data",
+             "--auth-config", "/fake/auth.json", "--timeout", "0.15"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, cwd=self.d)
+        framing.recv_msg(self.proc.stdout)
+        framing.send_msg(self.proc.stdin, {"cmd": "tts", "text": "你好"})
+        header, body = framing.recv_msg(self.proc.stdout)
+        self.assertFalse(header["ok"])
+        self.assertIn("超时", header["error"])
+        self.assertEqual(body, b"")
+        self.assertEqual(self.proc.wait(timeout=3), 4)
 
     def test_empty_text_raises_helper_error_visible(self):
         framing.recv_msg(self.proc.stdout)

@@ -26,7 +26,7 @@ int  xr_speech_init(const xr_speech_ops_t *ops);  /* dlopen 失败 -1(致命); o
 int  xr_speech_init_config(const xr_speech_ops_t *ops, const xr_speech_config_t *config);
 int  xr_speech_kws_available(void);
 int  xr_speech_kws_feed(const int16_t *pcm, int n); /* 1=本帧命中(已含内部 reset) */
-int  xr_speech_kws_flush(void);                    /* 句尾收割+reset; 1=命中 */
+int  xr_speech_kws_flush(void);                    /* 句尾收割，仅命中时 reset; 1=命中 */
 void xr_speech_kws_reset(void);                    /* 不可用时空操作 */
 int  xr_speech_recognize(const int16_t *pcm, size_t n, char *out, size_t cap);
 void xr_speech_destroy(void);

@@ -64,6 +64,13 @@ FREE_KB=$($ADB shell 'df -Pk /data' | awk 'NR==2{print $4}' | tr -d '\r')
 [ "$FREE_KB" -ge $((700*1024)) ] || { echo "/data 空间不足 (需 ~700MB, 可用 $((FREE_KB/1024))MB)" >&2; exit 1; }
 echo "== 板子: $SERIAL ($MODEL), /data 可用 $((FREE_KB/1024))MB =="
 
+# 禁止向正在使用的 SDK 覆盖文件，也禁止探针与重服务双起。
+if $ADB shell 'pgrep -f "llm_rkll[m].py|server/[a]pp.py|rock/[a]sr_helper.py|rock/[t]ts_helper.py" >/dev/null'; then
+    echo "请先停止板内全栈，再部署 Rock SDK（自检会加载模型）" >&2
+    exit 1
+fi
+$ADB shell 'sh /data/setup-zram.sh' || exit 1
+
 # ---------- 3) 备份旧 auth json(如有) ----------
 STAMP=$(date +%Y%m%d-%H%M%S)
 for d in rockasr rocktts; do

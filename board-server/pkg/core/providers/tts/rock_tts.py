@@ -74,8 +74,7 @@ class TTSProvider(TTSProviderBase):
             logger.bind(tag=TAG).error(f"RockTTS helper 预热失败: {e}")
 
     def _synthesize(self, text, out_path):
-        helper = self.slot.acquire()
-        header, pcm = helper.request(
+        header, pcm = self.slot.request(
             {"cmd": "tts", "text": text, "alpha": self.alpha},
             timeout=self.timeout_s + 30)
         if len(pcm) < 400:

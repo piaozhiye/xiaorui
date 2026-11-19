@@ -1,7 +1,7 @@
 # RK3562 板内 NPU 引擎（RockASR / RockTTS）+ 内存治理
 
-本板（RK3562 EVB2 DDR4 V10 + RK809 + rkaudio_vqe）默认用瑞芯微官方 NPU 引擎做
-识别和合成，SenseVoice / Matcha 作为回退保留在板上。
+本板（RK3562 EVB2 DDR4 V10 + RK809 + rkaudio_vqe）当前使用瑞芯微官方 NPU 引擎做
+识别和合成。通用部署模板默认 SenseVoice / Matcha；传入 SDK 资源时才切换 Rock 引擎。
 
 ## 一、为什么要换
 
@@ -60,8 +60,8 @@ oom_score_adj：网关/RKLLM/前端 -500（保护），rock helper +200（先死
   `start-ha.sh` 里，停 HA 时会一起没（实测 `SwapTotal=0` → 黑屏）。
   HA 现在默认不装，要开就创建 `/data/xiaorui/.ha_enabled`。
 - `core/providers/rock/runtime.py` 还有一层自适应仲裁：口径 =
-  `MemAvailable + zram 剩余 × 压缩比`，内存宽裕就三个模型共驻，紧张就互相
-  让位、zram 没起来时自动退化成纯 RAM 口径。
+  `MemAvailable + min(已启用 zram 的逻辑空闲量, 冷匿名页) × (1 - 1/压缩比)`，
+  内存宽裕就共驻，紧张就让位；仍不足时拒绝加载，zram 没起来时退化为纯 RAM。
 
 实测稳态：`MemAvailable` 250~280 MB，zram 已用 190~285 MB。
 
@@ -74,7 +74,7 @@ export XR_ROCK_ASR_SDK=/path/to/rockasr_android_linux_rk356x_*
 export XR_ROCK_TTS_SDK=/path/to/Rockchip_RockTTSV1_SDK_Release_*
 export XR_ROCK_LIC_DIR=/path/to/licenses      # key_asr.lic + key_tts.lic
 bash ports/rk3562/deploy-board-gateway.sh     # 会自动调 deploy-rock.sh 并切配置
-# 或者单独装 + 自检:
+# 或者单独装 + 自检（必须先停止板内全栈；重服务运行时脚本会拒绝）:
 bash ports/rk3562/deploy-rock.sh "$SERIAL"
 ```
 
@@ -109,3 +109,18 @@ bash ports/rk3562/deploy-rock.sh "$SERIAL"
   `ports/rk3562/init-S98xiaorui` 里的 mixer 设置（Playback Path=SPK /
   Capture MIC Path=Main Mic / ADC Capture Volume=255）—— 推错 profile 的
   init 脚本等于把 AEC 和喇叭一起弄坏。
+
+## 六、运行时保护（2026-11-19 review 修订）
+
+- 模型加载预算 = `MemAvailable` + 可换出冷匿名页的净回收估算。
+  swap 空闲取 `/proc/swaps` 已启用 zram 的逻辑余量，不将 disksize 乘压缩比。
+  默认保留 128MB（`XR_ROCK_MEM_RESERVE_MB` 可覆盖）；不足时卸载其他槽位，
+  仍不足则返回错误，不冒险加载。已驻留模型仅在余量低于保留值时空闲卸载。
+- ASR/TTS 请求与卸载共用仲裁锁；预热在后台执行。同一时间只进行一次推理，
+  避免模型在请求中途被另一个槽位回收。
+- 输入 PCM/文本按请求持有，调用 SDK `RockXWaitFinish` 确认结束后销毁输入并释放引用。
+  初始化握手、管道写入及读取均有超时；推理失败/超时回收 helper，下一次请求重建。
+- 不传 SDK 环境变量时默认部署 SenseVoice/Matcha。选择 Rock 时先停重服务、启用
+  zram、安装 SDK 并自检，再切配置启动网关；自检失败不会继续启动。
+- 取消按两秒时长认定“纯唤醒”的分支。KWS 仍立即开跟说窗，但音频需经文本门确认，
+  短指令不会被本地直接丢弃。纯唤醒确认时延和紧接指令的采集表现需板上声学验收。

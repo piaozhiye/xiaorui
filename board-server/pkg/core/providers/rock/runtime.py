@@ -17,69 +17,47 @@
 """
 import os
 import threading
-import time
 
-from core.providers.rock.helper_proc import HelperProcess
+from core.providers.rock.helper_proc import HelperError, HelperProcess
 
 # 加载模型后至少要留这么多可用内存, 低于它就认为"不能再占"
-RESERVE_MB = int(os.environ.get("XR_ROCK_MEM_RESERVE_MB", "400"))
-# zram 空闲空间折算成"等效可用内存"时用的压缩比。
-# zstd 在这些页上实测能压到 1/4.4(罗总开发笔记), 保守取 2。
-COMPRESS_RATIO = float(os.environ.get("XR_ROCK_COMPRESS_RATIO", "2"))
+RESERVE_MB = int(os.environ.get("XR_ROCK_MEM_RESERVE_MB", "128"))
+# 压缩比仅用于估算换出冷 anon 后释放的净 RAM，不扩张 swap 逻辑容量。
+COMPRESS_RATIO = max(1.0, float(os.environ.get("XR_ROCK_COMPRESS_RATIO", "2")))
+
+
+def _meminfo():
+    try:
+        with open("/proc/meminfo") as source:
+            return {line.split(":", 1)[0]: int(line.split()[1]) // 1024
+                    for line in source if ":" in line and len(line.split()) >= 2}
+    except (OSError, ValueError):
+        return {}
 
 
 def _mem_available_raw_mb():
-    """MemAvailable(MB); 读不到返回一个大值(宁可多占也别误卸载)。"""
-    try:
-        with open("/proc/meminfo", "r") as f:
-            for line in f:
-                if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) // 1024
-    except Exception:  # noqa: BLE001
-        pass
-    return 99999
+    return _meminfo().get("MemAvailable", 0)
 
 
 def _zram_free_mb():
-    """zram 还能吃下多少(按压缩后的物理占用算, MB)。"""
+    """只计算已启用 zram 的空闲逻辑 swap；未启用/读取失败按零处理。"""
     try:
-        with open("/sys/block/zram0/disksize") as f:
-            size = int(f.read().strip())
-        used = 0
-        try:
-            with open("/sys/block/zram0/mm_stat") as f:
-                for line in f:
-                    if line.startswith("orig_data_size:"):
-                        used = int(line.split()[1])
-                        break
-        except Exception:  # noqa: BLE001
-            pass
-        # mm_stat 里的 orig_data_size 是"原始(未压缩)数据量", 不是物理占用;
-        # 物理占用看 mem_used_total。两者都取, 保守用小的。
-        phys = 0
-        try:
-            with open("/sys/block/zram0/mm_stat") as f:
-                for line in f:
-                    if line.startswith("mem_used_total:"):
-                        phys = int(line.split()[1])
-                        break
-        except Exception:  # noqa: BLE001
-            pass
-        if phys:
-            return max(0, (size - phys) // (1024 * 1024))
-        return max(0, (size - used) // (1024 * 1024))
-    except Exception:  # noqa: BLE001
-        return 0
+        with open("/proc/swaps") as source:
+            for line in source:
+                fields = line.split()
+                if fields and os.path.basename(fields[0]) == "zram0":
+                    return max(0, (int(fields[2]) - int(fields[3])) // 1024)
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
 
 
 def mem_available_mb():
-    """等效可用内存 = MemAvailable + zram 还能吃下的量(折算成未压缩大小)。
-
-    有 zram 兜底时, 三个 NPU 模型可以同时驻留(罗总开发笔记的方案:
-    zram 768M zstd + swappiness 80); 没 zram 时就退化成纯 RAM 口径,
-    runtime 会让模型互相让位 —— 两条路都能活。
-    """
-    return _mem_available_raw_mb() + int(_zram_free_mb() * COMPRESS_RATIO)
+    """RAM + 可换出冷匿名页的净回收量；DRM/NPU 页不能靠 swap 扩容。"""
+    info = _meminfo()
+    cold_anon = info.get("Inactive(anon)", 0)
+    reclaim = min(_zram_free_mb(), cold_anon) * (1.0 - 1.0 / COMPRESS_RATIO)
+    return info.get("MemAvailable", 0) + int(reclaim)
 
 
 _SLOTS = {}
@@ -102,6 +80,7 @@ class RockEngineSlot:
         self._helper = None
         self._idle_timer = None
         self._lock = threading.RLock()
+        self._prefetch_lock = threading.Lock()
 
     # ---------- 内部 ----------
     def _cancel_idle(self):
@@ -123,7 +102,7 @@ class RockEngineSlot:
         with _SLOTS_LOCK:
             with self._lock:
                 self._cancel_idle()
-                if mem_available_mb() >= RESERVE_MB + self.footprint_mb:
+                if mem_available_mb() >= RESERVE_MB:
                     self._schedule_idle()
                     return
                 helper = self._helper
@@ -147,7 +126,7 @@ class RockEngineSlot:
         for other in others:
             if mem_available_mb() >= need:
                 break
-            other._idle_stop()
+            other.stop()
         return mem_available_mb() >= need
 
     # ---------- 对外 ----------
@@ -157,29 +136,40 @@ class RockEngineSlot:
             with self._lock:
                 self._cancel_idle()
                 if self._helper is None or not self._helper.alive:
-                    self._make_room()
+                    if not self._make_room():
+                        raise HelperError(f"{self.kind} 内存不足，拒绝加载 {self.footprint_mb}MB 模型")
                     helper = self._factory()
                     helper.start()
                     self._helper = helper
                 self._schedule_idle()
                 return self._helper
 
-    def prefetch(self):
-        """后台预热: 不阻塞调用方。已经在跑就什么都不做。"""
+    def request(self, header, body=b"", timeout=60.0):
+        # 仲裁锁覆盖获取和请求，避免尚在推理的 helper 被另一个槽位卸载。
         with _SLOTS_LOCK:
-            with self._lock:
-                self._cancel_idle()
-                if self._helper is not None and self._helper.alive:
-                    self._schedule_idle()
-                    return
+            helper = self.acquire()
+            self._cancel_idle()
+            try:
+                return helper.request(header, body=body, timeout=timeout)
+            finally:
+                self._schedule_idle()
+
+    def prefetch(self):
+        """后台预热，调用线程不等待全局仲裁锁或正在执行的推理。"""
+        with self._prefetch_lock:
+            if getattr(self, "_prefetch_pending", False):
+                return
+            self._prefetch_pending = True
         threading.Thread(target=self._prefetch_worker, daemon=True).start()
 
     def _prefetch_worker(self):
         try:
             self.acquire()
         except Exception:  # noqa: BLE001
-            # 预热失败不影响主流程: 真正请求时 acquire() 会再拉一次
-            pass
+            pass  # 正式请求会重试并报告错误。
+        finally:
+            with self._prefetch_lock:
+                self._prefetch_pending = False
 
     def stop(self):
         with _SLOTS_LOCK:

@@ -108,6 +108,9 @@ class RockX:
             raise FileNotFoundError(f"算法库缺失: {lib_path}")
         self.lib = ctypes.CDLL(lib_path, mode=ctypes.RTLD_GLOBAL)
         self._keepalive = []
+        self._input_refs = {}
+        self._packet_inputs = {}
+        self._waits = {}
         self._bind()
 
     def _keep(self, b):
@@ -139,7 +142,9 @@ class RockX:
         lib.RockXInputDestroy.restype = i
         lib.RockXInputDestroy.argtypes = [v, v]
         lib.RockXProcessAsync.restype = i
-        lib.RockXProcessAsync.argtypes = [v, v, v]
+        lib.RockXProcessAsync.argtypes = [v, v, ctypes.POINTER(v)]
+        lib.RockXWaitFinish.restype = i
+        lib.RockXWaitFinish.argtypes = [v, v]
         lib.RockXInputGetPacketAt.restype = v
         lib.RockXInputGetPacketAt.argtypes = [v, i]
         lib.RockXPacketSetString.restype = i
@@ -209,12 +214,28 @@ class RockX:
         inp = self.lib.RockXInputCreate(handle)
         if not inp:
             raise RockXError("RockXInputCreate 返回 NULL")
+        self._input_refs[inp] = []
         return inp
+
+    def input_destroy(self, handle, inp):
+        rc = self.lib.RockXInputDestroy(handle, inp)
+        if rc != ROCKX_RET_SUCCESS:
+            raise RockXError(f"RockXInputDestroy 失败 ret={rc}")
+        self._input_refs.pop(inp, None)
+        self._packet_inputs = {p: owner for p, owner in self._packet_inputs.items()
+                               if owner != inp}
+        return rc
+
+    def wait_finish(self, handle, inp):
+        wait = self._waits.pop(inp)
+        rc = self.lib.RockXWaitFinish(handle, wait)
+        if rc != ROCKX_RET_SUCCESS:
+            raise RockXError(f"RockXWaitFinish 失败 ret={rc}")
 
     def packet_set_string(self, packet, value):
         if isinstance(value, str):
             value = value.encode()
-        self._keepalive.append(value)
+        self._input_refs[self._packet_inputs[packet]].append(value)
         return self.lib.RockXPacketSetString(packet, value, 0)
 
     def packet_set_float(self, packet, value):
@@ -225,18 +246,23 @@ class RockX:
         if len(pcm) % 2:
             pcm = pcm[:-1]
         arr = (ctypes.c_int16 * (len(pcm) // 2)).from_buffer_copy(pcm)
-        self._keepalive.append(arr)
+        self._input_refs[self._packet_inputs[packet]].append(arr)
         return self.lib.RockXPacketSetAudio2(
             packet, state, sample_rate, 1, len(arr), ROCKX_DATA_TYPE_INT16, arr
         )
 
     def process_async(self, handle, input_):
-        return self.lib.RockXProcessAsync(handle, input_, None)
+        wait = ctypes.c_void_p()
+        rc = self.lib.RockXProcessAsync(handle, input_, ctypes.byref(wait))
+        if rc == ROCKX_RET_SUCCESS:
+            self._waits[input_] = wait
+        return rc
 
     def input_get_packet(self, input_, index=0):
         pkt = self.lib.RockXInputGetPacketAt(input_, index)
         if not pkt:
             raise RockXError(f"RockXInputGetPacketAt({index}) 返回 NULL")
+        self._packet_inputs[pkt] = input_
         return pkt
 
 

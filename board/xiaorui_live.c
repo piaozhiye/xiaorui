@@ -253,10 +253,6 @@ static int wake_feed(const int16_t *pcm, int samples)
     return wake_poll(pcm, samples);
 }
 
-/* 唤醒词独占一句的时长上限(秒): 唤醒词本身 1.2s, 加预滚 ~1.7s;
-   "唤醒词+指令"连说一定超过 2s。 */
-#define WAKE_ONLY_MAX_S 2.0
-
 static const xr_music_control_ops_t MUSIC_OPS = {
     music_read, wake_feed, wake_reset, xr_speech_recognize
 };
@@ -1007,9 +1003,11 @@ inject_wait:
                 int is_wake = !strcmp(ev_text, "wake");
                 xr_playback_control_stop(&playback_control, g_vol_pct);
                 xr_player_drop();
-                if (capture_finish_turn(mic) < 0) goto restart;
-                xr_vad_clear_preroll(&vad);
-                wake_reset();
+                if (!is_wake) {
+                    if (capture_finish_turn(mic) < 0) goto restart;
+                    xr_vad_clear_preroll(&vad);
+                    wake_reset();
+                }
                 xr_session_end_turn_silent(&ses, now_s(),
                                            is_wake ? 0.0 : config->abandon_cool_ms / 1000.0);
                 xr_vad_reset_gate(&vad);
@@ -1265,27 +1263,8 @@ inject_wait:
         const int16_t *utt = xr_vad_utterance(&vad, &utt_n);
         fprintf(stderr, "[xr] 说完 (%.1fs), 识别中\n", (double)utt_n / RATE);
 
-        /* ★ 本地唤醒闭环: 这一句只有唤醒词(短)就不上送。
-           - 孤立唤醒词(1.2s)送去 ASR, 转出来是垃圾("俾。"/"吧。"/"啊有。"),
-             服务端判不成唤醒词就会当成普通查询 -> 板子抢答;
-           - 上送后服务端的"纯唤醒"回执(约 3s 后到)会让前端 drain 麦克风,
-             把用户紧接着说的指令整段丢掉 —— "反应慢 / 认不到"的根因。
-           唤醒词+指令连着说(>= WAKE_ONLY_MAX_S)则照常上送, 由服务端剥前缀。 */
-        if (kws_wake_this_utt && utt_n > 0
-            && (double)utt_n / RATE <= WAKE_ONLY_MAX_S) {
-            fprintf(stderr, "[xr] 本句只有唤醒词(%.1fs): 本地回执, 不上送\n",
-                    (double)utt_n / RATE);
-            xr_session_awake(&ses, now_s());
-            if (xr_player_start() == 0 && ack_pcm) {
-                xr_player_push_pcm(ack_pcm, ack_n);
-                xr_session_note_ack(&ses, now_s(), (double)ack_n / 24000.0,
-                                    config->ack_cool_ms / 1000.0);
-            }
-            kws_wake_this_utt = 0;
-            xr_vad_clear_preroll(&vad);
-            xr_vad_reset_gate(&vad);
-            continue;
-        }
+        /* KWS 只证明含唤醒词，不证明没有指令。即使很短也提交文本门确认，
+           防止“小瑞小瑞开灯”被时长阈值整句吞掉。 */
         if (g_dump_dir && *g_dump_dir) {
             static int dump_seq;
             char dpath[512];
@@ -1315,7 +1294,7 @@ inject_wait:
             backend_audio_request_t request = {
                 .pcm = utt, .samples = utt_n,
                 .transcribe = config->local_asr ? transcribe_followup : NULL,
-                .wake_required = !follow,
+                .wake_required = !follow || kws_wake_this_utt,
             };
             if (!config->local_asr && kws_wake_this_utt)
                 fprintf(stderr, "[xr] cloud-only KWS hit: server confirms wake\n");

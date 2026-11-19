@@ -67,9 +67,11 @@ class SlotTests(unittest.TestCase):
                                idle_timeout_s=0)
         tts = runtime.get_slot("tts", self.factory, footprint_mb=250,
                                idle_timeout_s=0)
-        # 只有 300MB 可用: 装不下 ASR(600), 只装得下 TTS(250)
-        with patch.object(runtime, "mem_available_mb", return_value=300):
+        with patch.object(runtime, "mem_available_mb", return_value=2000):
             asr.acquire()
+        # TTS 需要 650MB；停止 ASR 后空闲预算增至 1000MB。
+        with patch.object(runtime, "mem_available_mb",
+                          side_effect=lambda: 100 if self.helpers[0].alive else 1000):
             tts.acquire()
         # ASR 被 TTS 挤掉, TTS 活着
         self.assertEqual(len(self.helpers), 2)
@@ -101,8 +103,9 @@ class SlotTests(unittest.TestCase):
         """空闲到期且内存紧张 -> 卸载, 把 NPU 内存还给系统。"""
         slot = runtime.get_slot("asr", self.factory, footprint_mb=600,
                                 idle_timeout_s=0)
-        with patch.object(runtime, "mem_available_mb", return_value=100):
+        with patch.object(runtime, "mem_available_mb", return_value=2000):
             h = slot.acquire()
+        with patch.object(runtime, "mem_available_mb", return_value=100):
             slot._idle_stop()
         self.assertFalse(h.alive)
         self.assertEqual(h.stopped, 1)
@@ -118,15 +121,36 @@ class SlotTests(unittest.TestCase):
         runtime.stop_all()
         self.assertTrue(all(not h.alive for h in self.helpers))
 
-    def test_mem_available_includes_zram_headroom(self):
-        """有 zram 时可用内存要算上它还能吃下的量。"""
-        raw = 200
-        zram_free = 500
-        with patch.object(runtime, "_mem_available_raw_mb", return_value=raw), \
-             patch.object(runtime, "_zram_free_mb", return_value=zram_free):
-            got = runtime.mem_available_mb()
-        self.assertGreater(got, raw)
-        self.assertLessEqual(got, raw + zram_free * runtime.COMPRESS_RATIO + 1)
+    def test_mem_available_counts_only_net_cold_anon_reclaim(self):
+        with patch.object(runtime, "_meminfo", return_value={
+                "MemAvailable": 200, "Inactive(anon)": 400}), \
+             patch.object(runtime, "_zram_free_mb", return_value=500):
+            self.assertEqual(runtime.mem_available_mb(),
+                             200 + int(400 * (1 - 1/runtime.COMPRESS_RATIO)))
+
+    def test_no_cold_anon_means_no_extra_npu_budget(self):
+        with patch.object(runtime, "_meminfo", return_value={"MemAvailable": 100}), \
+             patch.object(runtime, "_zram_free_mb", return_value=768):
+            self.assertEqual(runtime.mem_available_mb(), 100)
+
+    def test_insufficient_memory_does_not_start_helper(self):
+        slot = runtime.get_slot("asr", self.factory, 600, 0)
+        with patch.object(runtime, "mem_available_mb", return_value=0):
+            with self.assertRaises(runtime.HelperError):
+                slot.acquire()
+        self.assertEqual(self.helpers, [])
+
+    def test_zram_uses_active_swap_logical_free_capacity(self):
+        from io import StringIO
+        content = "Filename Type Size Used Priority\n/dev/zram0 partition 786432 786432 5\n"
+        with patch("builtins.open", side_effect=lambda *a: StringIO(content)):
+            self.assertEqual(runtime._zram_free_mb(), 0)
+        content = "Filename Type Size Used Priority\n/dev/zram0 partition 786432 262144 5\n"
+        with patch("builtins.open", side_effect=lambda *a: StringIO(content)):
+            self.assertEqual(runtime._zram_free_mb(), 512)
+        content = "Filename Type Size Used Priority\n"
+        with patch("builtins.open", side_effect=lambda *a: StringIO(content)):
+            self.assertEqual(runtime._zram_free_mb(), 0)
 
 
 if __name__ == "__main__":

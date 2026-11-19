@@ -418,3 +418,27 @@ def test_ha_deployment_password_not_in_commands(fake_deployment, monkeypatch, tm
     assert password not in result.stdout + result.stderr
     assert (tmp_path / "password").read_text() == password
     assert "S98xiaorui start" not in commands
+
+
+@pytest.mark.parametrize("stage_success", [True, False])
+def test_rock_sdk_is_staged_before_start_and_failure_stops_deployment(
+        fake_deployment, monkeypatch, stage_success):
+    port, log = fake_deployment
+    monkeypatch.setenv("XR_ROCK_ASR_SDK", "/fake-sdk")
+    (port / "deploy-rock.sh").write_text(
+        '#!/bin/bash\nadb -s "$1" shell rock-stage-marker\n'
+        + ('exit 0\n' if stage_success else 'exit 1\n'))
+    result = run_deployment(port, "deploy-board-gateway.sh", "serial")
+    records = [json.loads(line) for line in log.read_text().splitlines()]
+    commands = [r[-1] for r in records if "shell" in r]
+    stage = commands.index("rock-stage-marker")
+    assert any("sh /data/setup-zram.sh" == c for c in commands[:stage])
+    assert any("S98xiaorui stop" in c for c in commands[:stage])
+    starts = [i for i, c in enumerate(commands)
+              if "setsid sh /data/xiaorui-gateway/start-board-stack.sh" in c]
+    if stage_success:
+        assert result.returncode == 0, result.stderr
+        assert starts and min(starts) > stage
+    else:
+        assert result.returncode != 0
+        assert not starts
