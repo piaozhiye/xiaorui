@@ -149,7 +149,9 @@ static void ui_socket_retry(xr_ui_context_t *context);
 static double g_started_at = 0.0;
 /* 网关已经发得出 TTS(语音真的能用了): 预热提示据此提前结束。 */
 static int g_tts_ready = 0;
-/* 预热期长度(秒): 网关 + RockASR/RockTTS 模型加载到 NPU 实测 30~60s。
+/* 预热期长度(秒): 网关 + RockASR/RockTTS 模型加载到 NPU 实测 30~60s,
+ * 慢机器更久。收到网关业务事件(TTS/STT/静默回执)会提前结束准备提示;
+ * 这个值只是异常兜底(网关一直没业务事件时别让用户永远看着"准备中")。
  * 可用 XR_PREPARING_SECONDS 现场调。 */
 static double preparing_seconds(void) {
     const char *env = getenv("XR_PREPARING_SECONDS");
@@ -157,7 +159,7 @@ static double preparing_seconds(void) {
         double value = atof(env);
         if (value >= 0) return value;
     }
-    return 60.0;
+    return 180.0;
 }
 
 static int service_ui(xr_ui_context_t *context) {
@@ -1091,6 +1093,10 @@ inject_wait:
             backend_ev_t ev = be_poll_event(be, wsbuf, sizeof(wsbuf), &l,
                                             ev_text, sizeof(ev_text), ui_poll_ms);
             if (ev == EV_ERROR) { fprintf(stderr, "[xr] ws 断(播放期)\n"); goto restart; }
+            /* 与空闲期一致: 收到网关业务事件 = 语音真可用了 */
+            if (ev == EV_STT || ev == EV_SILENT || ev == EV_TTS_START ||
+                ev == EV_ANNOUNCE)
+                g_tts_ready = 1;
             if (ev == EV_ANNOUNCE_REQUEST) {
                 if (be_announce_reply(be, ev_text, 0)) goto restart;
                 continue;
@@ -1350,6 +1356,13 @@ inject_wait:
             backend_ev_t ev = be_poll_event(be, wsbuf, sizeof(wsbuf) - 1, &(size_t){0},
                                             ev_text, sizeof(ev_text), 0);
             if (ev == EV_ERROR) { fprintf(stderr, "[xr] ws 空闲期断开, 重连\n"); goto restart; }
+            /* ★ 语音真的可用了 = 网关发来了业务事件(识别结果/静默回执/
+             *   TTS/主动播报), 说明网关和 RockASR/TTS 已加载就绪。界面据此
+             *   结束"正在准备语音…"(2026-11-20 用户诉求: 语音没好就不该
+             *   显示"等你说一句")。 */
+            if (ev == EV_STT || ev == EV_SILENT || ev == EV_TTS_START ||
+                ev == EV_ANNOUNCE)
+                g_tts_ready = 1;
             /* 服务端主动播报(定时提醒到点): 转播放态, 随后的音频/stop 由
                RESPOND 机器正常收尾(含开跟说窗, 用户可直接说"谢谢/关闭") */
             if (ev == EV_REBOOT) {
