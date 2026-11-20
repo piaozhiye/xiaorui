@@ -29,6 +29,10 @@ class AudioRateController:
         self.play_position = 0  # 虚拟播放位置（毫秒）
         self.start_timestamp = None  # 开始时间戳（只读，不修改）
         self.pending_send_task = None
+        # 发送任务死亡时保存的异常(Codex review P1, 2026-11-20): None=正常。
+        # 完成等待(_wait_for_audio_completion)醒后检查它, 失败必须上抛,
+        # 不能把"发送侧死了"伪装成"队列发完了"。reset() 清零开新一轮。
+        self.send_error = None
         self.logger = logger
         self.queue_empty_event = asyncio.Event()  # 队列清空事件
         self.queue_empty_event.set()  # 初始为空状态
@@ -68,6 +72,7 @@ class AudioRateController:
         self.queue.clear()
         self.play_position = 0
         self.start_timestamp = None  # 由首个音频包设置
+        self.send_error = None       # 新一轮清零发送错误(上一轮的失败不带入)
         self._last_queue_empty_time = 0  # 重置时间
         self._prebuffer_done = False    # 新一轮重新攒缓冲
         self._last_add_time = 0.0
@@ -306,9 +311,23 @@ class AudioRateController:
 
                     await self.check_queue(send_audio_callback)
             except asyncio.CancelledError:
+                # 取消=轮间收尾/客户端中止, 属正常生命周期, 不算发送失败
                 self.logger.bind(tag=TAG).debug("音频发送循环已停止")
+                raise
             except Exception as e:
+                # 保存失败供完成等待者检查: 不能只记日志就退出去,
+                # 否则上层把"发送侧死亡"当成"发送成功"处理。
+                self.send_error = e
                 self.logger.bind(tag=TAG).error(f"音频发送循环异常: {e}")
+            finally:
+                # ★ Codex review P1(2026-11-20 故障注入实证): 发送任务终止
+                #   (异常或取消)后队列不会再被消费, 不置位会让
+                #   _wait_for_audio_completion / stop 收尾永久挂起,
+                #   进而把 tts/base.py 的 future.result()(无超时)卡死,
+                #   TTS 消费线程无法进入下一轮。这里置位的语义是
+                #   "不会再有数据发出", 等待者还需检查 send_error 区分
+                #   正常发完与失败终止。
+                self.queue_empty_event.set()
 
         self.pending_send_task = asyncio.create_task(_send_loop())
         return self.pending_send_task

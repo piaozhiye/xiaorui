@@ -90,6 +90,15 @@ async def _wait_for_audio_completion(conn: "ConnectionHandler"):
         rate_controller.finish_production()
         await rate_controller.queue_empty_event.wait()
 
+        # 发送任务已终止(异常/取消)也会置位事件(Codex review P1, 2026-11-20):
+        # 这里必须区分"正常发完"与"发送侧死亡"。失败就上抛给 TTS 消费线程
+        # (tts/base.py 的 future.result() 会把它带回工作线程并被记日志),
+        # 不能继续走"成功 stop/sentence_end", 把失败伪装成成功。
+        send_error = getattr(rate_controller, "send_error", None)
+        if send_error is not None:
+            conn.logger.bind(tag=TAG).error(f"音频发送任务已终止, 本轮收尾失败: {send_error!r}")
+            raise RuntimeError(f"audio sender died: {send_error!r}")
+
         if send_delay_ms > 0:
             # 自定义节奏：等待最后帧在客户端播放完成
             playback_time = 2 * rate_controller.interval_ms / 1000.0
