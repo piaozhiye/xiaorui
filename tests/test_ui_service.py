@@ -9,6 +9,25 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_exit_ui_stops_whole_stack_not_just_display():
+    """退出 UI 时要停掉整套音频服务(前端/网关/LLM/NPU), 不只是界面。
+
+    回归(2026-11-20 用户要求): UI 退出后 LLM 还占着 NPU, 后续 RockTTS
+    合成没法独占, 用户还得手动停后台。
+    """
+    ui = (ROOT / "ui/main.c").read_text(encoding="utf-8")
+    marker = ui.index("exit confirmed")
+    window = ui[marker:marker + 300]
+    assert "xiaorui-stop.sh" in window
+    assert "setsid" in window          # 后台执行, 不被脚本里的 S99 stop 连带杀掉
+    # 按钮文案要反映"退整套"而不是"只退界面"
+    assert '"退出小瑞"' in ui
+    assert "退出界面" not in ui
+    # 按钮下方的说明也不能还写着"语音继续运行"(review Important 1)
+    assert "语音继续运行" not in ui
+    assert "一并释放" in ui
+
+
 def test_ui_ignores_first_status_frame_to_avoid_stale_text():
     """UI 刚连上的第一帧 STATUS 是上一轮残留, 必须忽略。
 
@@ -18,6 +37,19 @@ def test_ui_ignores_first_status_frame_to_avoid_stale_text():
     assert "first_status_seen" in ui
     marker = ui.index("if (connected)")
     assert ui.index("first_status_seen", marker) < ui.index("displayed_question", marker) + 200
+    # IPC 断线重连也要重置(避免旧文本闪现), review Minor 6
+    reconnect = ui[ui.index("available != connected"):
+                   ui.index("const xr_ui_message_t *status")]
+    assert "first_status_seen = false" in reconnect
+
+
+def test_cue_generator_skips_hmm_and_documents_alpha_direction():
+    """生成脚本不能产出空的 hmm wav; alpha 说明方向要对。"""
+    script = (ROOT / "tools/gen-rock-cues.py").read_text(encoding="utf-8")
+    cues = script[script.index("CUES = {"):script.index("}", script.index("CUES = {"))]
+    assert "xr_hmm24k.wav" not in cues       # RockTTS 单字无输出, 跳过
+    assert "越大越慢" in script
+    assert "越小越慢" not in script
 
 
 def test_running_pids_matches_by_name_not_exe_path():

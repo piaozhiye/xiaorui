@@ -199,6 +199,13 @@ static void exit_ui(lv_event_t *event) {
     }
     interrupted = 1;
     fprintf(stderr, "[ui] exit confirmed\n");
+    /* ★ 退出 UI = 退出整套小瑞(2026-11-20 用户要求): 后台音频服务
+     *   (前端/网关/LLM/ASR/TTS)也一起停, 释放 NPU。setsid + & 让
+     *   stop 脚本独立会话运行 —— 它会调 S99 stop 杀 UI 自己, 不能让
+     *   它把正在退出的我们连带阻塞/杀掉。 */
+    if (system("setsid sh /data/xiaorui-ui/xiaorui-stop.sh "
+               ">/dev/null 2>&1 &") != 0)
+        fprintf(stderr, "[ui] 退出脚本启动失败(后台服务可能仍在跑)\n");
 }
 
 /* 状态胶囊: 文字长度变了就重新量宽度并居中 */
@@ -353,9 +360,9 @@ static void build_settings(lv_obj_t *screen) {
     label(settings_page, "连接中断时控制会自动禁用，"
           "不影响语音程序继续运行。",
           76, 1180, 900, body_font.font, 0x8ca5aa);
-    lv_obj_t *exit = button(settings_page, "退出界面", 64, 1250, 952, exit_ui, NULL);
+    lv_obj_t *exit = button(settings_page, "退出小瑞", 64, 1250, 952, exit_ui, NULL);
     exit_caption = lv_obj_get_child(exit, 0);
-    label(settings_page, "退出后回到系统界面，语音继续运行。",
+    label(settings_page, "退出后回到系统界面，语音服务与 NPU 一并释放。",
           76, 1370, 900, body_font.font, 0x8ca5aa);
     lv_obj_add_flag(settings_page, LV_OBJ_FLAG_HIDDEN);
 }
@@ -404,7 +411,7 @@ static void refresh(lv_timer_t *timer) {
     {
         exit_armed = false;
         if (exit_caption)
-            lv_label_set_text(exit_caption, fonts_ready ? "退出界面" : "EXIT");
+            lv_label_set_text(exit_caption, fonts_ready ? "退出小瑞" : "EXIT");
     }
     if (!fonts_ready)
         return;
@@ -420,6 +427,9 @@ static void refresh(lv_timer_t *timer) {
         lv_label_set_text(connection_label, connection);
         if (connected)
         {
+            /* IPC 断过 >2.5s 再连上: 第一帧 STATUS 仍可能是断线前的旧
+             * 文本, 跟启动一样忽略一帧(2026-11-20 review)。 */
+            first_status_seen = false;
             lv_obj_clear_state(volume_slider, LV_STATE_DISABLED);
         }
         else

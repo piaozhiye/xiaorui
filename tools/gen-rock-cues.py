@@ -24,12 +24,12 @@ LIB_DIR = "/data/xiaorui-server/rocktts/lib"
 DATA_DIR = "/data/xiaorui-server/rocktts/data"
 AUTH = "/data/xiaorui-server/rocktts/rockx_auth_config.json"
 
-# 与旧 cue 一一对应; hmm 代码里没用, 但一并重生成保持资产风格统一
+# 只生成 RockTTS 能稳定合成的 3 个; hmm("嗯")单字 RockTTS 无输出,
+# 若放进字典会写出空 wav —— 整目录拷贝会覆盖板上仍在用的旧 hmm。
 CUES = {
     "xr_ack24k.wav": "我在",
     "xr_fail24k.wav": "没听清",
     "xr_volack24k.wav": "好的",
-    "xr_hmm24k.wav": "嗯",
 }
 
 ROCK_DIR = "/data/xiaorui-gateway/server/core/providers/rock"
@@ -38,6 +38,9 @@ ROCK_DIR = "/data/xiaorui-gateway/server/core/providers/rock"
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True, help="输出目录")
+    parser.add_argument("--alpha", type=float, default=1.0,
+                        help="RockTTS 语速, 越大越慢(1.3 更舒缓, 1.0 偏快; "
+                             "0.8 会更急促 —— 实测确认)")
     args = parser.parse_args()
 
     # tts_helper 依赖 rockx(需要 LD_LIBRARY_PATH 指向 RockTTS 的 .so)
@@ -49,7 +52,7 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     engine = TtsEngine(LIB_DIR, DATA_DIR, AUTH)
     for name, text in CUES.items():
-        pcm, elapsed = engine.synthesize(text, 1.0, 30.0)
+        pcm, elapsed = engine.synthesize(text, args.alpha, 30.0)
         samples = list(struct.unpack("<%dh" % (len(pcm) // 2), pcm))
         peak = max((abs(s) for s in samples), default=0)
         scale = min(2.5, 26000.0 / peak) if peak else 1.0
