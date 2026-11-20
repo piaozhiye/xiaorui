@@ -180,8 +180,15 @@ static int service_ui(xr_ui_context_t *context) {
      *   前端启动后这段时间一律报"正在准备语音", 界面如实说;
      *   一旦网关真的发得出 TTS(问候音播了), 立刻切回正常状态 ——
      *   比死等固定窗口准(慢机器 60 秒可能还没好, 快机器早就能说了)。 */
-    if (!responding && !g_tts_ready && now_s() - g_started_at < preparing_seconds())
-        state = XR_UI_PREPARING;
+    if (!responding && !g_tts_ready) {
+        /* 没真就绪就绝不报 READY("等你说一句")—— 用户说了没反应。
+         * 预热窗口内报 PREPARING; 超时报 VOICE_ERROR(明确的异常态),
+         * 让用户知道是服务没起来, 而不是傻等一句永远没人应的唤醒词。 */
+        if (now_s() - g_started_at < preparing_seconds())
+            state = XR_UI_PREPARING;
+        else
+            state = XR_UI_VOICE_ERROR;
+    }
     xr_ui_server_state(context->server, state, (unsigned int)g_vol_pct);
     unsigned int volume = 0;
     int command = xr_ui_server_poll(context->server, &volume);
@@ -868,7 +875,9 @@ int main(int argc, char **argv) {
     }
 
 restart:
-    /* 网关要重新连: 它的 TTS 也会重新加载 -> 预热提示重新开始 */
+    /* 网关要重新连: 预热/兜底计时重新开始 —— 不能用进程启动时的旧
+     * 时间, 否则后期重连只剩几秒就强行显示正常态(2026-11-20 review)。 */
+    g_started_at = now_s();
     g_tts_ready = 0;
     xr_ui_server_close(ui.server);
     ui.server = NULL;

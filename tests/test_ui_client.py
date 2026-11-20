@@ -50,16 +50,17 @@ def test_status_validation(client):
     message = status()
     assert ctypes.sizeof(message) == 4376
     assert client.xr_ui_message_valid(ctypes.byref(message), ctypes.sizeof(message))
-    # state=4 是 XR_UI_PREPARING(2026-11-20 新增: 语音栈预热期),
-    # 合法; 5 才越界。
-    for field, value in [("magic", 0), ("version", 2), ("type", 4), ("state", 5),
+    # state=4 是 XR_UI_PREPARING, 5 是 XR_UI_VOICE_ERROR(2026-11-20 新增),
+    # 都合法; 6 才越界。
+    for field, value in [("magic", 0), ("version", 2), ("type", 4), ("state", 6),
                          ("volume", 0), ("volume", 101)]:
         invalid = status()
         setattr(invalid, field, value)
         assert not client.xr_ui_message_valid(ctypes.byref(invalid), ctypes.sizeof(invalid))
-    preparing = status()
-    preparing.state = 4
-    assert client.xr_ui_message_valid(ctypes.byref(preparing), ctypes.sizeof(preparing))
+    for legal_state in (4, 5):
+        legal = status()
+        legal.state = legal_state
+        assert client.xr_ui_message_valid(ctypes.byref(legal), ctypes.sizeof(legal))
     assert not client.xr_ui_message_valid(ctypes.byref(message), ctypes.sizeof(message) - 1)
     message.question = b"x" * 256
     assert not client.xr_ui_message_valid(ctypes.byref(message), ctypes.sizeof(message))

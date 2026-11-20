@@ -63,10 +63,10 @@ static int displayed_speaking = -1;
 static char displayed_question[256];
 static char displayed_answer[XR_UI_ANSWER_CAPACITY];
 
-static const uint32_t state_palette[5] = {0x8ca5aa, 0x8fe3c3, 0xf0d38a, 0xa8d8f0, 0xf0d38a};
-static const char *state_text[5] = {
+static const uint32_t state_palette[6] = {0x8ca5aa, 0x8fe3c3, 0xf0d38a, 0xa8d8f0, 0xf0d38a, 0xe87070};
+static const char *state_text[6] = {
     "等你说一句「小瑞小瑞」", "我在听，请说", "让我想一想", "正在回答你",
-    "小瑞正在准备语音…",
+    "小瑞正在准备语音…", "语音服务异常，请稍后重试",
 };
 static const char *question_placeholder = "说点什么，识别后的文字会显示在这里";
 static const char *answer_placeholder = "小瑞的回答会显示在这里";
@@ -432,7 +432,7 @@ static void refresh(lv_timer_t *timer) {
     }
     const xr_ui_message_t *status = xr_ui_client_status();
     uint32_t state = demo ? (uint32_t)((now_ms / 5000) % 4) : status->state;
-    if (state > XR_UI_PREPARING) state = XR_UI_READY;
+    if (state > XR_UI_VOICE_ERROR) state = XR_UI_READY;
     /* ★ 启动后先显示 1.5 秒"等待语音服务连接"再切真实状态(2026-11-20
      *   用户反馈: UI 秒连上前端时这句一闪而过, 根本看不到)。用
      *   displayed_state 的特殊值锁住, 等宽限期结束再按真实状态刷新;

@@ -24,6 +24,29 @@ def test_state_chip_initial_text_uses_adaptive_width():
         "初始状态胶囊必须走 layout_state_chip 自适应宽度与居中"
 
 
+def test_voice_error_state_replaces_ready_when_voice_never_becomes_ready():
+    """语音一直没就绪时不能显示'等你说一句', 要显示异常态。
+
+    回归(2026-11-20 用户诉求): 180 秒兜底原来直接切 READY -> 界面说
+    "等你说一句", 但语音服务其实没好, 用户说了没反应。
+    """
+    protocol = (ROOT / "board/ui_protocol.h").read_text(encoding="utf-8")
+    assert "XR_UI_VOICE_ERROR" in protocol
+    source = (ROOT / "board/xiaorui_live.c").read_text(encoding="utf-8")
+    # 没就绪且超过兜底 -> 异常态(而不是 READY)
+    assert "XR_UI_VOICE_ERROR" in source
+    assert "preparing_seconds()" in source
+    ui = (ROOT / "ui/main.c").read_text(encoding="utf-8")
+    assert "语音服务异常" in ui or "语音服务不可用" in ui
+
+
+def test_voice_preparing_restarts_clock_on_ws_reconnect():
+    """ws 重连要重置预热起点, 不能让旧的兜底时间导致提前显示正常态。"""
+    source = (ROOT / "board/xiaorui_live.c").read_text(encoding="utf-8")
+    restart = source[source.index("restart:"):source.index("restart:") + 300]
+    assert "g_started_at = now_s()" in restart
+
+
 def test_state_chip_measures_with_the_font_it_renders():
     """量宽度用的字体必须与 label 实际渲染的字体一致。"""
     source = (ROOT / "ui/main.c").read_text(encoding="utf-8")

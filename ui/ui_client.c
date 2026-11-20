@@ -19,7 +19,7 @@ static xr_ui_message_t status;
 bool xr_ui_message_valid(const xr_ui_message_t *message, unsigned int length) {
     return message && length == sizeof(*message) && message->magic == XR_UI_MAGIC &&
            message->version == XR_UI_VERSION && message->type == XR_UI_STATUS &&
-           message->state <= XR_UI_PREPARING && message->volume >= 10 && message->volume <= 100 &&
+           message->state <= XR_UI_VOICE_ERROR && message->volume >= 10 && message->volume <= 100 &&
            memchr(message->question, 0, sizeof(message->question)) &&
            memchr(message->answer, 0, sizeof(message->answer));
 }

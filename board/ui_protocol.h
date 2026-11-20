@@ -12,7 +12,7 @@ enum xr_ui_message_type { XR_UI_QUERY = 1, XR_UI_STATUS, XR_UI_VOLUME, XR_UI_STO
  * —— 显示"小瑞正在准备语音…", 而不是"我在听，请说"(说了没反应, 用户
  * 只会以为坏了)。加在末尾, 不改已有取值。 */
 enum xr_ui_state { XR_UI_READY, XR_UI_LISTENING, XR_UI_THINKING, XR_UI_SPEAKING,
-                    XR_UI_PREPARING };
+                    XR_UI_PREPARING, XR_UI_VOICE_ERROR };
 
 typedef struct {
     uint32_t magic;
