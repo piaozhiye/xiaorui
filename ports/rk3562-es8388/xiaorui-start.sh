@@ -11,15 +11,18 @@
 set -u
 
 echo "[xiaorui-start] 启动小瑞整套..."
-if [ -f /etc/init.d/S98xiaorui ]; then
-    # 板内栈 + 前端 + HA(有 .ha_enabled 时)+ crond 看护, 一次到位
-    sh /etc/init.d/S98xiaorui start
-else
-    echo "!! 缺 /etc/init.d/S98xiaorui, 语音栈未启动" >&2
-fi
+# 顺序很重要(2026-11-20 用户实测): 先起触摸界面(秒级, 点了立刻有反应),
+# 语音栈(网关/模型/HA, 慢)放后台 —— 反过来的话界面要等几十秒才出现,
+# 用户看着像"点了没反应"。
 if [ -f /etc/init.d/S99xiaorui-ui ]; then
     sh /etc/init.d/S99xiaorui-ui start
 else
     echo "!! 缺 /etc/init.d/S99xiaorui-ui, 触摸界面未启动" >&2
 fi
-echo "[xiaorui-start] 已下发, 前端首轮预热约需 2~3 分钟"
+if [ -f /etc/init.d/S98xiaorui ]; then
+    # 板内栈 + 前端 + HA(有 .ha_enabled 时)+ crond 看护, 一次到位
+    (setsid sh /etc/init.d/S98xiaorui start >/dev/null 2>&1 </dev/null &)
+else
+    echo "!! 缺 /etc/init.d/S98xiaorui, 语音栈未启动" >&2
+fi
+echo "[xiaorui-start] 界面已起, 语音栈后台启动中(前端首轮预热约 2~3 分钟)"

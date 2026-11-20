@@ -1463,7 +1463,14 @@ def test_stop_script_withdraws_ha_watchdog():
 
 
 def test_start_script_brings_up_the_whole_stack():
-    """启动图标要拉起整套: 语音栈(S98, 含 HA 与看护)+ 触摸 UI(S99)。"""
+    """启动图标要拉起整套: 触摸 UI(S99)+ 语音栈(S98, 含 HA 与看护)。
+
+    顺序: 界面先起、语音栈后台 —— 反过来的话界面要等几十秒才出现,
+    用户点完图标看着像"没反应"(2026-11-20 实测反馈)。
+    """
     start = (ES8388 / "xiaorui-start.sh").read_text()
     assert "S98xiaorui" in start
     assert "S99xiaorui-ui" in start
+    assert start.index("S99xiaorui-ui") < start.index("S98xiaorui")
+    # 语音栈必须后台化, 否则界面启动被它挡住
+    assert "setsid sh /etc/init.d/S98xiaorui start" in start
