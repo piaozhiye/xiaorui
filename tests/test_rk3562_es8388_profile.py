@@ -1360,3 +1360,22 @@ def test_rollback_verifies_graphical_stack_after_restart():
     script = (ES8388 / "rollback.sh").read_text()
     assert "weston 重启后未运行" in script
     assert "UI 拉回后未运行" in script
+
+
+def test_graphical_stack_adb_calls_are_timeout_guarded():
+    """图形栈的 adb 调用必须带超时(真板实测 2026-11-20)。
+
+    /etc/init.d/S49weston 的 restart 是 killall + `while pgrep -x weston;
+    sleep .1` 无限等, 且 weston 继承 stdout 让 adb shell 不返回 ——
+    回滚脚本卡在那里 180s 被 timeout 杀掉, 后面的 UI 拉回全部没执行,
+    结果语音正常、触摸界面全黑。
+    """
+    rollback = (ES8388 / "rollback.sh").read_text()
+    deploy = (ES8388 / "deploy.sh").read_text()
+    for script in (rollback, deploy):
+        assert "timeout 15 $ADB shell '/etc/init.d/S49weston restart'" in script
+    assert "timeout 30 $ADB shell 'sh /etc/init.d/S99xiaorui-ui restart'" in rollback
+    # weston 就绪后再拉 UI: wayland 没起来 UI 连不上, 起来也会立刻退
+    weston_idx = rollback.index("S49weston restart")
+    ui_idx = rollback.index("S99xiaorui-ui restart")
+    assert weston_idx < ui_idx

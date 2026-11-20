@@ -325,10 +325,14 @@ fi
 # 早期写法的 "|| FAILURES" 是死代码 —— weston 没起来照样报"回滚完成"。
 if [ "$WESTON_WAS_RUNNING" = "1" ]; then
     echo "== 重启 weston (回滚前在运行, 恢复的 weston.ini 生效) =="
-    if ! $ADB shell '/etc/init.d/S49weston restart' </dev/null >/dev/null 2>&1; then
-        $ADB shell 'kill $(pgrep -x weston) 2>/dev/null; sleep 2; setsid /usr/bin/weston >/dev/null 2>&1 </dev/null &' </dev/null
+    # ★ 必须带超时(真板实测 2026-11-20): S49weston 的 restart 是
+    #   killall + `while pgrep -x weston; sleep .1` 无限等, 且 weston
+    #   继承 stdout 让 adb shell 不返回 —— 回滚卡在这里 180s 被杀,
+    #   后面的 UI 拉回全部没执行(语音正常、触摸界面全黑)。
+    if ! timeout 15 $ADB shell '/etc/init.d/S49weston restart' </dev/null >/dev/null 2>&1; then
+        $ADB shell 'kill $(pgrep -x weston) 2>/dev/null; sleep 2; setsid /usr/bin/weston >/dev/null 2>&1 </dev/null &' </dev/null || true
     fi
-    sleep 2
+    sleep 3   # 等 wayland 就绪: 否则 UI 连不上 weston, 起来也会立刻退
     if ! $ADB shell 'pgrep -x weston >/dev/null 2>&1'; then
         echo "!! weston 重启后未运行，请手工排查" >&2
         FAILURES=$((FAILURES + 1))
@@ -341,12 +345,13 @@ fi
 if [ "$UI_WAS_RUNNING" = "1" ] && [ "$UI_PRESENT_AFTER_ROLLBACK" = "1" ]; then
     echo "== 拉回 UI (回滚前在运行, 且回滚后文件仍存在) =="
     if $ADB shell 'test -f /etc/init.d/S99xiaorui-ui' >/dev/null 2>&1; then
-        if ! $ADB shell 'sh /etc/init.d/S99xiaorui-ui restart' </dev/null >/dev/null 2>&1; then
+        # 同样带超时: S99 的 stop_ui 有等待循环, 别让它把回滚整段拖死
+        if ! timeout 30 $ADB shell 'sh /etc/init.d/S99xiaorui-ui restart' </dev/null >/dev/null 2>&1; then
             echo "!! UI 重启失败，请手工执行: adb -s $SERIAL shell 'sh /etc/init.d/S99xiaorui-ui restart'" >&2
             FAILURES=$((FAILURES + 1))
         fi
     else
-        $ADB shell 'setsid sh /data/xiaorui-ui/run.sh >/data/xiaorui-ui/ui.log 2>&1 </dev/null &' </dev/null
+        $ADB shell 'setsid sh /data/xiaorui-ui/run.sh >/data/xiaorui-ui/ui.log 2>&1 </dev/null &' </dev/null || true
     fi
     sleep 2
     if ! $ADB shell 'pgrep -x xiaorui_ui >/dev/null 2>&1'; then

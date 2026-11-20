@@ -432,10 +432,13 @@ $ADB shell 'test -f /usr/lib/libfreetype.so.6 || test -f /lib/libfreetype.so.6' 
 #   - weston.ini 的 [output] mode 只有重启 weston 才生效(否则黑屏照旧)
 #   - UI 二进制被覆盖后, 跑着的旧进程 /proc/exe 仍匹配(带 " (deleted)"),
 #     S99 会认为"已在运行"而不重启 -> 必须显式 restart
-$ADB shell '/etc/init.d/S49weston restart' >/dev/null 2>&1 \
-    || $ADB shell 'kill $(pgrep -x weston) 2>/dev/null; sleep 2; setsid /usr/bin/weston >/dev/null 2>&1 </dev/null &'
+# ★ 带超时(真板实测 2026-11-20): S49weston 的 restart 是 killall +
+#   `while pgrep -x weston; sleep .1` 无限等, 且 weston 继承 stdout
+#   让 adb shell 不返回 —— 不加 timeout 会把整段部署挂死在这里。
+timeout 15 $ADB shell '/etc/init.d/S49weston restart' >/dev/null 2>&1 \
+    || timeout 15 $ADB shell 'kill $(pgrep -x weston) 2>/dev/null; sleep 2; setsid /usr/bin/weston >/dev/null 2>&1 </dev/null &'
 sleep 3
-$ADB shell 'sh /etc/init.d/S99xiaorui-ui restart' >/dev/null 2>&1 \
+timeout 30 $ADB shell 'sh /etc/init.d/S99xiaorui-ui restart' >/dev/null 2>&1 \
     || echo "   警告: UI 重启失败, 看 /data/xiaorui-ui/ui.log"
 sleep 2
 # 竖屏 mode 落地校验: DSI-1 面板原生只有 1080x1920, weston 没跑在它上面
