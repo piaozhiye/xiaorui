@@ -433,7 +433,25 @@ static void refresh(lv_timer_t *timer) {
     const xr_ui_message_t *status = xr_ui_client_status();
     uint32_t state = demo ? (uint32_t)((now_ms / 5000) % 4) : status->state;
     if (state > XR_UI_PREPARING) state = XR_UI_READY;
-    if ((connected || demo) && state != displayed_state)
+    /* ★ 启动后先显示 1.5 秒"等待语音服务连接"再切真实状态(2026-11-20
+     *   用户反馈: UI 秒连上前端时这句一闪而过, 根本看不到)。用
+     *   displayed_state 的特殊值锁住, 等宽限期结束再按真实状态刷新;
+     *   若这期间 IPC 真没连上, 原逻辑本来就会显示这句, 无缝衔接。 */
+#define XR_UI_BOOT_HINT_MS 1500
+    /* 至少保持 15 帧: UI 初始化(wayland/字体)慢时, 第一次 refresh 可能
+     * 已经过了 1.5 秒墙钟窗口, 那"等待语音服务连接"就一帧都没显示,
+     * 用户会先看到"等你说一句"再看到断链提示 —— 顺序反了。 */
+    static int boot_hint_frames = 15;
+    bool booting = !demo && (boot_hint_frames > 0 ||
+                             (now_ms - started_ms) < XR_UI_BOOT_HINT_MS);
+    if (booting) {
+        if (boot_hint_frames > 0) boot_hint_frames--;
+        if (displayed_state != UINT32_MAX - 1) {
+            lv_label_set_text(state_label, "等待语音服务连接");
+            layout_state_chip("等待语音服务连接", state_palette[0]);
+            displayed_state = UINT32_MAX - 1;
+        }
+    } else if ((connected || demo) && state != displayed_state)
     {
         /* demo 模式的状态胶囊必须自报"预览": 否则它循环播放"我在听，请说"
          * / "正在回答你"这些**真实样式**的状态, 一眼看过去像真的在应答
