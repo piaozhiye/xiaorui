@@ -123,7 +123,7 @@ void xr_ui_server_turn_begin(xr_ui_server_t *server) {
 }
 
 void xr_ui_server_state(xr_ui_server_t *server, enum xr_ui_state state, unsigned int volume) {
-    if (!server || state > XR_UI_SPEAKING || volume < 10 || volume > 100) return;
+    if (!server || state > XR_UI_PREPARING || volume < 10 || volume > 100) return;
     server->status.state = (uint32_t)state;
     server->status.volume = volume;
 }

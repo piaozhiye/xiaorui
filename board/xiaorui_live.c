@@ -145,6 +145,18 @@ typedef struct {
 static double now_s(void);
 static void xr_tick(void);
 static void ui_socket_retry(xr_ui_context_t *context);
+/* 前端进程启动时刻(CLOCK_MONOTONIC 秒): 语音栈预热期用它算。 */
+static double g_started_at = 0.0;
+/* 预热期长度(秒): 网关 + RockASR/RockTTS 模型加载到 NPU 实测 30~60s。
+ * 可用 XR_PREPARING_SECONDS 现场调。 */
+static double preparing_seconds(void) {
+    const char *env = getenv("XR_PREPARING_SECONDS");
+    if (env && *env) {
+        double value = atof(env);
+        if (value >= 0) return value;
+    }
+    return 60.0;
+}
 
 static int service_ui(xr_ui_context_t *context) {
     if (!context->server) {
@@ -159,6 +171,11 @@ static int service_ui(xr_ui_context_t *context) {
         (context->session->pkt_n ? XR_UI_SPEAKING : XR_UI_THINKING) :
         (context->vad->in_utt || xr_session_in_window(context->session, now_s()) ?
          XR_UI_LISTENING : XR_UI_READY);
+    /* ★ 语音栈预热期(2026-11-20 真板反馈: 点桌面图标重启后, 界面写着
+     *   "我在听，请说", 但网关/模型还在加载, 用户说了没反应 -> 以为坏了)。
+     *   前端启动后这段时间一律报"正在准备语音", 界面如实说。 */
+    if (!responding && now_s() - g_started_at < preparing_seconds())
+        state = XR_UI_PREPARING;
     xr_ui_server_state(context->server, state, (unsigned int)g_vol_pct);
     unsigned int volume = 0;
     int command = xr_ui_server_poll(context->server, &volume);
@@ -711,6 +728,7 @@ static void *xr_watchdog(void *arg) {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpragmas"
 int main(int argc, char **argv) {
+    g_started_at = now_s();   /* 预热期起点(见 preparing_seconds) */
     g_original_argv = argv;
     g_health_generation = wd_now_ms();
     const xr_runtime_config_t *config = xr_runtime_config();

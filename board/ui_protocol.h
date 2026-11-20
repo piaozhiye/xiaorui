@@ -8,7 +8,11 @@
 #define XR_UI_ANSWER_CAPACITY 4096
 
 enum xr_ui_message_type { XR_UI_QUERY = 1, XR_UI_STATUS, XR_UI_VOLUME, XR_UI_STOP };
-enum xr_ui_state { XR_UI_READY, XR_UI_LISTENING, XR_UI_THINKING, XR_UI_SPEAKING };
+/* XR_UI_PREPARING(2026-11-20): 语音栈刚起、模型还在加载时, 界面要说实话
+ * —— 显示"小瑞正在准备语音…", 而不是"我在听，请说"(说了没反应, 用户
+ * 只会以为坏了)。加在末尾, 不改已有取值。 */
+enum xr_ui_state { XR_UI_READY, XR_UI_LISTENING, XR_UI_THINKING, XR_UI_SPEAKING,
+                    XR_UI_PREPARING };
 
 typedef struct {
     uint32_t magic;

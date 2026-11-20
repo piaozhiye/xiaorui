@@ -1467,10 +1467,14 @@ def test_start_script_brings_up_the_whole_stack():
 
     顺序: 界面先起、语音栈后台 —— 反过来的话界面要等几十秒才出现,
     用户点完图标看着像"没反应"(2026-11-20 实测反馈)。
+
+    语音栈用 restart 而不是 start: 问候语由网关在**前端连上时**(hello)
+    触发, 且网关有 10 分钟去重 —— 只 start 时网关还活着、不重发, 前端
+    也没重连, 于是点了图标听不到"下午好…"(2026-11-20 真板反馈)。
     """
     start = (ES8388 / "xiaorui-start.sh").read_text()
     assert "S98xiaorui" in start
     assert "S99xiaorui-ui" in start
     assert start.index("S99xiaorui-ui") < start.index("S98xiaorui")
     # 语音栈必须后台化, 否则界面启动被它挡住
-    assert "setsid sh /etc/init.d/S98xiaorui start" in start
+    assert "setsid sh /etc/init.d/S98xiaorui restart" in start

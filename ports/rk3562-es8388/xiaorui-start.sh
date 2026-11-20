@@ -20,8 +20,13 @@ else
     echo "!! 缺 /etc/init.d/S99xiaorui-ui, 触摸界面未启动" >&2
 fi
 if [ -f /etc/init.d/S98xiaorui ]; then
-    # 板内栈 + 前端 + HA(有 .ha_enabled 时)+ crond 看护, 一次到位
-    (setsid sh /etc/init.d/S98xiaorui start >/dev/null 2>&1 </dev/null &)
+    # ★ 用 restart 而不是 start(2026-11-20 真板反馈: 点图标要听到"下午好,
+    #   现在是…, 小瑞已经准备好了")。问候语由网关在**前端连上时**(hello)
+    #   触发, 而网关有 10 分钟去重 —— 只 start 的话网关还活着、不会重发,
+    #   前端也没重连, 于是点了图标什么声音都没有。restart 会让网关进程
+    #   重来(去重标记归零)+ 前端重连 -> 问候语自然播出。
+    #   前端启动后的预热期界面会显示"小瑞正在准备语音…"(见 PREPARING 状态)。
+    (setsid sh /etc/init.d/S98xiaorui restart >/dev/null 2>&1 </dev/null &)
 else
     echo "!! 缺 /etc/init.d/S98xiaorui, 语音栈未启动" >&2
 fi
