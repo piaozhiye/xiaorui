@@ -159,6 +159,11 @@ def fake_deployment(tmp_path, monkeypatch):
         "setup-zram.sh",
     ):
         shutil.copy(PORT / filename, port / filename)
+    # deploy-ha.sh 按板型标记选 S98 源, 会引用 es8388 版(真实仓库有该目录)
+    es8388 = repo / "ports" / "rk3562-es8388"
+    es8388.mkdir(parents=True, exist_ok=True)
+    shutil.copy(PORT.parent / "rk3562-es8388" / "init-S98xiaorui",
+                es8388 / "init-S98xiaorui")
     for directory in (
         "board-server/wheels314", "board-server/pkg", "models/sherpa-onnx-sense-voice-zh",
         "tts-matcha/matcha-icefall-zh-baker", "vendor/sherpa-onnx/lib",
@@ -561,3 +566,63 @@ def test_es8388_mixer_sets_dac_volume_and_mic_pga():
         "mixer 脚本必须把采集 PGA 设成 8 档(3 档差 7.6dB, 指令过不了 VAD 门)"
     assert '"PCM Volume" 184,184' in mixer, \
         "mixer 脚本必须设 DAC PCM Volume=184,184(0=静音, 流卡 SETUP 不出声)"
+
+
+def _shell_code(text):
+    """去掉 # 注释(行首与行内), 只留**会执行的代码**。
+
+    ★ 2026-11-20 UI review 教训: 子串断言会被注释里的同名字符串骗过
+      (评审实测删掉真代码、留着注释, 旧断言照样通过)。
+    """
+    out = []
+    for line in text.splitlines():
+        code = line.split("#", 1)[0].rstrip()
+        if code.strip():
+            out.append(code)
+    return "\n".join(out)
+
+
+def test_deploy_ha_selects_s98_by_board_profile():
+    """★ 2026-11-20: deploy-ha.sh 第 5 步原来**无条件**推
+    ports/rk3562/init-S98xiaorui(RK809 版) —— 对 ES8388 板会把今天根治的
+    es8388 版 S98 覆盖掉, mixer 段全部静默失败, 重启后采集增益回默认
+    -> "喊得醒问不应"(与 2026-11-20 早上装错 S98 的事故同源)。
+
+    必须按板型标记选择 S98 源, 且 crond 看护必须受 .ha_enabled 门禁
+    (start-ha.sh 自身不自检该标记, crond 无条件跑的话 HA 关不掉)。
+    """
+    deploy = _shell_code(
+        (PORT.parent / "rk3562" / "deploy-ha.sh").read_text(encoding="utf-8"))
+    assert ".rk3562-es8388-profile" in deploy, \
+        "deploy-ha.sh 必须按板型标记(.rk3562-es8388-profile)选择 S98 源"
+    assert "S98_SRC=" in deploy and "rk3562-es8388/init-S98xiaorui" in deploy, \
+        "deploy-ha.sh 必须存在 es8388 版 S98 的选择分支"
+    # 不能有绕过选择逻辑的无条件 push(rk3562 版)
+    push_lines = [l for l in deploy.splitlines() if "$ADB push" in l and "S98" in l]
+    assert push_lines, "deploy-ha.sh 应有推送 S98 的语句"
+    for l in push_lines:
+        assert "$S98_SRC" in l, \
+            f"S98 推送必须走 $S98_SRC 变量(按板型选), 实际: {l.strip()}"
+    # crond 看护要受 .ha_enabled 门禁(按 cron 调度串找那行, 不按 crontab 关键词:
+    # 写入语句本身就带 `| crontab -`)
+    cron_lines = [l for l in deploy.splitlines()
+                  if "start-ha.sh" in l and "*/2 * * * *" in l]
+    assert cron_lines, "deploy-ha.sh 应有写入 crontab 的看护行"
+    assert any(".ha_enabled" in l for l in cron_lines), \
+        "crond 看护行必须受 /data/xiaorui/.ha_enabled 门禁(start-ha.sh 不自检, 否则 HA 关不掉)"
+
+
+def test_es8388_s98_has_gated_ha_section():
+    """es8388 版 S98 必须带 HA 自启段, 且整体受 .ha_enabled 门禁
+    (2026-11-20 用户决定装 HA; 但默认门禁保留, 关 HA 只需删标记文件)。
+    同时不能因为加 HA 段而丢掉 ES8388 特有的 mixer 调用。
+    """
+    s98 = _shell_code(
+        (PORT.parent / "rk3562-es8388" / "init-S98xiaorui").read_text(encoding="utf-8"))
+    assert "/data/xiaorui/.ha_enabled" in s98, "es8388 S98 必须用 .ha_enabled 门禁 HA 自启"
+    assert "start-ha.sh" in s98, "es8388 S98 必须调用 start-ha.sh"
+    assert "mixer-es8388.sh" in s98, \
+        "es8388 S98 必须保留 mixer-es8388.sh 调用(丢了它, 重启后增益回默认 -> 喊得醒问不应)"
+    # HA 段必须在门禁内: 门禁行与 start-ha.sh 调用的相对顺序
+    assert s98.index("/data/xiaorui/.ha_enabled") < s98.index("start-ha.sh"), \
+        "start-ha.sh 必须在 .ha_enabled 门禁之后"

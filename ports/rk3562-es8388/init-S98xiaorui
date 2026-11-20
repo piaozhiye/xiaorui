@@ -82,6 +82,28 @@ case "$1" in
             fi
         fi
 
+        # 3b) Home Assistant(设备控制面, 语音灯/插座走它) + crond 看护。
+        #     与 ports/rk3562/init-S98xiaorui 同一段: 默认**不装** ——
+        #     2026-11-18 用户决策停 HA 让内存给语音链路; 本板实测 4GB
+        #     (2026-11-20), 要开就创建 /data/xiaorui/.ha_enabled,
+        #     开机自启 + crond 看护都跟着开。
+        #     start-ha.sh 幂等: zram swap -> HA(--skip-pip) -> OOM 优先级。
+        #     ★ 不要用 ports/rk3562/init-S98xiaorui 覆盖本文件: 那是
+        #       RK809 版, mixer 段对 ES8388 全部静默失败(2026-11-20 事故)。
+        if [ -f /data/xiaorui/.ha_enabled ]; then
+            if [ -f /data/xiaorui-server/start-ha.sh ]; then
+                # HA 启动 ~40s 且不阻塞语音链路, 所以放后台不等就绪。
+                (setsid sh /data/xiaorui-server/start-ha.sh >/dev/null 2>&1 </dev/null &)
+            fi
+            if [ -x /usr/sbin/crond ]; then
+                (crontab -l 2>/dev/null | grep -v 'xiaorui-server/start-ha.sh'; \
+                 echo '*/2 * * * * /data/xiaorui-server/start-ha.sh >/dev/null 2>&1') \
+                    | crontab - 2>/dev/null
+                pgrep -x crond >/dev/null 2>&1 || \
+                    (setsid /usr/sbin/crond >/dev/null 2>&1 </dev/null &)
+            fi
+        fi
+
         # 4) 前端(采集 + KWS + 播放)
         if [ -f /data/xiaorui/start-frontend.sh ] \
             && ! pgrep -x xiaorui_live >/dev/null 2>&1; then

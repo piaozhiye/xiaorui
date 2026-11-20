@@ -275,6 +275,9 @@ def test_mixer_script_applies_measured_gains_and_switches(tmp_path, monkeypatch)
         ["-c", "7", "sset", "spk switch", "on"],
         ["-c", "7", "cset", "name=Output 1 Playback Volume", "15"],
         ["-c", "7", "cset", "name=Output 2 Playback Volume", "15"],
+        # 2026-11-20: DAC 数字音量是出声闸门(0=静音, 流卡 SETUP 不出声),
+        # S42 早期 cset 失败被吞 -> 每次重启复发, 所以这里兜底设一遍。
+        ["-c", "7", "cset", "name=PCM Volume", "184,184"],
         ["-c", "7", "cset", "numid=62", "2CH: 1 Mic + 1 Loopback"],
     ]
 

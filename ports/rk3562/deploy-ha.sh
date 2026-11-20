@@ -77,11 +77,21 @@ $ADB shell '[ -s /data/xiaorui-server/ha_token.txt ]' >/dev/null 2>&1 \
     || die "ha_token.txt 没生成"
 
 # ---------- 5) 开机自启 + 看护 ----------
-$ADB push "$DIR/init-S98xiaorui" /etc/init.d/S98xiaorui >/dev/null
+# ★ 按板型选 S98: 本板(es8388)必须用 ports/rk3562-es8388/init-S98xiaorui。
+#   推错成 rk3562 版(RK809 codec 控件)会让 mixer 段对 ES8388 全部静默失败
+#   -> 重启后采集增益回默认 -> "喊得醒问不应"(2026-11-20 事故根因)。
+#   型别标记由 ports/rk3562-es8388/deploy.sh 写入板上。
+S98_SRC="$DIR/init-S98xiaorui"
+if $ADB shell '[ -f /data/xiaorui/.rk3562-es8388-profile ]' >/dev/null 2>&1; then
+    S98_SRC="$DIR/../rk3562-es8388/init-S98xiaorui"
+    [ -f "$S98_SRC" ] || die "缺 es8388 版 S98: $S98_SRC"
+fi
+log "S98 源: $S98_SRC"
+$ADB push "$S98_SRC" /etc/init.d/S98xiaorui >/dev/null
 $ADB shell 'chmod +x /etc/init.d/S98xiaorui' || die "更新开机脚本权限失败"
 $ADB shell '
     (crontab -l 2>/dev/null | grep -v "xiaorui-server/start-ha.sh";
-     echo "*/2 * * * * /data/xiaorui-server/start-ha.sh >/dev/null 2>&1") | crontab -' \
+     echo "*/2 * * * * [ -f /data/xiaorui/.ha_enabled ] && sh /data/xiaorui-server/start-ha.sh >/dev/null 2>&1") | crontab -' \
     || die "更新 HA 看护任务失败"
 $ADB shell 'pgrep -x crond >/dev/null 2>&1 ||
     (setsid /usr/sbin/crond >/dev/null 2>&1 </dev/null &)'
