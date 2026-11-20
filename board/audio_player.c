@@ -71,6 +71,45 @@ static atomic_int volume_pct = -1;
  * 用途: 区分"下发的数据本身有断点"与"设备端写卡节奏有问题"。 */
 static FILE *play_dump;
 static FILE *play_trace;
+/* ★ 容量上限(2026-11-20 根分区 99% 事故): 两个诊断文件都是追加写,
+ * play.pcm 长跑到 57MB 且默认落 /data(根分区)。规则: 累计达到
+ * XR_PLAY_DUMP_MAX_MB / XR_PLAY_TRACE_MAX_MB(默认 32MB)即重置重写,
+ * 保留最近内容(诊断要的恰恰是最近一段); 打开时已超限同样重置。
+ * MAX_MB=0 恢复无上限旧行为。 */
+static char play_dump_path[512], play_trace_path[512];
+static long play_dump_bytes, play_dump_cap;
+static long play_trace_bytes, play_trace_cap;
+static FILE *diag_append_capped(const char *path, const char *max_mb,
+                                char *path_out, size_t path_len,
+                                long *bytes, long *cap) {
+    double mb = 32.0;
+    if (max_mb && *max_mb) {
+        mb = strtod(max_mb, NULL);
+        if (mb < 0) mb = 0;
+    }
+    *cap = (long)(mb * 1024.0 * 1024.0);
+    FILE *f = fopen(path, "ab");
+    if (!f) return NULL;
+    snprintf(path_out, path_len, "%s", path);
+    if (fseek(f, 0, SEEK_END) == 0) {
+        *bytes = ftell(f);
+        if (*cap > 0 && *bytes >= *cap) {
+            fclose(f);
+            f = fopen(path, "wb");   /* 打开时已超限: 当场重置 */
+            *bytes = 0;
+        }
+    } else {
+        *bytes = 0;
+    }
+    return f;
+}
+static void diag_rotate_if_full(FILE **f, const char *path,
+                                long *bytes, long cap) {
+    if (!*f || cap <= 0 || *bytes < cap) return;
+    fclose(*f);
+    *f = fopen(path, "wb");
+    *bytes = 0;
+}
 static pthread_mutex_t ring_mu = PTHREAD_MUTEX_INITIALIZER;
 /* ★ 等待时钟(Codex review P2, 2026-11-20): 本板无 RTC, 校时/重启会跳
  *   墙钟; grace 的绝对 deadline 若按 CLOCK_REALTIME 构造, 回拨会把已
@@ -177,10 +216,14 @@ static void *player_thread(void *arg) {
     int pcm_active = 0;
     {
         const char *dp = getenv("XR_PLAY_DUMP");
-        if (dp && *dp) play_dump = fopen(dp, "ab");
+        if (dp && *dp) play_dump = diag_append_capped(
+            dp, getenv("XR_PLAY_DUMP_MAX_MB"), play_dump_path,
+            sizeof(play_dump_path), &play_dump_bytes, &play_dump_cap);
         const char *tp = getenv("XR_PLAY_TRACE");
         if (tp && *tp) {
-            play_trace = fopen(tp, "a");
+            play_trace = diag_append_capped(
+                tp, getenv("XR_PLAY_TRACE_MAX_MB"), play_trace_path,
+                sizeof(play_trace_path), &play_trace_bytes, &play_trace_cap);
             /* 锚点: 把后面的 CLOCK_MONOTONIC 时间戳对齐到墙钟,
              * 这样停顿能直接和网关日志的轮次/合成时刻对上。
              * (这里故意读墙钟——只是日志锚点; 等待 deadline
@@ -299,6 +342,9 @@ static void *player_thread(void *arg) {
         if (play_dump) {   /* 诊断: 实际写卡前的内容(耳机里应当听到的就是它) */
             fwrite(tmp, 2, take, play_dump);
             fflush(play_dump);
+            play_dump_bytes += (long)(take * 2);
+            diag_rotate_if_full(&play_dump, play_dump_path,
+                                &play_dump_bytes, play_dump_cap);
         }
         size_t written = 0;
         while (written < take && player_running) {
@@ -309,12 +355,15 @@ static void *player_thread(void *arg) {
             if (play_trace) {  /* 诊断: 写卡耗时(阻塞=卡满, 长时间=被饿住) */
                 double ms = (t1.tv_sec - t0.tv_sec) * 1000.0 +
                             (t1.tv_nsec - t0.tv_nsec) / 1e6;
-                fprintf(play_trace, "%.3f %ld %ld %.1f\n",
+                int n = fprintf(play_trace, "%.3f %ld %ld %.1f\n",
                         (t1.tv_sec % 100000) + t1.tv_nsec / 1e9,
                         (long)written, (long)wn, ms);
                 /* 必须 flush: 不 flush 时 trace 落后 stdio 缓冲几个 KB,
                  * 正在播的轮次在文件里看着像"只播了一半"(2026-11-19 误判)。 */
                 fflush(play_trace);
+                if (n > 0) play_trace_bytes += n;
+                diag_rotate_if_full(&play_trace, play_trace_path,
+                                    &play_trace_bytes, play_trace_cap);
             }
             if (wn == -EINTR) continue;
             if (wn == -EPIPE) {
