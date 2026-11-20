@@ -138,6 +138,15 @@ for f in \
 done
 [ "$missing" -eq 0 ] || die "资源不全, 先补齐(见 ports/rk3562/DEPLOYMENT.md)"
 [ -d "$REPO/board-server/pkg" ] || die "缺网关代码目录: $REPO/board-server/pkg"
+# UI 是本 profile 必选组件(review 2026-11-20): 安装段曾允许"未构建
+# 可跳过", 但验收段无条件要求 UI 存在 —— 干净板必然 die 在验收、留下
+# 半成品。必须在写板之前就失败并给出构建指引。
+for f in "$REPO/ui/build/aarch64/xiaorui_ui" \
+         "$REPO/ui/build/aarch64/lib/liblvgl.so" \
+         "$REPO/ui/run.sh" \
+         "$REPO/ports/rk3562/S99xiaorui-ui"; do
+    [ -f "$f" ] || die "UI 未构建: 缺 $f — 先跑 ui/build.sh aarch64(本 profile 必选)"
+done
 
 # 空间门必须在任何板端写入(包括 marker、探针和 runtime stage)之前完成。
 # du 计算随包内容; 首装另预留 Miniforge 解包、Python venv 膨胀及运行余量。
@@ -406,19 +415,16 @@ $ADB push "$DIR/init-S98xiaorui" /etc/init.d/S98xiaorui >/dev/null
 $ADB shell 'mkdir -p /etc/xdg/weston'
 $ADB push "$DIR/weston.ini" /etc/xdg/weston/weston.ini >/dev/null || die "推送 weston.ini 失败"
 # UI 二进制 + LVGL 运行时 + 启动脚本(S99 装好即开机自启)
-if [ -f "$REPO/ui/build/aarch64/xiaorui_ui" ]; then
-    $ADB shell 'mkdir -p /data/xiaorui-ui/lib'
-    $ADB push "$REPO/ui/build/aarch64/xiaorui_ui" /data/xiaorui-ui/xiaorui_ui >/dev/null || die "推送 UI 二进制失败"
-    $ADB push "$REPO/ui/build/aarch64/lib/liblvgl.so" /data/xiaorui-ui/lib/liblvgl.so >/dev/null || die "推送 LVGL 运行时失败"
-    $ADB push "$REPO/ui/run.sh" /data/xiaorui-ui/run.sh >/dev/null || die "推送 UI 启动脚本失败"
-    $ADB push "$REPO/ports/rk3562/S99xiaorui-ui" /etc/init.d/S99xiaorui-ui >/dev/null || die "推送 UI init 脚本失败"
-    $ADB shell 'chmod +x /data/xiaorui-ui/xiaorui_ui /data/xiaorui-ui/run.sh /etc/init.d/S99xiaorui-ui'
-    # LVGL 运行时依赖 libfreetype.so.6(板上没有就 load 失败, 只有 ui.log 一行)
-    $ADB shell 'test -f /usr/lib/libfreetype.so.6 || test -f /lib/libfreetype.so.6' \
-        >/dev/null 2>&1 || echo "   警告: 板上找不到 libfreetype.so.6, UI 可能加载失败"
-else
-    echo "   (跳过 UI: ui/build/aarch64/xiaorui_ui 未构建, 先跑 ui/build.sh aarch64)"
-fi
+# 必选(前置资源检查已 die 未构建场景), 不再有"跳过"分支。
+$ADB shell 'mkdir -p /data/xiaorui-ui/lib'
+$ADB push "$REPO/ui/build/aarch64/xiaorui_ui" /data/xiaorui-ui/xiaorui_ui >/dev/null || die "推送 UI 二进制失败"
+$ADB push "$REPO/ui/build/aarch64/lib/liblvgl.so" /data/xiaorui-ui/lib/liblvgl.so >/dev/null || die "推送 LVGL 运行时失败"
+$ADB push "$REPO/ui/run.sh" /data/xiaorui-ui/run.sh >/dev/null || die "推送 UI 启动脚本失败"
+$ADB push "$REPO/ports/rk3562/S99xiaorui-ui" /etc/init.d/S99xiaorui-ui >/dev/null || die "推送 UI init 脚本失败"
+$ADB shell 'chmod +x /data/xiaorui-ui/xiaorui_ui /data/xiaorui-ui/run.sh /etc/init.d/S99xiaorui-ui'
+# LVGL 运行时依赖 libfreetype.so.6(板上没有就 load 失败, 只有 ui.log 一行)
+$ADB shell 'test -f /usr/lib/libfreetype.so.6 || test -f /lib/libfreetype.so.6' \
+    >/dev/null 2>&1 || echo "   警告: 板上找不到 libfreetype.so.6, UI 可能加载失败"
 # ★ 推完必须让改动**当场生效**, 否则这次部署等于没做:
 #   - weston.ini 的 [output] mode 只有重启 weston 才生效(否则黑屏照旧)
 #   - UI 二进制被覆盖后, 跑着的旧进程 /proc/exe 仍匹配(带 " (deleted)"),

@@ -363,6 +363,10 @@ def seed_deploy_assets(repo):
         "board-server/cues/xr_hmm24k.wav",
         "board-server/cues/xr_fail24k.wav",
         "board-server/cues/xr_volack24k.wav",
+        "ui/build/aarch64/xiaorui_ui",
+        "ui/build/aarch64/lib/liblvgl.so",
+        "ui/run.sh",
+        "ports/rk3562/S99xiaorui-ui",
     )
     for relative in files:
         path = repo / relative
@@ -1189,3 +1193,95 @@ def test_deploy_vqe_checks_new_log_and_pid_after_restart():
     assert "tail -n +$((MARK+1))" in script
     assert "OLD_PID" in script and "NEW_PID" in script
     assert '[ "$NEW_PID" = "$OLD_PID" ]' in script
+
+
+# --------------------------------------------------------------------------
+# 回滚必须同时管 UI/Weston(review 2026-11-20): 只停语音栈时, 覆盖仍在
+# 运行的 UI 二进制会 Text file busy 中断回滚; weston.ini 恢复后不重启
+# weston, 回滚的配置根本不生效。
+# --------------------------------------------------------------------------
+
+def test_rollback_stops_ui_before_restoring_files(tmp_path, monkeypatch):
+    """UI 二进制在 manifest 里时, 停 UI 必须发生在恢复 push 之前。"""
+    log = install_guard_adb(tmp_path, monkeypatch, profile_marked=True)
+    backup = tmp_path / "backup-ui"
+    files = backup / "files"
+    files.mkdir(parents=True)
+    (files / "data__xiaorui-ui__xiaorui_ui").write_text("#!/bin/sh\n")
+    (backup / "manifest").write_text(
+        "PRESENT\t/data/xiaorui-ui/xiaorui_ui\tdata__xiaorui-ui__xiaorui_ui\t755\n"
+    )
+    result = subprocess.run(
+        ["bash", str(ES8388 / "rollback.sh"), "fake-serial", str(backup)],
+        capture_output=True, text=True, check=False, timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    commands = adb_commands(log)
+    stop_idx = next(i for i, c in enumerate(commands)
+                    if "shell" in c and "pkill -x xiaorui_ui" in c[-1])
+    push_idx = next(i for i, c in enumerate(commands)
+                    if "push" in c and c[-1] == "/data/xiaorui-ui/xiaorui_ui")
+    assert stop_idx < push_idx
+
+
+def test_rollback_restarts_weston_and_ui_when_they_were_running(tmp_path, monkeypatch):
+    """weston/UI 回滚前在跑: 恢复文件后必须重启, 回滚才真正落地。"""
+    log = install_guard_adb(tmp_path, monkeypatch, profile_marked=True)
+    backup = tmp_path / "backup-ui-restart"
+    files = backup / "files"
+    files.mkdir(parents=True)
+    (files / "etc__xdg__weston__weston.ini").write_text("[core]\n")
+    (backup / "manifest").write_text(
+        "PRESENT\t/etc/xdg/weston/weston.ini\tetc__xdg__weston__weston.ini\t644\n"
+    )
+    result = subprocess.run(
+        ["bash", str(ES8388 / "rollback.sh"), "fake-serial", str(backup)],
+        capture_output=True, text=True, check=False, timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    shell_commands = [c[-1] for c in adb_commands(log) if c and "shell" in c]
+    assert any("weston" in c and ("restart" in c or "kill" in c)
+               for c in shell_commands)
+    assert any("S99xiaorui-ui restart" in c or "xiaorui-ui/run.sh" in c
+               for c in shell_commands)
+
+
+def test_deploy_requires_ui_build_before_touching_the_board(
+    fake_deployment_factory, monkeypatch
+):
+    """UI 是本 profile 必选组件: 未构建必须在写板之前失败。
+
+    回归(review 2026-11-20): 安装段"未构建可跳过"与验收段"无条件要求
+    存在"互相矛盾 —— 干净板上跳过安装后必然 die 在验收, 留下半成品。
+    """
+    port, log = fake_deployment_factory()
+    repo = port.parent.parent
+    seed_deploy_assets(repo)
+    # 有意移除 UI 构建产物: 模拟"没跑 ui/build.sh 就来部署"的场景
+    (repo / "ui/build/aarch64/xiaorui_ui").unlink()
+    work = repo / "deploy-work"
+    deploy_script = repo / "ports/rk3562-es8388/deploy.sh"
+    deploy_script.write_text(
+        deploy_script.read_text().replace(
+            "WORK=/tmp/opencode/rk3562-es8388", f"WORK={work}"
+        )
+    )
+    for name in ("check-runtime.sh", "stage-runtime.sh"):
+        (repo / "ports/rk3562-es8388" / name).write_text("#!/bin/bash\nexit 0\n")
+    sherpa = repo / "sherpa-lib"
+    (sherpa / "lib").mkdir(parents=True, exist_ok=True)
+    for lib in ("libsherpa-onnx-c-api.so", "libonnxruntime.so"):
+        (sherpa / "lib" / lib).touch()
+    monkeypatch.setenv("XR_LIBGOMP", str(repo / "board/board-server-libgomp.so.1"))
+    monkeypatch.setenv("XR_SHERPA_LIB_DIR", str(sherpa / "lib"))
+    monkeypatch.setenv("AVAILABLE_KB", "9000000")
+    monkeypatch.setenv("PROFILE_STATE", "")   # 干净板
+
+    result = subprocess.run(
+        ["bash", str(deploy_script), "fake-board"],
+        capture_output=True, text=True, check=False, timeout=60,
+    )
+    assert result.returncode != 0
+    assert "ui/build.sh" in result.stderr
+    # 失败必须发生在写板之前: 不允许任何 push
+    assert not [c for c in adb_commands(log) if "push" in c]

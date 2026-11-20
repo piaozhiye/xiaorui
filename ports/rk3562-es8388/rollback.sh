@@ -170,11 +170,19 @@ echo "== 仅停止此 profile 的服务 (serial=$SERIAL) =="
 # 变成"完全静默", 比回滚前更糟。
 FRONTEND_WAS_RUNNING=0
 $ADB shell 'pgrep -x xiaorui_live >/dev/null 2>&1' && FRONTEND_WAS_RUNNING=1
+# UI/Weston 与前端同权(review 2026-11-20):
+# - 覆盖仍在运行的 UI 二进制会 Text file busy, set -e 下整段回滚中断
+# - weston.ini 恢复后不重启 weston, 回滚的配置不生效
+UI_WAS_RUNNING=0
+$ADB shell 'pgrep -x xiaorui_ui >/dev/null 2>&1' && UI_WAS_RUNNING=1
+WESTON_WAS_RUNNING=0
+$ADB shell 'pgrep -x weston >/dev/null 2>&1' && WESTON_WAS_RUNNING=1
 # 只停本 profile 的进程: 按完整路径匹配 cmdline, 不像 pkill -f "[s]erver/app.py"
 # 那样命中板上任何一个 app.py。
 # ★ 模式串用字符类错开自身: adb shell '... pkill -f "/data/.../app.py" ...' 的
 #   远端 shell 自己的命令行里就含这个模式, pkill 会把承载它的 shell 一起杀掉
 #   -> adb 返回非零 -> 本脚本 set -e 直接中断, 后面几步全不执行。
+$ADB shell 'pkill -x xiaorui_ui 2>/dev/null || true'
 $ADB shell 'pkill -x xiaorui_live 2>/dev/null || true'
 $ADB shell 'pkill -f "/data/xiaorui-server/llm_rkll[m].py" 2>/dev/null || true'
 $ADB shell 'pkill -f "/data/xiaorui-gateway/server/[a]pp.py" 2>/dev/null || true'
@@ -300,6 +308,33 @@ if [ "$FRONTEND_WAS_RUNNING" = "1" ]; then
     fi
 else
     echo "== 回滚前前端未运行，保持停止状态 =="
+fi
+
+# weston: 回滚恢复的 weston.ini 只有重启才生效(deploy 同理); 之前没跑
+# 就不动 —— 回滚不该改变"图形栈没起"这个回滚前状态。
+if [ "$WESTON_WAS_RUNNING" = "1" ]; then
+    echo "== 重启 weston (回滚前在运行, 恢复的 weston.ini 生效) =="
+    if ! $ADB shell '/etc/init.d/S49weston restart' </dev/null >/dev/null 2>&1; then
+        $ADB shell 'kill $(pgrep -x weston) 2>/dev/null; sleep 2; setsid /usr/bin/weston >/dev/null 2>&1 </dev/null &' </dev/null \
+            || { echo "!! weston 重启失败，请手工排查" >&2
+                 FAILURES=$((FAILURES + 1)); }
+    fi
+fi
+# UI: 回滚前在跑就拉回来, 与前端拉回同一待遇
+if [ "$UI_WAS_RUNNING" = "1" ]; then
+    echo "== 拉回 UI (回滚前在运行) =="
+    if $ADB shell 'test -x /etc/init.d/S99xiaorui-ui' >/dev/null 2>&1; then
+        if ! $ADB shell 'sh /etc/init.d/S99xiaorui-ui restart' </dev/null >/dev/null 2>&1; then
+            echo "!! UI 重启失败，请手工执行: adb -s $SERIAL shell 'sh /etc/init.d/S99xiaorui-ui restart'" >&2
+            FAILURES=$((FAILURES + 1))
+        fi
+    else
+        $ADB shell 'setsid /data/xiaorui-ui/run.sh >/data/xiaorui-ui/ui.log 2>&1 </dev/null &' </dev/null \
+            || { echo "!! UI 拉起失败，请手工排查" >&2
+                 FAILURES=$((FAILURES + 1)); }
+    fi
+else
+    echo "== 回滚前 UI 未运行，保持停止状态 =="
 fi
 
 if [ "$REMOVE_CREATED_DATA" = "1" ]; then
