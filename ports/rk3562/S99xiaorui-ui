@@ -41,7 +41,10 @@ start_ui() {
         echo 'xiaorui-ui: already running'
         return 0
     fi
-    if [ ! -x "$directory/xiaorui_ui" ] || [ ! -r "$directory/run.sh" ]; then
+    # /data 上的执行位重启即丢(2026-11-19/2026-11-20 实测三次, S98 门禁
+    # 因此从 -x 改成 -f)。这里同样只判"文件在", 不判执行位 ——
+    # 实际启动走的是 `sh run.sh` + exec 二进制, 不依赖执行位。
+    if [ ! -f "$directory/xiaorui_ui" ] || [ ! -r "$directory/run.sh" ]; then
         echo 'xiaorui-ui: executable or launcher missing' >&2
         return 1
     fi

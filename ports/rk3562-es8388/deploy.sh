@@ -394,6 +394,23 @@ $ADB push "$REPO/board-server/probe-port.py" /data/xiaorui-gateway/probe-port.py
 $ADB shell 'rm -f /data/xr-es8388-probe.py'
 $ADB push "$DIR/asound.conf" /etc/asound.conf >/dev/null
 $ADB push "$DIR/init-S98xiaorui" /etc/init.d/S98xiaorui >/dev/null
+# ---------- 6b) weston 竖屏 + 触摸 UI ----------
+# 面板原生 1080x1920 竖屏, 但出厂 weston.ini 没 [output] 段, weston 会挑
+# 横置 mode -> UI 收到 1920x1080 直接退出 -> 界面全黑(语音不受影响)。
+# 见 ports/rk3562-es8388/weston.ini 的说明(完整配置, 覆盖出厂文件)。
+$ADB shell 'mkdir -p /etc/xdg/weston'
+$ADB push "$DIR/weston.ini" /etc/xdg/weston/weston.ini >/dev/null
+# UI 二进制 + LVGL 运行时 + 启动脚本(S99 装好即开机自启)
+if [ -f "$REPO/ui/build/aarch64/xiaorui_ui" ]; then
+    $ADB shell 'mkdir -p /data/xiaorui-ui/lib'
+    $ADB push "$REPO/ui/build/aarch64/xiaorui_ui" /data/xiaorui-ui/xiaorui_ui >/dev/null
+    $ADB push "$REPO/ui/build/aarch64/lib/liblvgl.so" /data/xiaorui-ui/lib/liblvgl.so >/dev/null
+    $ADB push "$REPO/ui/run.sh" /data/xiaorui-ui/run.sh >/dev/null
+    $ADB push "$REPO/ports/rk3562/S99xiaorui-ui" /etc/init.d/S99xiaorui-ui >/dev/null
+    $ADB shell 'chmod +x /data/xiaorui-ui/xiaorui_ui /data/xiaorui-ui/run.sh /etc/init.d/S99xiaorui-ui'
+else
+    echo "   (跳过 UI: ui/build/aarch64/xiaorui_ui 未构建, 先跑 ui/build.sh aarch64)"
+fi
 $ADB shell 'chmod +x /data/xiaorui/start-frontend.sh /data/xiaorui/board-time.sh /data/mixer-es8388.sh /data/setup-zram.sh /etc/init.d/S98xiaorui /data/xiaorui-gateway/probe-port.py'
 # ---------- 7) 启动 ----------
 echo "== 启动全栈 =="

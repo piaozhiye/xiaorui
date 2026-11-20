@@ -452,6 +452,7 @@ def test_s98_data_script_gates_use_f_not_x():
     RK809 版 S98(es8388 卡的 mixer 设置全静默失败), 重启后 ES8388
     采集增益回默认 3/8, 指令电平低于 VAD 门限, "喊得醒问不应"。
     该版本自身也有 5 处 -x 漏网(含 mixer 门禁), 一并钉住。
+    ★ 2026-11-20: S99xiaorui-ui 的 UI 可执行文件检查同样改 -f。
     """
     ports = [PORT / "init-S98xiaorui",
              PORT.parent / "rk3562-es8388" / "init-S98xiaorui"]
@@ -462,6 +463,29 @@ def test_s98_data_script_gates_use_f_not_x():
     # crond 断言只对 rk3562 版: es8388 版没有 HA/crond 段
     text = ports[0].read_text(encoding="utf-8")
     assert "[ -x /usr/sbin/crond ]" in text, "crond 是二进制, 应保持 -x"
+    # UI 启动脚本: 二进制在 /data, 执行位重启会丢 -> 只判文件存在
+    ui99 = (PORT / "S99xiaorui-ui").read_text(encoding="utf-8")
+    assert '-x "$directory/xiaorui_ui"' not in ui99, \
+        "S99xiaorui-ui 的 UI 二进制检查应为 -f(/data 执行位重启会丢)"
+
+
+def test_es8388_weston_pins_native_portrait_mode():
+    """★ 2026-11-20 实机: 面板原生 1080x1920 竖屏, 出厂 weston.ini 没有
+    [output] 段时 weston 自己挑 1920x1080 -> UI(LVGL 写死 1080x1920)
+    收到尺寸不符直接退出 -> 界面全黑, 而语音链路完全正常(极难定位)。
+    部署必须带 mode=1080x1920, 且不能用 transform 绕(transform=90 在
+    本板 weston 16 被判 Invalid)。
+    """
+    ini = (PORT.parent / "rk3562-es8388" / "weston.ini").read_text(encoding="utf-8")
+    assert "name=DSI-1" in ini, "weston.ini 缺少 DSI-1 输出配置"
+    assert "mode=1080x1920" in ini, "weston.ini 必须指定面板原生竖屏 mode"
+    active = [line.strip() for line in ini.splitlines()
+              if line.strip() and not line.strip().startswith("#")]
+    assert not any(line.startswith("transform=") for line in active), \
+        "不要用 transform 旋转: 本板 weston 16 不认 transform=90"
+    deploy = (PORT.parent / "rk3562-es8388" / "deploy.sh").read_text(encoding="utf-8")
+    assert "weston.ini" in deploy, "deploy.sh 必须推送 weston.ini"
+    assert "S99xiaorui-ui" in deploy, "deploy.sh 必须装 UI 启动脚本"
 
 
 def test_wire_lead_fits_alsa_card_buffer():
