@@ -17,15 +17,13 @@ if ! flock -n 9; then
 fi
 
 running_pids() {
-    for candidate in $(pgrep -x xiaorui_ui || :); do
-        executable="$(readlink "/proc/$candidate/exe" 2>/dev/null || :)"
-        # 二进制被覆盖后 exe 会带 " (deleted)", 不去掉就认不出这个进程,
-         # 老进程会留下来和新进程抢同一块屏幕
-        executable="${executable% (deleted)}"
-        if [ "$executable" = "$directory/xiaorui_ui" ]; then
-            echo "$candidate"
-        fi
-    done
+    # 只按进程名(comm)匹配, 不比 exe 完整路径。
+    # 2026-11-20 真板踩坑: 部署用 mv 原子替换二进制后, 旧进程的 exe
+    # 显示为 "/.../xiaorui_ui.old (deleted)" —— 去掉 "(deleted)" 后
+    # 路径带 .old, 和 "$directory/xiaorui_ui" 不相等 -> running_pids
+    # 漏掉旧进程 -> stop 杀不掉, start 又起一个 -> 两个 UI 抢同一块屏幕,
+    # 文本框停在占位符不刷新(诊断脚本把 USR1 发给旧进程)。
+    pgrep -x xiaorui_ui || :
 }
 
 # OOM 优先级: 语音主链路(网关/RKLLM)由 start-ha.sh 保护(-500), UI 只是显示层,

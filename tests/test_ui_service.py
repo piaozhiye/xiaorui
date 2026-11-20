@@ -9,6 +9,19 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_running_pids_matches_by_name_not_exe_path():
+    """UI 进程查找必须按 comm, 不能按 exe 完整路径。
+
+    回归: 二进制被 mv 改名后旧进程 exe 是 "...xiaorui_ui.old (deleted)",
+    完整路径匹配会漏掉它 -> stop 杀不掉 -> 双进程抢屏幕、文本框不刷新。
+    """
+    service = (ROOT / "ports/rk3562/S99xiaorui-ui").read_text(encoding="utf-8")
+    start = service.index("running_pids()")
+    body = service[start:service.index("}", start)]
+    assert "pgrep -x xiaorui_ui" in body
+    assert "readlink" not in body
+
+
 def test_state_chip_initial_text_uses_adaptive_width():
     """状态胶囊的初始文字必须按实际宽度自适应, 不能用硬编码宽度。
 

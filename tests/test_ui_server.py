@@ -140,10 +140,11 @@ def test_new_client_clears_previous_conversation(interface, tmp_path):
         status = query_status(interface, server, path)
         assert status.question.decode() == "新问题"
         assert status.answer.decode() == "新回答"
-        # 换个来源地址(= UI 进程重启, 抽象地址里的 pid 变): 会话重来, 清空
+        # 客户端短暂切到另一个地址(诊断脚本 / 重启瞬间的连接抖动):
+        # 没断够 3 秒, 不算新会话, 文本不该被清掉
         status = query_status(interface, server, path, peer=b"\0xr-test-other")
-        assert status.question == b""
-        assert status.answer == b""
+        assert status.question.decode() == "新问题"
+        assert status.answer.decode() == "新回答"
     finally:
         interface.xr_ui_server_close(server)
 

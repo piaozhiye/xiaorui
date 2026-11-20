@@ -19,10 +19,7 @@ struct xr_ui_server {
     dev_t device;
     bool bound;
     bool client_seen;
-    /* 最近一次客户端的来源地址: UI 进程重启会换抽象地址(@xiaorui-ui.<pid>),
-     * 用它区分"同一个客户端继续问"和"新客户端接入"(后者要清上一轮文本)。 */
-    struct sockaddr_un client_peer;
-    socklen_t client_peer_len;
+
     bool truncated;        /* 字幕缓冲曾溢出: 界面要标出"已截断" */
     uint64_t last_client_ms;
     xr_ui_message_t status;
@@ -218,21 +215,20 @@ int xr_ui_server_poll(xr_ui_server_t *server, unsigned int *volume) {
             }
         }
         if (!trusted) continue;
-        /* 新客户端判定: 没见过客户端, 或来源地址变了(UI 进程重启 -> 抽象
-         * 地址里的 pid 变)。新客户端 = 新会话开始 -> 清掉上一轮问答文本,
-         * 否则 UI 重启后会把旧对话原样显示出来(2026-11-20 用户反馈)。 */
+        /* "新客户端接入" = 客户端消失过一会儿再回来(UI 进程重启)。
+         * ★ 不能用"来源地址变了"判定(2026-11-20 教训): 多客户端并存
+         * (诊断脚本+UI)会互相把对方的字幕清掉。只有确实断过一段时间
+         * 才当新会话; 多个客户端同时在线时 last_client_ms 一直在更新,
+         * 不会误清。 */
+        uint64_t client_now = monotonic_ms();
         bool new_client = !server->client_seen ||
-            server->client_peer_len != message.msg_namelen ||
-            memcmp(&server->client_peer, &peer, message.msg_namelen) != 0;
+            (client_now > server->last_client_ms &&
+             client_now - server->last_client_ms > 3000);
         server->client_seen = true;
-        server->last_client_ms = monotonic_ms();
+        server->last_client_ms = client_now;
         if (new_client) {
-            fprintf(stderr, "[ui] 新客户端接入, 清空上一轮文本(peer_len=%u)\n",
-                    (unsigned)message.msg_namelen);
             server->status.question[0] = 0;
             server->status.answer[0] = 0;
-            server->client_peer = peer;
-            server->client_peer_len = message.msg_namelen;
         }
         if (request.type == XR_UI_QUERY)
         {
