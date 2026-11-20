@@ -9,6 +9,17 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_ui_ignores_first_status_frame_to_avoid_stale_text():
+    """UI 刚连上的第一帧 STATUS 是上一轮残留, 必须忽略。
+
+    回归(2026-11-20): 重开 app 时文本框还显示上一次的问答。
+    """
+    ui = (ROOT / "ui/main.c").read_text(encoding="utf-8")
+    assert "first_status_seen" in ui
+    marker = ui.index("if (connected)")
+    assert ui.index("first_status_seen", marker) < ui.index("displayed_question", marker) + 200
+
+
 def test_running_pids_matches_by_name_not_exe_path():
     """UI 进程查找必须按 comm, 不能按 exe 完整路径。
 

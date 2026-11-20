@@ -230,7 +230,14 @@ int xr_ui_server_poll(xr_ui_server_t *server, unsigned int *volume) {
             server->status.question[0] = 0;
             server->status.answer[0] = 0;
         }
-        if (request.type == XR_UI_QUERY)
+        if (request.type == XR_UI_RESET) {
+            /* UI 进程刚启动, 主动声明新会话: 清掉上一轮问答文本。
+             * 不依赖"客户端消失多久"的时间阈值(快速重启 <3s 时旧文本
+             * 会残留, 2026-11-20 真板反馈)。 */
+            server->status.question[0] = 0;
+            server->status.answer[0] = 0;
+        }
+        if (request.type == XR_UI_QUERY || request.type == XR_UI_RESET)
         {
             ssize_t sent = sendto(server->descriptor, &server->status, sizeof(server->status),
                                   MSG_DONTWAIT | MSG_NOSIGNAL, (struct sockaddr *)&peer,

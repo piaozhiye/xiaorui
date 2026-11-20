@@ -45,7 +45,8 @@ int xr_ui_client_open(const char *path) {
 }
 
 int xr_ui_client_command(enum xr_ui_message_type type, unsigned int value) {
-    if (descriptor < 0 || (type != XR_UI_QUERY && type != XR_UI_VOLUME && type != XR_UI_STOP))
+    if (descriptor < 0 || (type != XR_UI_QUERY && type != XR_UI_VOLUME &&
+                           type != XR_UI_STOP && type != XR_UI_RESET))
         return -1;
     if (type == XR_UI_VOLUME && (value < 10 || value > 100))
         return -1;

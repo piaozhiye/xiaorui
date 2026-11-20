@@ -119,6 +119,35 @@ def query_status(interface, server, path, peer=None):
         return Message.from_buffer_copy(handle.recv(8192))
 
 
+def test_reset_message_clears_previous_conversation(interface, tmp_path):
+    """UI 启动时发的 XR_UI_RESET 必须清掉上一轮文本。
+
+    回归(2026-11-20): 原来靠'客户端断过 3 秒'判定新会话, UI 快速重启
+    (<3s)时旧文本残留在文本框里。改成 UI 主动发 RESET 信令。
+    """
+    path = tmp_path / "private" / "voice.sock"
+    server = interface.xr_ui_server_open(os.fsencode(path))
+    try:
+        # 先建立客户端并放入上一轮文本
+        query_status(interface, server, path)
+        interface.xr_ui_server_text(server, True, "上一轮问题".encode())
+        interface.xr_ui_server_text(server, False, "上一轮回答".encode())
+        assert query_status(interface, server, path).question.decode() == "上一轮问题"
+        # UI 重启 -> 发 RESET -> 清空
+        volume = ctypes.c_uint()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as peer:
+            peer.bind(b"\0xr-test-reset")
+            peer.settimeout(0.5)
+            peer.sendto(bytes(Message(magic=0x58525549, version=1,
+                                      type=5)), str(path))
+            assert interface.xr_ui_server_poll(server, ctypes.byref(volume)) == 0
+            status = Message.from_buffer_copy(peer.recv(8192))
+        assert status.question == b""
+        assert status.answer == b""
+    finally:
+        interface.xr_ui_server_close(server)
+
+
 def test_new_client_clears_previous_conversation(interface, tmp_path):
     """新客户端接入 = 会话重来: 清掉上一轮问答(UI 重启后别显示旧内容)。
 

@@ -45,6 +45,8 @@ static lv_obj_t *eyes[2];
 static bool settings_visible;
 static bool demo;
 static bool connected;
+/* 连上后的第一帧 STATUS 是上一轮残留, 忽略(见 refresh 里的说明) */
+static bool first_status_seen;
 static bool fonts_ready;
 static bool answer_follow = true;
 static bool exit_armed;
@@ -477,6 +479,14 @@ static void refresh(lv_timer_t *timer) {
     }
     if (connected)
     {
+        /* ★ UI 刚连上时的第一帧 STATUS 里是"上一轮"的问答(前端还没来
+         *   得及清空), 忽略这一帧, 文本框保持占位符。RESET 信令已让
+         *   前端清空, 但网关若紧接着又发事件会把文本填回来 —— 这层
+         *   兜底保证"重开 app 时文本框一定是干净的"(2026-11-20)。 */
+        if (!first_status_seen)
+            first_status_seen = true;
+        else
+        {
         if (strcmp(displayed_question, status->question))
         {
             memcpy(displayed_question, status->question, sizeof(displayed_question));
@@ -491,6 +501,7 @@ static void refresh(lv_timer_t *timer) {
             if (!displayed_answer[0])
                 answer_follow = true;   /* 新一轮: 重新从头跟随 */
             scroll_answer_to_bottom();
+        }
         }
         if (((int)status->volume != displayed_volume ||
              lv_slider_get_value(volume_slider) != (int)status->volume) &&
@@ -640,6 +651,10 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[ui] cannot initialize IPC client\n");
         goto cleanup;
     }
+    /* ★ 启动即通知前端"新会话开始": 清掉上一轮问答文本(2026-11-20
+     *   用户反馈, 快速重启时旧内容残留在文本框里)。不依赖时间阈值。 */
+    if (!snapshot && !demo && xr_ui_client_reset() != 0)
+        fprintf(stderr, "[ui] IPC reset 未送达(前端可能还没起, 不影响显示)\n");
     struct sigaction action = {.sa_handler = on_signal};
     sigemptyset(&action.sa_mask);
     if (sigaction(SIGINT, &action, NULL) != 0 ||
