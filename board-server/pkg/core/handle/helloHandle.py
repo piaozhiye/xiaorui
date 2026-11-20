@@ -73,9 +73,13 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
 # 模块级去重: 10 分钟内多次连接(停歌重连/断线重连)不重复打扰。
 _LAST_WELCOME = 0.0
 _WELCOME_INTERVAL = 600
+# TTS 冷启动合成要 30s+(模型加载到 NPU), 15s 的 ttl 必然超时;
+# 延迟重试是第二次机会(前端连上后不会重连, hello 只来一次)。
+_WELCOME_TTL = 90
+_WELCOME_RETRY_DELAY = 25.0
 
 
-async def _maybe_welcome(conn: "ConnectionHandler"):
+async def _maybe_welcome(conn: "ConnectionHandler", _retry: bool = False):
     global _LAST_WELCOME
     # 双网关部署时两腿各有独立去重, 不加门会播两遍问候 -- 只让云端腿(8001)播;
     # 无 XR_ROLE 的传统单网关部署保持原行为.
@@ -86,7 +90,6 @@ async def _maybe_welcome(conn: "ConnectionHandler"):
     now = _time.monotonic()
     if now - _LAST_WELCOME < _WELCOME_INTERVAL:
         return
-    _LAST_WELCOME = now
     try:
         from core.handle.timeIntent import spoken_now
         from core.handle.intentHandler import speak_txt
@@ -96,10 +99,32 @@ async def _maybe_welcome(conn: "ConnectionHandler"):
         period = now_s.replace("现在是", "", 1)[:2]   # 下午/早上/晚上...
         from core.session_coordinator import coordinator
         delivered = await coordinator(conn).request(
-            f"{period}好，{now_s}，小瑞已经准备好了", priority=10, ttl=15)
+            f"{period}好，{now_s}，小瑞已经准备好了", priority=10,
+            ttl=_WELCOME_TTL)
+        # ★ 只有真的播出去才记去重(2026-11-20 真板反馈: 网关重启后
+        #   TTS 模型还在加载, 投失败; 旧实现"先打标记后投递", 于是这轮
+        #   失败之后 10 分钟内都不再尝试 —— 表现成"重启后没有问候音")。
+        #   失败/异常都不记, 下一次连接还会再试。
+        if delivered:
+            _LAST_WELCOME = now
+        elif not _retry:
+            # 前端不会重连, hello 只来一次 —— 这一轮失败就是没问候,
+            # 安排一次延迟重试(最多一次, 不递归)。
+            asyncio.create_task(_welcome_retry(conn))
         conn.logger.bind(tag=__name__).info(f"欢迎语 delivered={delivered}: {period}好")
     except Exception as e:
         conn.logger.bind(tag=__name__).warning(f"欢迎语失败: {e}")
+        if not _retry:
+            asyncio.create_task(_welcome_retry(conn))
+
+
+async def _welcome_retry(conn: "ConnectionHandler"):
+    import asyncio as _aio
+    await _aio.sleep(_WELCOME_RETRY_DELAY)
+    try:
+        await _maybe_welcome(conn, _retry=True)
+    except Exception:
+        pass
 
 
 async def checkWakeupWords(conn: "ConnectionHandler", text):
