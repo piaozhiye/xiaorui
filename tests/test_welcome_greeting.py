@@ -40,7 +40,7 @@ class _Conn:
 @pytest.fixture(autouse=True)
 def _reset_state(monkeypatch):
     monkeypatch.delenv("XR_ROLE", raising=False)
-    monkeypatch.setattr(helloHandle, "_LAST_WELCOME", 0.0)
+    monkeypatch.setattr(helloHandle, "_LAST_WELCOME", float("-inf"))
     monkeypatch.setattr(
         "core.handle.timeIntent.spoken_now", lambda: "现在是下午三点零五分"
     )
@@ -69,6 +69,17 @@ class _Coordinator:
         return await self._request(self, text, priority=priority, ttl=ttl)
 
 
+def test_first_welcome_is_not_suppressed_right_after_boot():
+    """开机后 monotonic 很小时首次问候不能被去重吞掉。
+
+    回归(2026-11-20): _LAST_WELCOME 初值 0.0 + monotonic 从系统启动算,
+    开机十几秒时 `now - 0 < 600` 直接吞掉首次问候。
+    """
+    source = Path(helloHandle.__file__).read_text(encoding="utf-8")
+    assert '_LAST_WELCOME = float("-inf")' in source
+    assert helloHandle._LAST_WELCOME == float("-inf")
+
+
 def test_welcome_is_played_when_delivery_succeeds(monkeypatch):
     calls = _patch_request(monkeypatch, delivered=True)
     asyncio.run(helloHandle._maybe_welcome(_Conn()))
@@ -82,14 +93,14 @@ def test_failed_delivery_does_not_block_future_attempts(monkeypatch):
     calls = _patch_request(monkeypatch, delivered=False)
     asyncio.run(helloHandle._maybe_welcome(_Conn()))
     assert len(calls) == 1
-    assert helloHandle._LAST_WELCOME == 0.0
+    assert helloHandle._LAST_WELCOME == float("-inf")
 
 
 def test_exception_does_not_block_future_attempts(monkeypatch):
     calls = _patch_request(monkeypatch, delivered=False, boom=True)
     asyncio.run(helloHandle._maybe_welcome(_Conn()))
     assert len(calls) == 1
-    assert helloHandle._LAST_WELCOME == 0.0
+    assert helloHandle._LAST_WELCOME == float("-inf")
 
 
 def test_successful_welcome_suppresses_repeat_within_interval(monkeypatch):

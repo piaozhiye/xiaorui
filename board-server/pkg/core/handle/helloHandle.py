@@ -71,7 +71,11 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
 # 欢迎语(2026-10-16): 开机/重连的时段问候, 复用 announce 主动播报通道
 # (定时器已验证: 客户端空闲期只认 announce, 裸 TTS 音频会被丢弃)。
 # 模块级去重: 10 分钟内多次连接(停歌重连/断线重连)不重复打扰。
-_LAST_WELCOME = 0.0
+# ★ 初值必须是 -inf, 不能是 0.0(2026-11-20 开机无问候根因):
+#   time.monotonic() 是从**系统启动**算的, 板子刚开机时只有十几秒,
+#   若初值为 0.0 则 `now - 0 < 600` 会把首次问候当成"10 分钟内刚播过"
+#   直接吞掉(且不打任何日志)。-inf 保证开机后第一次一定通过去重。
+_LAST_WELCOME = float("-inf")
 _WELCOME_INTERVAL = 600
 # TTS 冷启动合成要 30s+(模型加载到 NPU), 15s 的 ttl 必然超时;
 # 延迟重试是第二次机会(前端连上后不会重连, hello 只来一次)。
