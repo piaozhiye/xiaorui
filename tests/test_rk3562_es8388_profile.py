@@ -103,6 +103,18 @@ if "test -f /data/xiaorui/.rk3562-es8388-profile" in cmd:
     raise SystemExit(0 if os.environ["GUARD_MARKED"] == "1" else 1)
 if "[ -e /etc/asound.conf ]" in cmd:
     raise SystemExit(0 if os.environ["GUARD_OCCUPIED"] == "1" else 1)
+# 回滚前运行状态采样(review I-4): 默认"在跑"保持既有测试行为,
+# 置 0 可测"未运行保持停止"分支。
+# 等待循环命令(含 while)恒返回 0: 它的退出码由循环内 pgrep 决定,
+# 但那不是"进程在不在"的语义 —— 采样/验证用的裸 pgrep 才看开关。
+if "pgrep -x xiaorui_ui" in cmd:
+    if "while" in cmd:
+        raise SystemExit(0)
+    raise SystemExit(0 if os.environ.get("GUARD_UI_RUNNING", "1") == "1" else 1)
+if "pgrep -x weston" in cmd:
+    if "while" in cmd:
+        raise SystemExit(0)
+    raise SystemExit(0 if os.environ.get("GUARD_WESTON_RUNNING", "1") == "1" else 1)
 raise SystemExit(0)
 ''')
     adb.chmod(0o755)
@@ -1222,6 +1234,12 @@ def test_rollback_stops_ui_before_restoring_files(tmp_path, monkeypatch):
     push_idx = next(i for i, c in enumerate(commands)
                     if "push" in c and c[-1] == "/data/xiaorui-ui/xiaorui_ui")
     assert stop_idx < push_idx
+    # pkill 后必须等 UI 真正退出(review I-3): SIGTERM 到退出有窗口,
+    # 不等就恢复二进制仍可能 Text file busy 中断整段回滚。
+    wait_idx = next(i for i, c in enumerate(commands)
+                    if "shell" in c and "while" in c[-1]
+                    and "pgrep -x xiaorui_ui" in c[-1])
+    assert stop_idx < wait_idx < push_idx
 
 
 def test_rollback_restarts_weston_and_ui_when_they_were_running(tmp_path, monkeypatch):
@@ -1231,8 +1249,10 @@ def test_rollback_restarts_weston_and_ui_when_they_were_running(tmp_path, monkey
     files = backup / "files"
     files.mkdir(parents=True)
     (files / "etc__xdg__weston__weston.ini").write_text("[core]\n")
+    (files / "data__xiaorui-ui__xiaorui_ui").write_text("#!/bin/sh\n")
     (backup / "manifest").write_text(
         "PRESENT\t/etc/xdg/weston/weston.ini\tetc__xdg__weston__weston.ini\t644\n"
+        "PRESENT\t/data/xiaorui-ui/xiaorui_ui\tdata__xiaorui-ui__xiaorui_ui\t755\n"
     )
     result = subprocess.run(
         ["bash", str(ES8388 / "rollback.sh"), "fake-serial", str(backup)],
@@ -1285,3 +1305,58 @@ def test_deploy_requires_ui_build_before_touching_the_board(
     assert "ui/build.sh" in result.stderr
     # 失败必须发生在写板之前: 不允许任何 push
     assert not [c for c in adb_commands(log) if "push" in c]
+
+
+def test_rollback_keeps_ui_and_weston_stopped_when_not_running(tmp_path, monkeypatch):
+    """回滚前 UI/weston 没在跑: 回滚后必须保持停止, 不许顺手拉起。"""
+    monkeypatch.setenv("GUARD_UI_RUNNING", "0")
+    monkeypatch.setenv("GUARD_WESTON_RUNNING", "0")
+    log = install_guard_adb(tmp_path, monkeypatch, profile_marked=True)
+    backup = tmp_path / "backup-not-running"
+    files = backup / "files"
+    files.mkdir(parents=True)
+    (files / "data__xiaorui-ui__xiaorui_ui").write_text("#!/bin/sh\n")
+    (backup / "manifest").write_text(
+        "PRESENT\t/data/xiaorui-ui/xiaorui_ui\tdata__xiaorui-ui__xiaorui_ui\t755\n"
+    )
+    result = subprocess.run(
+        ["bash", str(ES8388 / "rollback.sh"), "fake-serial", str(backup)],
+        capture_output=True, text=True, check=False, timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    shell_commands = [c[-1] for c in adb_commands(log) if c and "shell" in c]
+    assert not any("S49weston restart" in c for c in shell_commands)
+    assert not any("S99xiaorui-ui restart" in c for c in shell_commands)
+    assert not any("run.sh" in c for c in shell_commands)
+    assert "保持停止状态" in result.stdout
+
+
+def test_rollback_does_not_revive_ui_removed_by_rollback(tmp_path, monkeypatch):
+    """首装失败回滚: UI 是部署新建(manifest ABSENT), 部署期间跑过也不能拉回。
+
+    回归(review I-1): 只看"部署期间跑过"就去拉回, 而 run.sh 已被回滚
+    移除 —— 拉回静默失败, 甚至误报 FAILURES 让回滚以失败收场。
+    """
+    log = install_guard_adb(tmp_path, monkeypatch, profile_marked=True)  # UI 在跑
+    backup = tmp_path / "backup-ui-absent"
+    files = backup / "files"
+    files.mkdir(parents=True)
+    (backup / "manifest").write_text(
+        "ABSENT\t/data/xiaorui-ui/xiaorui_ui\tdata__xiaorui-ui__xiaorui_ui\t-\n"
+    )
+    result = subprocess.run(
+        ["bash", str(ES8388 / "rollback.sh"), "fake-serial", str(backup)],
+        capture_output=True, text=True, check=False, timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    shell_commands = [c[-1] for c in adb_commands(log) if c and "shell" in c]
+    assert not any("S99xiaorui-ui restart" in c for c in shell_commands)
+    assert not any("run.sh" in c for c in shell_commands)
+    assert "保持移除" in result.stdout
+
+
+def test_rollback_verifies_graphical_stack_after_restart():
+    """weston/UI 重启后必须 pgrep 验证: setsid & 后台命令返回值恒 0。"""
+    script = (ES8388 / "rollback.sh").read_text()
+    assert "weston 重启后未运行" in script
+    assert "UI 拉回后未运行" in script

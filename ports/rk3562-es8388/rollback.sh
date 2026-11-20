@@ -119,7 +119,8 @@ done
 # 用来在真机上先确认"这次回滚到底会动哪些东西"。
 if [ "$DRY_RUN" = "1" ]; then
     echo "== dry-run: 只校验并打印计划, 不停服务、不改板 (serial=$SERIAL) =="
-    echo "== 计划: 停止本 profile 的 xiaorui_live / llm_rkllm.py / server/app.py =="
+    echo "== 计划: 停止本 profile 的 xiaorui_ui / xiaorui_live / llm_rkllm.py / server/app.py, == "
+    echo "==        并按回滚前运行状态重启 weston(如在跑)与 UI(且文件未被移除) =="
     if $ADB shell 'pgrep -x xiaorui_live >/dev/null 2>&1'; then
         echo "  当前前端在运行 -> 回滚后会自动拉起板内栈与前端"
     else
@@ -191,8 +192,15 @@ $ADB shell 'pkill -f "rock/[a]sr_helper.py" 2>/dev/null || true'
 $ADB shell 'pkill -f "rock/[t]ts_helper.py" 2>/dev/null || true'
 # 等前端真的退出: 它还在的时候 init 脚本不会拉新的, 结果谁也没在跑。
 $ADB shell 'i=0; while [ $i -lt 60 ] && pgrep -x xiaorui_live >/dev/null 2>&1; do sleep 0.5 2>/dev/null || sleep 1; i=$((i+1)); done'
+# 等 UI 退出(review 自查): SIGTERM 到真正退出有窗口, 不等就恢复
+# 二进制仍可能 Text file busy 中断整段回滚 —— 与前端等待同构。
+$ADB shell 'i=0; while [ $i -lt 30 ] && pgrep -x xiaorui_ui >/dev/null 2>&1; do sleep 0.5 2>/dev/null || sleep 1; i=$((i+1)); done'
 
 echo "== 按 manifest 恢复配置文件 =="
+# UI 二进制在回滚后是否仍存在(review I-1): PRESENT=恢复过; ABSENT=
+# 部署新建、回滚移除。重启门控要用它 —— 只知道"部署期间跑过"不够,
+# 首装失败回滚时 UI 正是被移除的东西, 不能再去拉回。
+UI_PRESENT_AFTER_ROLLBACK=0
 for line in "${MANIFEST_LINES[@]}"; do
     split_manifest_line "$line"
     [ -n "${remote:-}" ] || continue
@@ -215,6 +223,7 @@ for line in "${MANIFEST_LINES[@]}"; do
                 esac
                 $ADB shell "chmod $mode '$remote'" </dev/null
             fi
+            [ "$remote" = "/data/xiaorui-ui/xiaorui_ui" ] && UI_PRESENT_AFTER_ROLLBACK=1
             echo "恢复: $remote"
             ;;
         ABSENT)
@@ -312,27 +321,40 @@ fi
 
 # weston: 回滚恢复的 weston.ini 只有重启才生效(deploy 同理); 之前没跑
 # 就不动 —— 回滚不该改变"图形栈没起"这个回滚前状态。
+# 重启后必须 pgrep 验证(review I-2): setsid & 后台的命令返回值恒 0,
+# 早期写法的 "|| FAILURES" 是死代码 —— weston 没起来照样报"回滚完成"。
 if [ "$WESTON_WAS_RUNNING" = "1" ]; then
     echo "== 重启 weston (回滚前在运行, 恢复的 weston.ini 生效) =="
     if ! $ADB shell '/etc/init.d/S49weston restart' </dev/null >/dev/null 2>&1; then
-        $ADB shell 'kill $(pgrep -x weston) 2>/dev/null; sleep 2; setsid /usr/bin/weston >/dev/null 2>&1 </dev/null &' </dev/null \
-            || { echo "!! weston 重启失败，请手工排查" >&2
-                 FAILURES=$((FAILURES + 1)); }
+        $ADB shell 'kill $(pgrep -x weston) 2>/dev/null; sleep 2; setsid /usr/bin/weston >/dev/null 2>&1 </dev/null &' </dev/null
+    fi
+    sleep 2
+    if ! $ADB shell 'pgrep -x weston >/dev/null 2>&1'; then
+        echo "!! weston 重启后未运行，请手工排查" >&2
+        FAILURES=$((FAILURES + 1))
     fi
 fi
-# UI: 回滚前在跑就拉回来, 与前端拉回同一待遇
-if [ "$UI_WAS_RUNNING" = "1" ]; then
-    echo "== 拉回 UI (回滚前在运行) =="
-    if $ADB shell 'test -x /etc/init.d/S99xiaorui-ui' >/dev/null 2>&1; then
+# UI: 回滚前在跑**且**回滚后文件仍存在(manifest PRESENT)才拉回。
+# 只看"部署期间跑过"不够(review I-1): 首装失败回滚时 UI 文件正是
+# 被 ABSENT 移除的对象, 拉回一个已删除的 run.sh 只会静默失败,
+# 甚至误计 FAILURES 让回滚报错。
+if [ "$UI_WAS_RUNNING" = "1" ] && [ "$UI_PRESENT_AFTER_ROLLBACK" = "1" ]; then
+    echo "== 拉回 UI (回滚前在运行, 且回滚后文件仍存在) =="
+    if $ADB shell 'test -f /etc/init.d/S99xiaorui-ui' >/dev/null 2>&1; then
         if ! $ADB shell 'sh /etc/init.d/S99xiaorui-ui restart' </dev/null >/dev/null 2>&1; then
             echo "!! UI 重启失败，请手工执行: adb -s $SERIAL shell 'sh /etc/init.d/S99xiaorui-ui restart'" >&2
             FAILURES=$((FAILURES + 1))
         fi
     else
-        $ADB shell 'setsid /data/xiaorui-ui/run.sh >/data/xiaorui-ui/ui.log 2>&1 </dev/null &' </dev/null \
-            || { echo "!! UI 拉起失败，请手工排查" >&2
-                 FAILURES=$((FAILURES + 1)); }
+        $ADB shell 'setsid sh /data/xiaorui-ui/run.sh >/data/xiaorui-ui/ui.log 2>&1 </dev/null &' </dev/null
     fi
+    sleep 2
+    if ! $ADB shell 'pgrep -x xiaorui_ui >/dev/null 2>&1'; then
+        echo "!! UI 拉回后未运行，请手工排查" >&2
+        FAILURES=$((FAILURES + 1))
+    fi
+elif [ "$UI_WAS_RUNNING" = "1" ]; then
+    echo "== UI 为本次部署新建(回滚已移除)，保持移除 =="
 else
     echo "== 回滚前 UI 未运行，保持停止状态 =="
 fi

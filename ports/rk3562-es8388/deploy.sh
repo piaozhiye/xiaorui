@@ -56,6 +56,12 @@ VAD_MODEL="${XR_SILERO_VAD_MODEL:-$REPO/models/snakers4_silero-vad/src/silero_va
 MINIFORGE="${XR_MINIFORGE:-$REPO/board-server/miniforge.sh}"
 WHEELS="${XR_GATEWAY_WHEELS:-$REPO/board-server/wheels314}"
 RKLLM_MODEL="${XR_RKLLM_MODEL:-$REPO/models/qwen2.5-0.5b-instruct-rk3562-w8a8.rkllm}"
+# UI 必选组件的四个本地源(review Minor-3): 前置检查与安装段共用同一
+# 来源, 避免"检查一份路径、安装另一份"漂移后静默重开 P2 矛盾。
+UI_BIN="$REPO/ui/build/aarch64/xiaorui_ui"
+UI_LIB="$REPO/ui/build/aarch64/lib/liblvgl.so"
+UI_RUN="$REPO/ui/run.sh"
+UI_INIT="$REPO/ports/rk3562/S99xiaorui-ui"
 
 
 # 传输断掉时后面的 shell 查询会静默失败, 容易被误判成"板子上没有这些文件"。
@@ -141,10 +147,7 @@ done
 # UI 是本 profile 必选组件(review 2026-11-20): 安装段曾允许"未构建
 # 可跳过", 但验收段无条件要求 UI 存在 —— 干净板必然 die 在验收、留下
 # 半成品。必须在写板之前就失败并给出构建指引。
-for f in "$REPO/ui/build/aarch64/xiaorui_ui" \
-         "$REPO/ui/build/aarch64/lib/liblvgl.so" \
-         "$REPO/ui/run.sh" \
-         "$REPO/ports/rk3562/S99xiaorui-ui"; do
+for f in "$UI_BIN" "$UI_LIB" "$UI_RUN" "$UI_INIT"; do
     [ -f "$f" ] || die "UI 未构建: 缺 $f — 先跑 ui/build.sh aarch64(本 profile 必选)"
 done
 
@@ -417,10 +420,10 @@ $ADB push "$DIR/weston.ini" /etc/xdg/weston/weston.ini >/dev/null || die "推送
 # UI 二进制 + LVGL 运行时 + 启动脚本(S99 装好即开机自启)
 # 必选(前置资源检查已 die 未构建场景), 不再有"跳过"分支。
 $ADB shell 'mkdir -p /data/xiaorui-ui/lib'
-$ADB push "$REPO/ui/build/aarch64/xiaorui_ui" /data/xiaorui-ui/xiaorui_ui >/dev/null || die "推送 UI 二进制失败"
-$ADB push "$REPO/ui/build/aarch64/lib/liblvgl.so" /data/xiaorui-ui/lib/liblvgl.so >/dev/null || die "推送 LVGL 运行时失败"
-$ADB push "$REPO/ui/run.sh" /data/xiaorui-ui/run.sh >/dev/null || die "推送 UI 启动脚本失败"
-$ADB push "$REPO/ports/rk3562/S99xiaorui-ui" /etc/init.d/S99xiaorui-ui >/dev/null || die "推送 UI init 脚本失败"
+$ADB push "$UI_BIN" /data/xiaorui-ui/xiaorui_ui >/dev/null || die "推送 UI 二进制失败"
+$ADB push "$UI_LIB" /data/xiaorui-ui/lib/liblvgl.so >/dev/null || die "推送 LVGL 运行时失败"
+$ADB push "$UI_RUN" /data/xiaorui-ui/run.sh >/dev/null || die "推送 UI 启动脚本失败"
+$ADB push "$UI_INIT" /etc/init.d/S99xiaorui-ui >/dev/null || die "推送 UI init 脚本失败"
 $ADB shell 'chmod +x /data/xiaorui-ui/xiaorui_ui /data/xiaorui-ui/run.sh /etc/init.d/S99xiaorui-ui'
 # LVGL 运行时依赖 libfreetype.so.6(板上没有就 load 失败, 只有 ui.log 一行)
 $ADB shell 'test -f /usr/lib/libfreetype.so.6 || test -f /lib/libfreetype.so.6' \
