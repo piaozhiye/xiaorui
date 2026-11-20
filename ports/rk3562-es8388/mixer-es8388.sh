@@ -64,8 +64,17 @@ set_switch "Speaker" on
 set_switch "spk switch" on
 set_control "Output 1 Playback Volume" 15
 set_control "Output 2 Playback Volume" 15
+# ★ DAC 数字音量 + bit7 解 mute(2026-11-20 实机事故):
+#   这个控件是**出声闸门** —— 值为 0 时整路 DAC 静音, 声卡流会卡在
+#   SETUP 状态不推进, 表现是"语音链路全对(ASR/LLM/TTS/字幕都对), 但喇叭
+#   一声不吭"。
+#   板上的 S42audio-es8388 也会设它(=184,184, 安卓对照板实测值), 但那是
+#   开机极早期跑的, 早于 codec 就绪, cset 失败被 >/dev/null 2>&1 吞掉,
+#   值就留在默认 0 —— **每次重启都会复发**, 而 S42 不在本仓管理范围内。
+#   所以这里(S98 跑, 晚于 S42 且前端启动之前)再设一遍, 幂等且失败即报错。
+set_control "PCM Volume" 184,184
 
 # 数字回环参考: 必须在开流之前设置(驱动不允许运行中改)
 set_dlp_mode
 
-echo "ES8388 mixer 就绪 (card$CARD): 麦 PGA=8(+24dB), 喇叭开, 输出=15/33(-21dB)"
+echo "ES8388 mixer 就绪 (card$CARD): 麦 PGA=8(+24dB), 喇叭开, 输出=15/33(-21dB), DAC=184(解mute)"

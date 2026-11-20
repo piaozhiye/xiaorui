@@ -541,3 +541,23 @@ def test_wire_lead_fits_alsa_card_buffer():
     assert card_ms >= lead_ms, (
         f"卡缓冲 {card_ms:.0f}ms < tts_lead_ms {lead_ms}ms: "
         f"lead 超出卡容量, 多余提前量堵在前端环")
+
+
+def test_es8388_mixer_sets_dac_volume_and_mic_pga():
+    """★ 2026-11-20 实机事故: ES8388 的 "PCM Volume" 是**出声闸门** ——
+    值为 0 时整路 DAC 静音, 声卡流卡在 SETUP 不推进, 表现是"语音链路
+    全对(ASR/LLM/TTS/字幕都对), 但喇叭一声不吭"。
+    板上的 S42audio-es8388 也会设它(=184,184), 但那是开机极早期跑的,
+    早于 codec 就绪, cset 失败被 >/dev/null 2>&1 吞掉 -> 值留在默认 0,
+    **每次重启都复发**; 而 S42 不在本仓管理范围内。
+    所以仓库的 mixer 脚本(S98 跑, 晚于 S42 且前端启动之前)必须兜住:
+      - 采集 PGA = 8(8 档每档 3dB = +24dB; 3 档差 7.6dB, 指令电平就
+        低于 VAD 门限 -> "喊得醒问不应")
+      - DAC PCM Volume = 184,184(安卓对照板实测值, bit7 解 mute)
+    """
+    mixer = (PORT.parent / "rk3562-es8388" / "mixer-es8388.sh").read_text(
+        encoding="utf-8")
+    assert '"Left Channel Capture Volume" 8' in mixer, \
+        "mixer 脚本必须把采集 PGA 设成 8 档(3 档差 7.6dB, 指令过不了 VAD 门)"
+    assert '"PCM Volume" 184,184' in mixer, \
+        "mixer 脚本必须设 DAC PCM Volume=184,184(0=静音, 流卡 SETUP 不出声)"
