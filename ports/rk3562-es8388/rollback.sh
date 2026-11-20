@@ -178,6 +178,14 @@ UI_WAS_RUNNING=0
 $ADB shell 'pgrep -x xiaorui_ui >/dev/null 2>&1' && UI_WAS_RUNNING=1
 WESTON_WAS_RUNNING=0
 $ADB shell 'pgrep -x weston >/dev/null 2>&1' && WESTON_WAS_RUNNING=1
+# 恢复前的 weston.ini 指纹: 恢复后比对, 一样就不重启图形栈 ——
+# 重启 weston = killall 整个图形栈 = 屏幕黑 1~3 秒(真板实测),
+# 回滚恢复的多半是同一份配置, 平白黑一次屏没有意义。
+WESTON_INI_MD5_BEFORE=""
+$ADB shell 'md5sum /etc/xdg/weston/weston.ini 2>/dev/null' \
+    </dev/null 2>/dev/null | tr -d '\r' | awk '{print $1}' > /tmp/.xr_weston_md5_before 2>/dev/null || true
+[ -f /tmp/.xr_weston_md5_before ] && WESTON_INI_MD5_BEFORE="$(cat /tmp/.xr_weston_md5_before)"
+rm -f /tmp/.xr_weston_md5_before
 # 只停本 profile 的进程: 按完整路径匹配 cmdline, 不像 pkill -f "[s]erver/app.py"
 # 那样命中板上任何一个 app.py。
 # ★ 模式串用字符类错开自身: adb shell '... pkill -f "/data/.../app.py" ...' 的
@@ -323,7 +331,18 @@ fi
 # 就不动 —— 回滚不该改变"图形栈没起"这个回滚前状态。
 # 重启后必须 pgrep 验证(review I-2): setsid & 后台的命令返回值恒 0,
 # 早期写法的 "|| FAILURES" 是死代码 —— weston 没起来照样报"回滚完成"。
-if [ "$WESTON_WAS_RUNNING" = "1" ]; then
+# ★ 配置没变就不重启: 重启 = killall 图形栈 = 屏幕黑 1~3 秒(真板实测)。
+WESTON_INI_CHANGED=0
+WESTON_INI_MD5_AFTER=""
+$ADB shell 'md5sum /etc/xdg/weston/weston.ini 2>/dev/null' \
+    </dev/null 2>/dev/null | tr -d '\r' | awk '{print $1}' > /tmp/.xr_weston_md5_after 2>/dev/null || true
+[ -f /tmp/.xr_weston_md5_after ] && WESTON_INI_MD5_AFTER="$(cat /tmp/.xr_weston_md5_after)"
+rm -f /tmp/.xr_weston_md5_after
+if [ -n "$WESTON_INI_MD5_BEFORE" ] && [ -n "$WESTON_INI_MD5_AFTER" ] \
+   && [ "$WESTON_INI_MD5_BEFORE" != "$WESTON_INI_MD5_AFTER" ]; then
+    WESTON_INI_CHANGED=1
+fi
+if [ "$WESTON_WAS_RUNNING" = "1" ] && [ "$WESTON_INI_CHANGED" = "1" ]; then
     echo "== 重启 weston (回滚前在运行, 恢复的 weston.ini 生效) =="
     # ★ 必须带超时(真板实测 2026-11-20): S49weston 的 restart 是
     #   killall + `while pgrep -x weston; sleep .1` 无限等, 且 weston
@@ -337,6 +356,8 @@ if [ "$WESTON_WAS_RUNNING" = "1" ]; then
         echo "!! weston 重启后未运行，请手工排查" >&2
         FAILURES=$((FAILURES + 1))
     fi
+elif [ "$WESTON_WAS_RUNNING" = "1" ]; then
+    echo "== weston.ini 与回滚前一致，不重启图形栈(避免黑屏) =="
 fi
 # UI: 回滚前在跑**且**回滚后文件仍存在(manifest PRESENT)才拉回。
 # 只看"部署期间跑过"不够(review I-1): 首装失败回滚时 UI 文件正是

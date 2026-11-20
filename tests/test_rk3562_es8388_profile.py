@@ -115,6 +115,21 @@ if "pgrep -x weston" in cmd:
     if "while" in cmd:
         raise SystemExit(0)
     raise SystemExit(0 if os.environ.get("GUARD_WESTON_RUNNING", "1") == "1" else 1)
+# weston.ini 指纹: 第一次(恢复前)与第二次(恢复后)可不同, 用于测
+# "配置没变就不重启图形栈"。默认不同 = 需要重启。
+if "md5sum /etc/xdg/weston/weston.ini" in cmd:
+    count_file = os.environ["GUARD_ADB_LOG"] + ".weston-md5-count"
+    count = 0
+    if os.path.exists(count_file):
+        with open(count_file) as handle:
+            count = int((handle.read().strip() or "0"))
+    with open(count_file, "w") as handle:
+        handle.write(str(count + 1))
+    digest = (os.environ.get("GUARD_WESTON_MD5_FIRST", "before-digest")
+              if count == 0 else
+              os.environ.get("GUARD_WESTON_MD5_SECOND", "after-digest"))
+    print(digest + "  /etc/xdg/weston/weston.ini")
+    raise SystemExit(0)
 raise SystemExit(0)
 ''')
     adb.chmod(0o755)
@@ -1379,3 +1394,17 @@ def test_graphical_stack_adb_calls_are_timeout_guarded():
     weston_idx = rollback.index("S49weston restart")
     ui_idx = rollback.index("S99xiaorui-ui restart")
     assert weston_idx < ui_idx
+
+
+def test_rollback_skips_weston_restart_when_ini_is_unchanged():
+    """恢复的 weston.ini 与板上当前相同就不重启图形栈。
+
+    重启 weston = killall 整个图形栈 = 屏幕黑 1~3 秒(真板实测)。
+    回滚恢复的多半是同一份配置, 平白黑一次屏没有意义。
+    """
+    rollback = (ES8388 / "rollback.sh").read_text()
+    assert "md5sum /etc/xdg/weston/weston.ini" in rollback
+    assert "WESTON_INI_CHANGED" in rollback
+    # 重启条件必须同时依赖"之前在跑"和"配置真的变了"
+    assert '[ "$WESTON_WAS_RUNNING" = "1" ]' in rollback
+    assert '[ "$WESTON_INI_CHANGED" = "1" ]' in rollback
