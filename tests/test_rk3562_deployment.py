@@ -1,3 +1,4 @@
+import configparser
 import importlib.util
 import io
 import json
@@ -475,17 +476,48 @@ def test_es8388_weston_pins_native_portrait_mode():
     收到尺寸不符直接退出 -> 界面全黑, 而语音链路完全正常(极难定位)。
     部署必须带 mode=1080x1920, 且不能用 transform 绕(transform=90 在
     本板 weston 16 被判 Invalid)。
+
+    ★ 用 configparser 解析而不是子串匹配: 子串匹配会被注释里的同名字符串
+      骗过 —— 评审实测三个变异(删 mode 行 / 把 mode 挪进 [core] / 删掉
+      deploy 里的 push 行)都能通过子串版断言, 等于制造虚假信心。
     """
-    ini = (PORT.parent / "rk3562-es8388" / "weston.ini").read_text(encoding="utf-8")
-    assert "name=DSI-1" in ini, "weston.ini 缺少 DSI-1 输出配置"
-    assert "mode=1080x1920" in ini, "weston.ini 必须指定面板原生竖屏 mode"
-    active = [line.strip() for line in ini.splitlines()
+    ini_path = PORT.parent / "rk3562-es8388" / "weston.ini"
+    parser = configparser.ConfigParser()
+    parser.read_string(ini_path.read_text(encoding="utf-8"))
+    assert "output" in parser, "weston.ini 缺少 [output] 段(会挑到横置 mode)"
+    assert parser["output"].get("name") == "DSI-1", \
+        f"[output] name 应为 DSI-1, 实际 {parser['output'].get('name')!r}"
+    assert parser["output"].get("mode") == "1080x1920", \
+        f"[output] mode 应为 1080x1920(面板原生竖屏), 实际 {parser['output'].get('mode')!r}"
+    # 生效行里不许有 transform(本板 weston 16 判 Invalid, 且不交换逻辑几何)
+    active = [line.strip() for line in ini_path.read_text(encoding="utf-8").splitlines()
               if line.strip() and not line.strip().startswith("#")]
-    assert not any(line.startswith("transform=") for line in active), \
+    assert not any(line.startswith("transform") for line in active), \
         "不要用 transform 旋转: 本板 weston 16 不认 transform=90"
-    deploy = (PORT.parent / "rk3562-es8388" / "deploy.sh").read_text(encoding="utf-8")
-    assert "weston.ini" in deploy, "deploy.sh 必须推送 weston.ini"
-    assert "S99xiaorui-ui" in deploy, "deploy.sh 必须装 UI 启动脚本"
+    # deploy 必须真的执行 push(注释里出现同样字符串不算)
+    deploy_lines = (PORT.parent / "rk3562-es8388" / "deploy.sh").read_text(
+        encoding="utf-8").splitlines()
+    pushed = [l for l in deploy_lines
+              if l.strip().startswith("$ADB push") and "weston.ini" in l]
+    assert pushed, "deploy.sh 必须有实际执行的 $ADB push ... weston.ini"
+    assert any(l.strip().startswith("$ADB push") and "S99xiaorui-ui" in l
+               for l in deploy_lines), "deploy.sh 必须有实际执行的 S99xiaorui-ui push"
+    # 推完必须让 weston/UI 真正生效: 重启命令不能只在注释里
+    assert any("S49weston" in l and not l.strip().startswith("#")
+               for l in deploy_lines), "deploy.sh 推完 weston.ini 必须重启 weston"
+    assert any("S99xiaorui-ui" in l and "restart" in l and not l.strip().startswith("#")
+               for l in deploy_lines), "deploy.sh 推完 UI 必须重启 UI"
+
+
+def test_ui_start_script_uses_f_not_x_for_data_binary():
+    """★ 2026-11-20: /data 执行位重启即丢(第三次踩)。UI 二进制检查必须
+    是 -f, 且要**正向**断言(只断言"没有 -x"的话, 整个检查被删掉也过)。
+    """
+    ui99 = (PORT / "S99xiaorui-ui").read_text(encoding="utf-8")
+    assert '-f "$directory/xiaorui_ui"' in ui99, \
+        "S99xiaorui-ui 必须正向断言 UI 二进制用 -f 检查(/data 执行位重启会丢)"
+    assert '-x "$directory/xiaorui_ui"' not in ui99, \
+        "UI 二进制检查不能是 -x(/data 执行位重启会丢)"
 
 
 def test_wire_lead_fits_alsa_card_buffer():

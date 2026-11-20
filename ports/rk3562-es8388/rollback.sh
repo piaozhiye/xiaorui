@@ -25,7 +25,10 @@ done
 ADB="adb -s $SERIAL"
 allowed_file() {
     case "$1" in
-        /etc/asound.conf|/etc/init.d/S98xiaorui|/data/mixer-es8388.sh|\
+        /etc/asound.conf|/etc/init.d/S98xiaorui|/etc/init.d/S99xiaorui-ui|\
+        /etc/xdg/weston/weston.ini|/data/mixer-es8388.sh|\
+        /data/xiaorui-ui/xiaorui_ui|/data/xiaorui-ui/run.sh|\
+        /data/xiaorui-ui/lib/liblvgl.so|\
         /data/xiaorui/xiaorui.env|/data/xiaorui/start-frontend.sh|\
         /data/xiaorui/board-time.sh|/data/xiaorui/.rk3562-es8388-profile|\
         /data/xiaorui/.rk3562-es8388-state|/data/xiaorui-server/xiaorui_volume|\

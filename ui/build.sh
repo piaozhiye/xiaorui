@@ -14,6 +14,14 @@ case "$mode" in
         lvgl_library="${XR_LVGL_LIBRARY:-$lvgl_root/lib/aarch64/liblvgl.so}"
         protocol="${XR_XDG_SHELL_XML:-$sysroot/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml}"
         wayland_library="${XR_WAYLAND_LIBRARY:?Set XR_WAYLAND_LIBRARY to target libwayland-client.so.0}"
+        # ★ XR_WAYLAND_LIBRARY 必须指向 **wayland >= 1.20** 的库: 1.20 引入
+        #   wl_proxy_marshal_flags, 旧版链接会报 undefined reference。
+        #   toolchain 的 sysroot 自带的是旧版, 直接用它构建会失败; 从板上拉
+        #   一份最省事(板上的版本必然能跑 UI):
+        #     adb pull /usr/lib/libwayland-client.so.0 /tmp/wayland/
+        #     XR_WAYLAND_LIBRARY=/tmp/wayland/libwayland-client.so.0 bash ui/build.sh aarch64
+        #   2026-11-20 实测: 用 sysroot 的旧库 -> undefined reference to
+        #   'wl_proxy_marshal_flags'; 用板上拉下来的库 -> 构建通过。
         flags=(-march=armv8-a -Wl,--allow-shlib-undefined)
         export LD_LIBRARY_PATH="$toolchain/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
         ;;
@@ -30,6 +38,13 @@ esac
 for resource in "$lvgl_root/include/lvgl/lvgl.h" "$lvgl_library" "$protocol"; do
     [ -f "$resource" ] || { echo "missing dependency: $resource" >&2; exit 2; }
 done
+# PC 侧的 wayland 头文件也要在(生成绑定要用 wayland-scanner + 头文件);
+# 缺了应该报"missing dependency", 而不是后面 cp 报一堆费解的错误。
+for header in /usr/include/wayland-client.h /usr/include/wayland-util.h; do
+    [ -f "$header" ] || { echo "missing dependency: $header (装 wayland 客户端开发头)" >&2; exit 2; }
+done
+command -v wayland-scanner >/dev/null 2>&1 \
+    || { echo "missing dependency: wayland-scanner (装 wayland 工具)" >&2; exit 2; }
 build="$directory/build/$mode"
 mkdir -p "$build/include" "$build/lib"
 cp /usr/include/wayland-*.h "$build/include/"

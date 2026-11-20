@@ -203,11 +203,16 @@ mkdir -p "$BACKUP/files"
 for f in \
     /etc/asound.conf \
     /etc/init.d/S98xiaorui \
+    /etc/init.d/S99xiaorui-ui \
+    /etc/xdg/weston/weston.ini \
     /data/mixer-es8388.sh \
     /data/setup-zram.sh \
     /data/xiaorui/xiaorui.env \
     /data/xiaorui/start-frontend.sh \
     /data/xiaorui/board-time.sh \
+    /data/xiaorui-ui/xiaorui_ui \
+    /data/xiaorui-ui/run.sh \
+    /data/xiaorui-ui/lib/liblvgl.so \
     /data/xiaorui/.rk3562-es8388-profile \
     /data/xiaorui/.rk3562-es8388-state \
     /data/xiaorui-gateway/probe-port.py \
@@ -399,18 +404,36 @@ $ADB push "$DIR/init-S98xiaorui" /etc/init.d/S98xiaorui >/dev/null
 # 横置 mode -> UI 收到 1920x1080 直接退出 -> 界面全黑(语音不受影响)。
 # 见 ports/rk3562-es8388/weston.ini 的说明(完整配置, 覆盖出厂文件)。
 $ADB shell 'mkdir -p /etc/xdg/weston'
-$ADB push "$DIR/weston.ini" /etc/xdg/weston/weston.ini >/dev/null
+$ADB push "$DIR/weston.ini" /etc/xdg/weston/weston.ini >/dev/null || die "推送 weston.ini 失败"
 # UI 二进制 + LVGL 运行时 + 启动脚本(S99 装好即开机自启)
 if [ -f "$REPO/ui/build/aarch64/xiaorui_ui" ]; then
     $ADB shell 'mkdir -p /data/xiaorui-ui/lib'
-    $ADB push "$REPO/ui/build/aarch64/xiaorui_ui" /data/xiaorui-ui/xiaorui_ui >/dev/null
-    $ADB push "$REPO/ui/build/aarch64/lib/liblvgl.so" /data/xiaorui-ui/lib/liblvgl.so >/dev/null
-    $ADB push "$REPO/ui/run.sh" /data/xiaorui-ui/run.sh >/dev/null
-    $ADB push "$REPO/ports/rk3562/S99xiaorui-ui" /etc/init.d/S99xiaorui-ui >/dev/null
+    $ADB push "$REPO/ui/build/aarch64/xiaorui_ui" /data/xiaorui-ui/xiaorui_ui >/dev/null || die "推送 UI 二进制失败"
+    $ADB push "$REPO/ui/build/aarch64/lib/liblvgl.so" /data/xiaorui-ui/lib/liblvgl.so >/dev/null || die "推送 LVGL 运行时失败"
+    $ADB push "$REPO/ui/run.sh" /data/xiaorui-ui/run.sh >/dev/null || die "推送 UI 启动脚本失败"
+    $ADB push "$REPO/ports/rk3562/S99xiaorui-ui" /etc/init.d/S99xiaorui-ui >/dev/null || die "推送 UI init 脚本失败"
     $ADB shell 'chmod +x /data/xiaorui-ui/xiaorui_ui /data/xiaorui-ui/run.sh /etc/init.d/S99xiaorui-ui'
+    # LVGL 运行时依赖 libfreetype.so.6(板上没有就 load 失败, 只有 ui.log 一行)
+    $ADB shell 'test -f /usr/lib/libfreetype.so.6 || test -f /lib/libfreetype.so.6' \
+        >/dev/null 2>&1 || echo "   警告: 板上找不到 libfreetype.so.6, UI 可能加载失败"
 else
     echo "   (跳过 UI: ui/build/aarch64/xiaorui_ui 未构建, 先跑 ui/build.sh aarch64)"
 fi
+# ★ 推完必须让改动**当场生效**, 否则这次部署等于没做:
+#   - weston.ini 的 [output] mode 只有重启 weston 才生效(否则黑屏照旧)
+#   - UI 二进制被覆盖后, 跑着的旧进程 /proc/exe 仍匹配(带 " (deleted)"),
+#     S99 会认为"已在运行"而不重启 -> 必须显式 restart
+$ADB shell '/etc/init.d/S49weston restart' >/dev/null 2>&1 \
+    || $ADB shell 'kill $(pgrep -x weston) 2>/dev/null; sleep 2; setsid /usr/bin/weston >/dev/null 2>&1 </dev/null &'
+sleep 3
+$ADB shell 'sh /etc/init.d/S99xiaorui-ui restart' >/dev/null 2>&1 \
+    || echo "   警告: UI 重启失败, 看 /data/xiaorui-ui/ui.log"
+sleep 2
+# 竖屏 mode 落地校验: DSI-1 面板原生只有 1080x1920, weston 没跑在它上面
+# UI 会直接退出(黑屏, 但语音照常 —— 最难查的一类症状)
+$ADB shell 'grep -A2 "^\[output\]" /etc/xdg/weston/weston.ini | grep -q "mode=1080x1920"' \
+    >/dev/null 2>&1 || die "板端 weston.ini 没有 mode=1080x1920(界面会黑)"
+
 $ADB shell 'chmod +x /data/xiaorui/start-frontend.sh /data/xiaorui/board-time.sh /data/mixer-es8388.sh /data/setup-zram.sh /etc/init.d/S98xiaorui /data/xiaorui-gateway/probe-port.py'
 # ---------- 7) 启动 ----------
 echo "== 启动全栈 =="
@@ -420,12 +443,17 @@ missing_board=0
 for f in \
     /etc/asound.conf \
     /etc/init.d/S98xiaorui \
+    /etc/init.d/S99xiaorui-ui \
+    /etc/xdg/weston/weston.ini \
     /data/mixer-es8388.sh \
     /data/setup-zram.sh \
     /data/xiaorui/xiaorui.env \
     /data/xiaorui/start-frontend.sh \
     /data/xiaorui/board-time.sh \
     /data/xiaorui/bin/xiaorui_live \
+    /data/xiaorui-ui/xiaorui_ui \
+    /data/xiaorui-ui/run.sh \
+    /data/xiaorui-ui/lib/liblvgl.so \
     /data/xiaorui/lib/libsherpa-onnx-c-api.so \
     /data/xiaorui/lib/libonnxruntime.so \
     /data/xiaorui/assets/kws/keywords.txt \

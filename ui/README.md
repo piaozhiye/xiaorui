@@ -10,6 +10,13 @@ LVGL 配套头文件与预编译库已随仓分发；它们的来源、许可和
 [`third_party/lvgl/README.md`](third_party/lvgl/README.md)。
 具体清单见根目录 [THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md)。
 
+## 板端显示前提（2026-11-20 实机）
+
+面板原生 **1080x1920 竖屏**，weston 必须显式指定该 mode，否则会挑 1920x1080
+而 UI 直接退出（黑屏，语音却正常）：见 `ports/rk3562-es8388/weston.ini`
+的 `[output] name=DSI-1 mode=1080x1920`。**不要用 `transform` 绕** —— 本板
+weston 16 判 `transform=90` 为 Invalid，且不会交换逻辑几何。
+
 ## 界面截图
 
 板端 1080×1920 实拍（`XR_UI_DUMP` 导出，缩到 540 宽）：
@@ -74,6 +81,11 @@ xdg-shell XML 默认从交叉 sysroot 的 `usr/share/wayland-protocols/stable/xd
 PC 的 Wayland 头文件并链接目标板客户端库；最终仍使用板上已有的 Wayland/FreeType，
 不替换系统库。`--allow-shlib-undefined` 仅允许目标系统解析其已有动态库的传递依赖。
 
+> ★ **XR_WAYLAND_LIBRARY 必须是 wayland >= 1.20 的库**（1.20 才引入
+> `wl_proxy_marshal_flags`，旧版链接会报 undefined reference）。**不要用
+> toolchain sysroot 自带的旧版** —— 上面的做法从板上 pull 一份，板上的版本
+> 必然能跑 UI。2026-11-20 实测：sysroot 旧库链接失败，板上拉下来的库构建通过。
+
 UI 部署到独立目录。真实语音控制还需通过 `build-board-live.sh`
 构建并部署新版前端，在前端环境中设置 `XR_UI_SOCKET=/run/xiaorui/frontend.sock`。
 本次停止功能还修复了网关的轮次取消，已有网关需要同步部署本仓新版 Python 文件。
@@ -117,8 +129,9 @@ adb -s SERIAL shell 'sh /etc/init.d/S99xiaorui-ui status'
 
 ## 语音 IPC 契约
 
-`board/ui_protocol.h` 定义本机 Unix datagram v1 协议，状态包固定 4372 字节，
-含 magic、version、type、state、volume、UTF-8 question/answer（均须 NUL 结尾）。
+`board/ui_protocol.h` 定义本机 Unix datagram v1 协议，状态包固定 4376 字节，
+含 magic、version、type、state、volume、level（麦克风电平）、UTF-8 question/answer
+（均须 NUL 结尾）。
 协议使用本机字节序，仅限同板 C 进程，不是网络 API。
 UI 使用进程独有的 abstract socket，每 100ms 向 `XR_UI_SOCKET` 请求状态；
 只采纳该路径返回的完整合法状态包。服务端目录须限制为语音进程/UI 用户可访问。
