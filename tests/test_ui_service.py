@@ -9,6 +9,32 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_state_chip_initial_text_uses_adaptive_width():
+    """状态胶囊的初始文字必须按实际宽度自适应, 不能用硬编码宽度。
+
+    回归(2026-11-20 用户反馈): 初始 "等待语音服务连接" 的 label 宽度被
+    硬编码成 180px, 而这行字在 title_font(34px) 下要 ~240px, LVGL 的
+    LV_LABEL_LONG_WRAP 会换行, 两行 68px 溢出 52px 高的胶囊 -> 文字跑到
+    胶囊外面, 看着"不在中间"。
+    """
+    source = (ROOT / "ui/main.c").read_text(encoding="utf-8")
+    marker = source.index('state_label = label(state_chip, "等待语音服务连接"')
+    window = source[marker:marker + 400]
+    assert "layout_state_chip(" in window, \
+        "初始状态胶囊必须走 layout_state_chip 自适应宽度与居中"
+
+
+def test_state_chip_measures_with_the_font_it_renders():
+    """量宽度用的字体必须与 label 实际渲染的字体一致。"""
+    source = (ROOT / "ui/main.c").read_text(encoding="utf-8")
+    chip = source[source.index("static void layout_state_chip"):]
+    chip = chip[:chip.index("}")]
+    assert "title_font.font" in chip
+    label_line = source[source.index('state_label = label(state_chip,'):]
+    label_line = label_line[:label_line.index(";")]
+    assert "title_font.font" in label_line
+
+
 def test_ui_service_start_is_idempotent_and_manual_exit_stays_exited(tmp_path):
     directory = tmp_path / "app"
     directory.mkdir()

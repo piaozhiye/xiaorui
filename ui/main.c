@@ -289,6 +289,12 @@ static void build_conversation(lv_obj_t *screen) {
     state_dot = panel(state_chip, 18, 17, 18, 18, 0x8ca5aa, LV_RADIUS_CIRCLE);
     state_label = label(state_chip, "等待语音服务连接", 48, 8, 180,
                         title_font.font, 0xc8e8dc);
+    /* ★ 初始状态必须也走自适应布局(2026-11-20 用户反馈: "等待语音服务
+     *   连接"跑到胶囊外面, 不在中间)。上面给的 180px 是硬编码, 而这行
+     *   字在 title_font(34px) 下要 ~240px, LV_LABEL_LONG_WRAP 会换行,
+     *   两行 68px 超出胶囊的 52px 高 -> 文字溢出到胶囊外。
+     *   layout_state_chip 按文字实际宽度算胶囊宽并居中, 与后续状态一致。 */
+    layout_state_chip("等待语音服务连接", state_palette[0]);
     lv_obj_t *question = panel(conversation_page, 64, 980, 952, 170, 0x122327, 28);
     label(question, "你说", 30, 22, 800, tag_font, 0x6a9499);
     question_label = label(question, "识别后的文字会显示在这里", 30, 77, 884,
