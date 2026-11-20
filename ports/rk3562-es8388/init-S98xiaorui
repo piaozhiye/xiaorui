@@ -37,12 +37,12 @@ case "$1" in
         # 没有可写的节点, 所以这里既不需要也不能写 DDR 频率。
 
         # 1) 时间与时区(板上 RTC 正常时也会兜底)
-        if [ -x /data/xiaorui/board-time.sh ]; then
+        if [ -f /data/xiaorui/board-time.sh ]; then
             sh /data/xiaorui/board-time.sh setup
         fi
 
         # 2) 采集/播放 mixer(板载麦 PGA + 板载喇叭)
-        if [ -x /data/mixer-es8388.sh ]; then
+        if [ -f /data/mixer-es8388.sh ]; then
             sh /data/mixer-es8388.sh || echo "[S98] mixer 设置失败(前端可能拾不到音)"
         fi
 
@@ -52,11 +52,11 @@ case "$1" in
         #      常驻不可回收, 余量不够时内核 OOM 会干掉 init -> 整机黑屏。
         #      算法用 zstd 不用默认 lzo: lzo 在这些页上压缩比接近 1.0(白换),
         #      zstd 同样的页能压到 1/4.4(罗总开发笔记实测)。
-        if [ -x /data/setup-zram.sh ]; then
+        if [ -f /data/setup-zram.sh ]; then
             sh /data/setup-zram.sh || echo "[S98] zram 配置失败(内存兜底没了)"
         fi
 
-        if [ -x /data/xiaorui-gateway/start-board-stack.sh ]; then
+        if [ -f /data/xiaorui-gateway/start-board-stack.sh ]; then
             # 幂等: 网关已经在跑就别再起一套。2026-11-18 实测过双起 ——
             # 两个 RKLLM(各 604MB)+ 两个网关 = 1.2GB, 2GB 板子直接 OOM 黑屏。
             if pgrep -f "/data/xiaorui-gateway/server/app.py" >/dev/null 2>&1; then
@@ -83,7 +83,7 @@ case "$1" in
         fi
 
         # 4) 前端(采集 + KWS + 播放)
-        if [ -x /data/xiaorui/start-frontend.sh ] \
+        if [ -f /data/xiaorui/start-frontend.sh ] \
             && ! pgrep -x xiaorui_live >/dev/null 2>&1; then
             mkdir -p /data/xiaorui
             setsid bash /data/xiaorui/start-frontend.sh \

@@ -448,9 +448,19 @@ def test_s98_data_script_gates_use_f_not_x():
     """★ 2026-11-19: /data 上执行位重启即丢(实测两次, S98 静默跳过起栈,
     板子"开机了但全 DOWN")。/data 脚本门禁必须 -f(反正 sh 调用);
     /usr/sbin/crond 是二进制直接执行, 保留 -x。
+    ★ 2026-11-20: 扩展覆盖 rk3562-es8388 版 —— 实机事故: 板上装了
+    RK809 版 S98(es8388 卡的 mixer 设置全静默失败), 重启后 ES8388
+    采集增益回默认 3/8, 指令电平低于 VAD 门限, "喊得醒问不应"。
+    该版本自身也有 5 处 -x 漏网(含 mixer 门禁), 一并钉住。
     """
-    text = (PORT / "init-S98xiaorui").read_text(encoding="utf-8")
-    assert "-x /data" not in text, "/data 脚本门禁应为 -f(执行位重启会丢)"
+    ports = [PORT / "init-S98xiaorui",
+             PORT.parent / "rk3562-es8388" / "init-S98xiaorui"]
+    for s98 in ports:
+        text = s98.read_text(encoding="utf-8")
+        assert "-x /data" not in text, \
+            f"{s98.name}({s98.parent.name}): /data 脚本门禁应为 -f(执行位重启会丢)"
+    # crond 断言只对 rk3562 版: es8388 版没有 HA/crond 段
+    text = ports[0].read_text(encoding="utf-8")
     assert "[ -x /usr/sbin/crond ]" in text, "crond 是二进制, 应保持 -x"
 
 
