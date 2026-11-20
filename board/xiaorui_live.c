@@ -138,13 +138,19 @@ typedef struct {
     int content_seen;
     int level;
     int abort_failed;
+    const char *socket_path;   /* XR_UI_SOCKET */
+    double retry_at;           /* 下次重试打开 socket 的时刻(秒) */
 } xr_ui_context_t;
 
 static double now_s(void);
 static void xr_tick(void);
+static void ui_socket_retry(xr_ui_context_t *context);
 
 static int service_ui(xr_ui_context_t *context) {
-    if (!context->server) return 0;
+    if (!context->server) {
+        ui_socket_retry(context);   /* 打开失败就定时重试, 别等下次 ws 重连 */
+        return 0;
+    }
     int responding = context->session->state == XR_SESSION_RESPOND;
     if (responding && !context->was_responding)
         context->content_seen = 0;   /* 新一轮: 等第一段内容到了再清屏 */
@@ -174,6 +180,38 @@ static void ui_turn_content(xr_ui_context_t *context) {
     if (context->content_seen || !context->server) return;
     context->content_seen = 1;
     xr_ui_server_turn_begin(context->server);
+}
+
+/* 新一轮开始: UI 清屏门复位。
+ * ★ 2026-11-20 review: 原来靠 service_ui 观察到 RESPOND 的"边沿"清零
+ *   (responding && !was_responding), 但边沿只在"上一轮不在 RESPOND"时才
+ *   出现 —— 连续轮/打断场景(上一轮还在说话就开新一轮)边沿不出现,
+ *   content_seen 留着上一轮的 1 -> ui_turn_content 空操作 -> 新一轮字幕
+ *   追加到上一轮字幕后面, 旧字幕永不清除(answer 缓冲 4096 字节满了之后
+ *   后面整轮字幕全丢)。所以复位必须跟"轮开始"走, 不能靠观察边沿。 */
+static void ui_turn_reset(xr_ui_context_t *context) {
+    context->content_seen = 0;
+}
+
+/* UI socket 打开失败后的定时重试(2026-11-20 review, Important 4)。
+ * 之前只在 ws 重连时再试一次 —— ws 可能几小时不重连, 于是:
+ *   - UI 一直连不上(界面停在"等待语音服务连接");
+ *   - 更糟: 另一个**活着的**旧实例占着 socket(设计如此, 不抢活端点),
+ *     UI 会被那个旧实例回答, 显示陈旧状态, 而横幅还写着"语音已连接"。
+ * 所以改成每 5s 重试一次, 并在日志里点名路径与失败原因。 */
+static void ui_socket_retry(xr_ui_context_t *context) {
+    if (!context->socket_path || !*context->socket_path) return;
+    double now = now_s();
+    if (context->retry_at && now < context->retry_at) return;
+    context->retry_at = now + 5.0;
+    context->server = xr_ui_server_open(context->socket_path);
+    if (context->server) {
+        fprintf(stderr, "[ui] socket 打开成功: %s\n", context->socket_path);
+        context->retry_at = 0;
+    } else {
+        fprintf(stderr, "[ui] socket 仍不可用(%s): %s, 5s 后重试\n",
+                context->socket_path, strerror(errno));
+    }
 }
 
 static int service_ui_drain(void *opaque) {
@@ -795,6 +833,7 @@ int main(int argc, char **argv) {
         .backend = be, .session = &ses, .vad = &vad, .config = config,
     };
     const char *ui_socket = getenv("XR_UI_SOCKET");
+    ui.socket_path = ui_socket;   /* 打开失败时靠它定时重试 */
 
     xr_tick();   /* 看门狗基线: 重启路径内每处有界等待前都续命 */
     {
@@ -836,12 +875,16 @@ restart:
     /* conn_rc==2: 重连时补发了上一轮指令, 直接进 RESPOND 等回答 */
     if (conn_rc == 2) {
         xr_session_begin_turn(&ses, now_s());
+        ui_turn_reset(&ui);
         xr_player_start();
     }
     xr_session_note_ping(&ses, now_s());
     if (ui_socket && *ui_socket) {
         ui.server = xr_ui_server_open(ui_socket);
-        if (!ui.server) fprintf(stderr, "[ui] socket unavailable: %s\n", strerror(errno));
+        if (!ui.server)
+            /* 打开失败不放弃: service_ui 里每 5s 重试(见 ui_socket_retry)。
+             * 之前只在这里试一次, 失败就只能等下次 ws 重连。 */
+            fprintf(stderr, "[ui] socket unavailable: %s (稍后重试)\n", strerror(errno));
     }
     printf("[xr] connected\n");
 
@@ -911,6 +954,7 @@ restart:
                 fprintf(stderr, "[xr] 注入指令: %s\n", inj);
                 unsetenv("XR_TEXT_INJECT"); /* A reconnect must not replay the test hook. */
                 xr_session_begin_turn(&ses, now_s());
+                ui_turn_reset(&ui);
                 xr_player_start();
                 goto inject_wait;
             }
@@ -995,6 +1039,7 @@ inject_wait:
                     xr_player_drop();             /* 丢掉还排队的音乐音频 */
                     if (be_submit_text(be, music_command.text) == 0) {
                         xr_session_begin_turn(&ses, now_s());
+                        ui_turn_reset(&ui);
                         xr_player_start();        /* 准备播回答 */
                         fprintf(stderr, "[music] 已作为正常轮提交\n");
                     } else {
@@ -1012,7 +1057,7 @@ inject_wait:
                LLM 首句可能 >10s, ws_recv 超时(返 0)继续等不算断线. */
             size_t l = 0;
             char ev_text[XR_UI_ANSWER_CAPACITY] = {0};
-            /* 只有真有 UI 客户端在看时才把 ws 轮询降到 50ms。UI 每 500ms 问
+            /* 只有真有 UI 客户端在看时才把 ws 轮询降到 50ms。UI 每 100ms 问
                一次状态, 2s 内问过就算"有人在看"; 没 UI 时回到 1000ms, 即
                UI 提交之前的行为, 回答期不必 20Hz 空转。
                注: 空闲采集期本来就是 timeout 0 非阻塞轮询, 与 UI 在不在无关。 */
@@ -1294,6 +1339,7 @@ inject_wait:
                     continue;
                 }
                 xr_session_begin_turn(&ses, now_s());
+                ui_turn_reset(&ui);
                 if (be_announce_reply(be, ev_text, 1)) goto restart;
                 fprintf(stderr, "[xr] 主动播报已受理: %s\n", ev_text);
                 continue;
@@ -1301,6 +1347,7 @@ inject_wait:
             if (ev == EV_ANNOUNCE) {
                 fprintf(stderr, "[xr] 主动播报(提醒)\n");
                 xr_session_begin_turn(&ses, now_s());
+                ui_turn_reset(&ui);
                 if (xr_player_start()) xr_session_abort_turn(&ses);
                 continue;
             }
@@ -1429,6 +1476,7 @@ utterance_ready:
             else
                 fprintf(stderr, "[xr] 冷启动音频交服务端 ASR(云端优先, 本地不转写)\n");
             xr_session_begin_turn(&ses, now_s());
+            ui_turn_reset(&ui);
             if (xr_player_start()) xr_session_abort_turn(&ses);
             continue;
         }
@@ -1592,6 +1640,7 @@ utterance_ready:
                     goto restart;   /* backend 已缓存, 重连后补发 */
                 }
                 xr_session_begin_turn(&ses, now_s());
+                ui_turn_reset(&ui);
                 /* 指令轮: 起播放线程等回答(20s 识别 0.56s+LLM 首包 0.09s 已够快, 不再插嗯) */
                 if (xr_player_start()) { fprintf(stderr, "[xr] 播放线程启动失败\n"); xr_session_abort_turn(&ses); }
             } else {

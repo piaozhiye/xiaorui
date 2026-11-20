@@ -122,6 +122,12 @@ def test_client_activity_follows_ui_queries(interface, tmp_path):
 
 
 def test_captions_truncate_on_character_boundary(interface, tmp_path):
+    """字幕缓冲按 UTF-8 字符边界截断, 且**截断是可见的**。
+
+    ★ 2026-11-20 review: 原来满了就静默丢弃后面的句子, 界面上看起来像
+    "回答到这就结束了"(截断冒充完整)。现在尾部留 5 字节写 "...\\n" 标记,
+    并且标记要出现在**有效内容末尾**(不能把已有字幕清掉)。
+    """
     path = tmp_path / "private" / "voice.sock"
     server = interface.xr_ui_server_open(os.fsencode(path))
     try:
@@ -131,8 +137,18 @@ def test_captions_truncate_on_character_boundary(interface, tmp_path):
         question = status.question.decode()
         answer = status.answer.decode()
         assert question == "问" * 85
-        assert answer == "答" * 1365
+        # 4096 字节缓冲, 尾部留 5 字节给标记 -> 最多 1363 个 3 字节汉字
+        assert answer == "答" * 1363
+        # 再追加: 放不下了 -> 末尾标记截断, 已有内容保留
         interface.xr_ui_server_text(server, False, ("答" * 100).encode())
-        assert query_status(interface, server, path).answer.decode() == "答" * 1365
+        answer = query_status(interface, server, path).answer.decode()
+        assert answer == "答" * 1363 + "...\n"
+        # 之后继续追加不再改变(只标记一次)
+        interface.xr_ui_server_text(server, False, ("答" * 100).encode())
+        assert query_status(interface, server, path).answer.decode() == "答" * 1363 + "...\n"
+        # 新一轮开始: 标记复位, 字幕清空重来
+        interface.xr_ui_server_turn_begin(server)
+        interface.xr_ui_server_text(server, False, ("新" * 10).encode())
+        assert query_status(interface, server, path).answer.decode() == "新" * 10
     finally:
         interface.xr_ui_server_close(server)

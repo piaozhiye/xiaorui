@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -18,6 +19,7 @@ struct xr_ui_server {
     dev_t device;
     bool bound;
     bool client_seen;
+    bool truncated;        /* 字幕缓冲曾溢出: 界面要标出"已截断" */
     uint64_t last_client_ms;
     xr_ui_message_t status;
 };
@@ -117,6 +119,7 @@ void xr_ui_server_turn_begin(xr_ui_server_t *server) {
     if (!server) return;
     server->status.question[0] = 0;
     server->status.answer[0] = 0;
+    server->truncated = 0;   /* 新一轮: 截断标记复位 */
 }
 
 void xr_ui_server_state(xr_ui_server_t *server, enum xr_ui_state state, unsigned int volume) {
@@ -138,14 +141,40 @@ void xr_ui_server_text(xr_ui_server_t *server, bool question, const char *text) 
     }
     size_t used = strlen(server->status.answer);
     size_t available = sizeof(server->status.answer) - used;
-    if (available < 2) return;   /* 字幕已满: 后面的句子丢弃 */
+    /* 尾部固定留 5 字节("…\n" + NUL)放截断标记: 字幕满了的时候把末尾
+     * 标成"...\n", 界面上看得出回答被截断, 而不是"回答到这就结束了"
+     * (静默丢弃最坏: 截断冒充完整)。 */
+    const size_t marker_room = 5;
+    size_t payload = available > marker_room ? available - marker_room : 0;
+    if (payload <= 2) {
+        /* 放不下一句了: 标记截断(只标记一次, 之后都丢弃) */
+        if (!server->truncated) {
+            server->truncated = 1;
+            fprintf(stderr, "[ui] 字幕缓冲已满(%zu 字节), 后续字幕将丢弃\n",
+                    sizeof(server->status.answer) - 1);
+            /* 回退到最后一个换行处再写标记, 保住已有内容; 一整句没有换行
+             * 点就直接接在末尾(别把整段清掉)。 */
+            size_t cut = used;
+            while (cut > 0 && server->status.answer[cut - 1] != '\n') cut--;
+            if (cut == 0) {
+                if (available >= marker_room) {
+                    memcpy(server->status.answer + used, "...\n", 4);
+                    server->status.answer[used + 4] = 0;
+                }
+            } else {
+                memcpy(server->status.answer + cut, "...\n", 4);
+                server->status.answer[cut + 4] = 0;
+            }
+        }
+        return;
+    }
     if (used && server->status.answer[used - 1] != '\n')
     {
         server->status.answer[used++] = '\n';
         server->status.answer[used] = 0;
-        available--;
+        payload--;
     }
-    copy_text(server->status.answer + used, available, text);
+    copy_text(server->status.answer + used, payload, text);
 }
 
 int xr_ui_server_client_active(const xr_ui_server_t *server, unsigned int window_ms) {

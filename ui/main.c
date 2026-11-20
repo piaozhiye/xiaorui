@@ -428,8 +428,18 @@ static void refresh(lv_timer_t *timer) {
     if (state > XR_UI_SPEAKING) state = XR_UI_READY;
     if ((connected || demo) && state != displayed_state)
     {
-        lv_label_set_text(state_label, state_text[state]);
-        layout_state_chip(state_text[state], state_palette[state]);
+        /* demo 模式的状态胶囊必须自报"预览": 否则它循环播放"我在听，请说"
+         * / "正在回答你"这些**真实样式**的状态, 一眼看过去像真的在应答
+         * (底部横幅虽然标了预览, 但截图/瞥一眼都可能被误读)。 */
+        if (demo) {
+            char preview[64];
+            snprintf(preview, sizeof(preview), "预览 · %s", state_text[state]);
+            lv_label_set_text(state_label, preview);
+            layout_state_chip(preview, state_palette[state]);
+        } else {
+            lv_label_set_text(state_label, state_text[state]);
+            layout_state_chip(state_text[state], state_palette[state]);
+        }
         displayed_state = state;
     }
     /* 停止按钮只有在真在回答时才有意义, 否则点了没反应 */
