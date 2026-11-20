@@ -57,6 +57,11 @@ start_ui() {
         attempts=$((attempts + 1))
         sleep 1
     done
+    # 每次启动轮转上一轮的日志(2026-11-20 用户建议): 不轮转的话旧日志
+    # 一直追加, 排查时分不清哪几行属于本次启动。留一份 .1, 再启动覆盖。
+    if [ -f "$directory/ui.log" ]; then
+        mv "$directory/ui.log" "$directory/ui.log.1" 2>/dev/null || true
+    fi
     (setsid env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$display" \
         XR_UI_DUMP="${XR_UI_DUMP:-/tmp/xiaorui-ui.ppm}" \
         sh "$directory/run.sh" 9>&- >>"$directory/ui.log" 2>&1 </dev/null &)

@@ -40,11 +40,6 @@ def test_status_controls_and_captions(interface, tmp_path):
     try:
         assert path.stat().st_mode & 0o777 == 0o600
         assert path.parent.stat().st_mode & 0o777 == 0o700
-        interface.xr_ui_server_state(server, 3, 80)
-        interface.xr_ui_server_text(server, True, "现在几点了？".encode())
-        for sentence in ["现在是", "上午十一点。"]:
-            interface.xr_ui_server_text(server, False, sentence.encode())
-        interface.xr_ui_server_text(server, False, b"")
         with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as peer:
             peer.bind(b"\0xr-test-" + os.urandom(8))
             peer.settimeout(0.1)
@@ -54,6 +49,15 @@ def test_status_controls_and_captions(interface, tmp_path):
                 return interface.xr_ui_server_poll(server, ctypes.byref(volume))
 
             query = Message(magic=0x58525549, version=1, type=1)
+            # 客户端先接入一次(会话开始: 服务端会清掉此前的文本),
+            # 再看状态 —— 真实流程也是 UI 先连上, 才有后续问答。
+            assert send(query) == 0
+            peer.recv(8192)
+            interface.xr_ui_server_state(server, 3, 80)
+            interface.xr_ui_server_text(server, True, "现在几点了？".encode())
+            for sentence in ["现在是", "上午十一点。"]:
+                interface.xr_ui_server_text(server, False, sentence.encode())
+            interface.xr_ui_server_text(server, False, b"")
             assert send(query) == 0
             status = Message.from_buffer_copy(peer.recv(8192))
             assert (status.state, status.volume) == (3, 80)
@@ -99,14 +103,49 @@ def test_recover_stale_socket_preserve_files_and_reject_public_directory(interfa
     assert not interface.xr_ui_server_open(os.fsencode(link / "voice.sock"))
 
 
-def query_status(interface, server, path):
+def query_status(interface, server, path, peer=None):
+    """问一次状态。
+
+    peer: 客户端的抽象地址; 同一地址 = 同一个客户端(真实 UI 的地址是
+    @xiaorui-ui.<pid>, 进程重启才换)。不同地址会被服务端当成新客户端
+    接入(会话重来, 旧文本清空)。
+    """
     volume = ctypes.c_uint()
-    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as peer:
-        peer.bind(b"\0xr-test-" + os.urandom(8))
-        peer.settimeout(0.5)
-        peer.sendto(bytes(Message(magic=0x58525549, version=1, type=1)), str(path))
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as handle:
+        handle.bind(peer if peer is not None else b"\0xr-test-fixed")
+        handle.settimeout(0.5)
+        handle.sendto(bytes(Message(magic=0x58525549, version=1, type=1)), str(path))
         assert interface.xr_ui_server_poll(server, ctypes.byref(volume)) == 0
-        return Message.from_buffer_copy(peer.recv(8192))
+        return Message.from_buffer_copy(handle.recv(8192))
+
+
+def test_new_client_clears_previous_conversation(interface, tmp_path):
+    """新客户端接入 = 会话重来: 清掉上一轮问答(UI 重启后别显示旧内容)。
+
+    回归(2026-11-20 用户反馈): UI 进程重启后重新连上前端, 前端把
+    "当前轮次"的旧文本原样给了它, 文本框里留着上一轮对话。
+    """
+    path = tmp_path / "private" / "voice.sock"
+    server = interface.xr_ui_server_open(os.fsencode(path))
+    try:
+        interface.xr_ui_server_text(server, True, "旧问题".encode())
+        interface.xr_ui_server_text(server, False, "旧回答".encode())
+        # 第一个客户端接入: 会话开始, 旧文本被清掉
+        status = query_status(interface, server, path)
+        assert status.question == b""
+        assert status.answer == b""
+        # 同一个客户端继续问: 内容保留
+        interface.xr_ui_server_text(server, True, "新问题".encode())
+        interface.xr_ui_server_text(server, False, "新回答".encode())
+        status = query_status(interface, server, path)
+        assert status.question.decode() == "新问题"
+        assert status.answer.decode() == "新回答"
+        # 换个来源地址(= UI 进程重启, 抽象地址里的 pid 变): 会话重来, 清空
+        status = query_status(interface, server, path, peer=b"\0xr-test-other")
+        assert status.question == b""
+        assert status.answer == b""
+    finally:
+        interface.xr_ui_server_close(server)
 
 
 def test_client_activity_follows_ui_queries(interface, tmp_path):
@@ -131,6 +170,8 @@ def test_captions_truncate_on_character_boundary(interface, tmp_path):
     path = tmp_path / "private" / "voice.sock"
     server = interface.xr_ui_server_open(os.fsencode(path))
     try:
+        # 客户端先接入(会话开始, 服务端清空此前文本), 再放字幕
+        query_status(interface, server, path)
         interface.xr_ui_server_text(server, True, ("问" * 200).encode())
         interface.xr_ui_server_text(server, False, ("答" * 2000).encode())
         status = query_status(interface, server, path)
