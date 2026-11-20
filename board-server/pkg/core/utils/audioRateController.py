@@ -304,6 +304,7 @@ class AudioRateController:
         """
 
         async def _send_loop():
+            me = asyncio.current_task()
             try:
                 while True:
                     # 等待队列数据事件，不轮询等待占用CPU
@@ -327,7 +328,16 @@ class AudioRateController:
                 #   TTS 消费线程无法进入下一轮。这里置位的语义是
                 #   "不会再有数据发出", 等待者还需检查 send_error 区分
                 #   正常发完与失败终止。
-                self.queue_empty_event.set()
+                # ★ 三轮 review(2026-11-20 事件级复现): guard 不可少 ——
+                #   轮间 reset() 取消的是"活着的旧 sender", 其取消在
+                #   新一轮整批入队后的首个让出点才投递; 无条件 set 会
+                #   在新队列非空(还在预缓冲)时置位事件 -> 短回答 stop
+                #   提前发出 + stop_sending() 打断排空 -> 客户端听到
+                #   截断的回答。只在自己仍是当前 sender 时才置位:
+                #   sender 死亡(P1 场景)没人换过任务 -> set 保持;
+                #   stop_sending 时仍是自己且队列已排空 -> set 无害。
+                if self.pending_send_task is me:
+                    self.queue_empty_event.set()
 
         self.pending_send_task = asyncio.create_task(_send_loop())
         return self.pending_send_task

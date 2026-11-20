@@ -132,3 +132,68 @@ def test_stop_message_fails_fast_on_sender_death():
 
     with pytest.raises(RuntimeError):
         asyncio.run(run())
+
+
+def _interrupted_round_controller():
+    """模拟"轮N被打断(sentence_id 变化)-> reset 取消活 sender"的前置状态:
+    轮N sender 活着、两包在节拍队列里。返回 controller(同步函数)。"""
+
+    async def cb(p):
+        pass
+
+    ctrl = AudioRateController(60, 0)
+    ctrl.start_sending(cb)
+    ctrl.add_audio(b"n1")
+    ctrl.add_audio(b"n2")
+    return ctrl
+
+
+def test_reset_canceled_sender_does_not_prematurely_set_empty_event():
+    """轮间 reset 取消旧 sender: 旧任务的 finally 不得在队列非空时置位事件。
+
+    三轮 review 实证(2026-11-20): 无 guard 时旧任务 finally 无条件 set,
+    落在新一轮批次已入队、还在预缓冲的窗口上 -> 完成等待提前放行。
+    不变式: 事件置位 => 队列必须已空。
+    """
+
+    async def run():
+        ctrl = _interrupted_round_controller()
+        await asyncio.sleep(0.03)        # 轮N sender 进入节拍等待(活着)
+        ctrl.reset()                     # 轮N+1: 取消活 sender
+        ctrl.prebuffer_ms = 4000         # 板端配置: 新 sender 攒预缓冲
+        async def cb(p):
+            pass
+        ctrl.start_sending(cb)
+        for i in range(10):              # 单批短回答, 批内无让出点
+            ctrl.add_audio(bytes([i]))
+        await asyncio.sleep(0.05)        # 首个让出点: 旧任务 finally 在此投递
+        if ctrl.queue_empty_event.is_set():
+            assert len(ctrl.queue) == 0, (
+                f"事件置位但队列还有 {len(ctrl.queue)} 包"
+                "(stale finally 竞态, stop 会在排空前发出)")
+        ctrl.pending_send_task.cancel()
+
+    asyncio.run(run())
+
+
+def test_short_round_not_truncated_by_stale_cancel():
+    """短回答不得被 stale 取消截断: 完成等待放行时音频必须全部发出。"""
+
+    async def run():
+        sent = []
+
+        async def cb(p):
+            sent.append(p)
+
+        ctrl = _interrupted_round_controller()
+        await asyncio.sleep(0.03)
+        ctrl.reset()
+        ctrl.prebuffer_ms = 4000
+        ctrl.start_sending(cb)
+        for i in range(10):
+            ctrl.add_audio(bytes([i]))
+        ctrl.finish_production()         # 单句短回答: 这批就是全部
+        await asyncio.wait_for(ctrl.queue_empty_event.wait(), 3)
+        return len(sent)
+
+    assert asyncio.run(run()) == 10
