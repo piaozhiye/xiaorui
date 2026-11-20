@@ -147,6 +147,8 @@ static void xr_tick(void);
 static void ui_socket_retry(xr_ui_context_t *context);
 /* 前端进程启动时刻(CLOCK_MONOTONIC 秒): 语音栈预热期用它算。 */
 static double g_started_at = 0.0;
+/* 网关已经发得出 TTS(语音真的能用了): 预热提示据此提前结束。 */
+static int g_tts_ready = 0;
 /* 预热期长度(秒): 网关 + RockASR/RockTTS 模型加载到 NPU 实测 30~60s。
  * 可用 XR_PREPARING_SECONDS 现场调。 */
 static double preparing_seconds(void) {
@@ -173,8 +175,10 @@ static int service_ui(xr_ui_context_t *context) {
          XR_UI_LISTENING : XR_UI_READY);
     /* ★ 语音栈预热期(2026-11-20 真板反馈: 点桌面图标重启后, 界面写着
      *   "我在听，请说", 但网关/模型还在加载, 用户说了没反应 -> 以为坏了)。
-     *   前端启动后这段时间一律报"正在准备语音", 界面如实说。 */
-    if (!responding && now_s() - g_started_at < preparing_seconds())
+     *   前端启动后这段时间一律报"正在准备语音", 界面如实说;
+     *   一旦网关真的发得出 TTS(问候音播了), 立刻切回正常状态 ——
+     *   比死等固定窗口准(慢机器 60 秒可能还没好, 快机器早就能说了)。 */
+    if (!responding && !g_tts_ready && now_s() - g_started_at < preparing_seconds())
         state = XR_UI_PREPARING;
     xr_ui_server_state(context->server, state, (unsigned int)g_vol_pct);
     unsigned int volume = 0;
@@ -862,6 +866,8 @@ int main(int argc, char **argv) {
     }
 
 restart:
+    /* 网关要重新连: 它的 TTS 也会重新加载 -> 预热提示重新开始 */
+    g_tts_ready = 0;
     xr_ui_server_close(ui.server);
     ui.server = NULL;
     ui.was_responding = 0;
@@ -1264,6 +1270,11 @@ inject_wait:
                 xr_vad_reset_gate(&vad);
                 fprintf(stderr, "[xr] 回答完毕, 30s 内免唤醒\n");
             } else if (ev == EV_TTS_START) {
+                /* 语音真的能用了: 网关发得出 TTS, 说明 RockTTS 已加载就绪。
+                 * 界面据此结束"正在准备语音…"—— 比固定 60 秒窗口准:
+                 * 慢机器上 60 秒可能还没好, 快机器上早就能说了(2026-11-20
+                 * 真板反馈: 问候都播了, 界面还写着"正在准备语音")。 */
+                g_tts_ready = 1;
                 if (ev_text[0]) {
                     ui_turn_content(&ui);
                     xr_ui_server_text(ui.server, false, ev_text);
