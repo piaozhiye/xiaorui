@@ -72,7 +72,24 @@ static atomic_int volume_pct = -1;
 static FILE *play_dump;
 static FILE *play_trace;
 static pthread_mutex_t ring_mu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t ring_cv = PTHREAD_COND_INITIALIZER;
+/* ★ 等待时钟(Codex review P2, 2026-11-20): 本板无 RTC, 校时/重启会跳
+ *   墙钟; grace 的绝对 deadline 若按 CLOCK_REALTIME 构造, 回拨会把已
+ *   提交的超时无限拉长(注入 +1h 后尾巴排空测试 assert(flushed) 失败)。
+ *   条件变量与 deadline 统一 CLOCK_MONOTONIC —— 只改 clock_gettime
+ *   不改条件变量的时钟是错的: condattr 决定内核用哪个钟比较 deadline。
+ *   pthread_once 惰性初始化: 触碰 ring_cv 的入口(push/播放线程/finish/
+ *   drop)都先 ensure, 语义上等价于"开线程前初始化一次", 且不存在
+ *   "仍有等待者时重建"的窗口。 */
+static pthread_cond_t ring_cv;
+static pthread_once_t ring_cv_once = PTHREAD_ONCE_INIT;
+static void ring_cv_init_mono(void) {
+    pthread_condattr_t ca;
+    pthread_condattr_init(&ca);
+    pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+    pthread_cond_init(&ring_cv, &ca);
+    pthread_condattr_destroy(&ca);
+}
+static void ring_cv_ensure(void) { pthread_once(&ring_cv_once, ring_cv_init_mono); }
 /* ALSA period 样本数(写卡最小单位)。spk_open 设一次。
  * tmp 缓冲、hw 参数、环消费粒度全用它: 改 period 必须同步改
  * player_thread 里的 tmp[SPK_PERIOD_SAMPLES](独立写死会静默溢栈)。 */
@@ -86,6 +103,7 @@ size_t xr_player_queued_samples(void) {
 }
 
 void xr_player_push_pcm(const int16_t *pcm, size_t n) {
+    ring_cv_ensure();
     pthread_mutex_lock(&ring_mu);
     for (size_t i = 0; i < n; i++) {
         ring[ring_w] = pcm[i];
@@ -154,6 +172,7 @@ static int spk_open(void) {
 /* 播放线程: 从环形缓冲读 PCM 写卡; eof 且环空时 drain 收尾退出 */
 static void *player_thread(void *arg) {
     (void)arg;
+    ring_cv_ensure();
     int16_t tmp[SPK_PERIOD_SAMPLES];   /* 120ms 一批, 与 ALSA period 同源 */
     int pcm_active = 0;
     {
@@ -163,7 +182,9 @@ static void *player_thread(void *arg) {
         if (tp && *tp) {
             play_trace = fopen(tp, "a");
             /* 锚点: 把后面的 CLOCK_MONOTONIC 时间戳对齐到墙钟,
-             * 这样停顿能直接和网关日志的轮次/合成时刻对上。 */
+             * 这样停顿能直接和网关日志的轮次/合成时刻对上。
+             * (这里故意读墙钟——只是日志锚点; 等待 deadline
+             * 一律 CLOCK_MONOTONIC, 见 ring_cv_init_mono。) */
             if (play_trace) {
                 struct timespec rt;
                 clock_gettime(CLOCK_REALTIME, &rt);
@@ -186,7 +207,7 @@ static void *player_thread(void *arg) {
                  *   继续播, 无缝); 真空满 300ms 才是句间空, 那时再排空
                  *   进 PREPARED 防 EPIPE(问候音与下一句可隔数秒)。 */
                 struct timespec ts;
-                clock_gettime(CLOCK_REALTIME, &ts);
+                clock_gettime(CLOCK_MONOTONIC, &ts);
                 ts.tv_nsec += 300L * 1000000L;
                 if (ts.tv_nsec >= 1000000000L) {
                     ts.tv_sec += 1;
@@ -229,7 +250,7 @@ static void *player_thread(void *arg) {
             int tail_hold_ms = 0;
             while (avail < spk_period_samples && !ring_eof && player_running) {
                 struct timespec ts;
-                clock_gettime(CLOCK_REALTIME, &ts);
+                clock_gettime(CLOCK_MONOTONIC, &ts);
                 ts.tv_nsec += 50L * 1000000L;
                 if (ts.tv_nsec >= 1000000000L) {
                     ts.tv_sec += 1;
@@ -345,6 +366,7 @@ int xr_player_finish_with_poll(int (*poll_callback)(void *), void *context) {
     if (!player_active) return 0;   /* 以 player_active 判活: 线程可能已因 writei 错自杀,
                                       此时仍需语义复位(player_running 由线程自己清了) */
     ring_eof = 1;
+    ring_cv_ensure();
     pthread_mutex_lock(&ring_mu);
     pthread_cond_broadcast(&ring_cv);
     pthread_mutex_unlock(&ring_mu);
@@ -368,6 +390,7 @@ void xr_player_drop(void) {
     if (!player_active) { if (spk) output.a_drop(spk); return; }   /* 常驻不关 */
     player_running = 0;
     ring_eof = 1;
+    ring_cv_ensure();
     pthread_mutex_lock(&ring_mu);
     pthread_cond_broadcast(&ring_cv);
     pthread_mutex_unlock(&ring_mu);
