@@ -147,7 +147,11 @@ done
 # UI 是本 profile 必选组件(review 2026-11-20): 安装段曾允许"未构建
 # 可跳过", 但验收段无条件要求 UI 存在 —— 干净板必然 die 在验收、留下
 # 半成品。必须在写板之前就失败并给出构建指引。
-for f in "$UI_BIN" "$UI_LIB" "$UI_RUN" "$UI_INIT"; do
+for f in "$UI_BIN" "$UI_LIB" "$UI_RUN" "$UI_INIT" \
+         "$DIR/11-xiaorui.ini" \
+         "$DIR/assets/icon_xiaorui.png" \
+         "$DIR/fonts-local.conf" \
+         "$DIR/xiaorui-start.sh" "$DIR/xiaorui-stop.sh"; do
     [ -f "$f" ] || die "UI 未构建: 缺 $f — 先跑 ui/build.sh aarch64(本 profile 必选)"
 done
 
@@ -428,6 +432,24 @@ $ADB shell 'chmod +x /data/xiaorui-ui/xiaorui_ui /data/xiaorui-ui/run.sh /etc/in
 # LVGL 运行时依赖 libfreetype.so.6(板上没有就 load 失败, 只有 ui.log 一行)
 $ADB shell 'test -f /usr/lib/libfreetype.so.6 || test -f /lib/libfreetype.so.6' \
     >/dev/null 2>&1 || echo "   警告: 板上找不到 libfreetype.so.6, UI 可能加载失败"
+# ---------- 6c) 桌面图标: 启动/退出整套小瑞 ----------
+# weston-desktop-shell 读 /etc/xdg/weston/weston.ini.d/*.ini 的
+# [desktop-launcher]; 厂商的 04 文件不动, 我们另起 11-xiaorui.ini。
+$ADB shell 'mkdir -p /etc/xdg/weston/weston.ini.d /usr/share/icons'
+$ADB push "$DIR/11-xiaorui.ini" /etc/xdg/weston/weston.ini.d/11-xiaorui.ini >/dev/null \
+    || die "推送桌面图标配置失败"
+$ADB push "$DIR/assets/icon_xiaorui.png" /usr/share/icons/icon_xiaorui.png >/dev/null \
+    || die "推送小瑞图标失败"
+$ADB push "$DIR/xiaorui-start.sh" /data/xiaorui-ui/xiaorui-start.sh >/dev/null \
+    || die "推送启动脚本失败"
+$ADB push "$DIR/xiaorui-stop.sh" /data/xiaorui-ui/xiaorui-stop.sh >/dev/null \
+    || die "推送退出脚本失败"
+$ADB shell 'chmod +x /data/xiaorui-ui/xiaorui-start.sh /data/xiaorui-ui/xiaorui-stop.sh'
+# 桌面图标名要显示中文: weston 走 fontconfig, 默认 sans-serif 是 DejaVu
+# (无中文字形 -> "小瑞"显示成豆腐块), 把思源黑体挂上并重建缓存。
+$ADB push "$DIR/fonts-local.conf" /etc/fonts/local.conf >/dev/null \
+    || die "推送字体配置失败"
+$ADB shell 'fc-cache -f >/dev/null 2>&1 || true'
 # ★ 推完必须让改动**当场生效**, 否则这次部署等于没做:
 #   - weston.ini 的 [output] mode 只有重启 weston 才生效(否则黑屏照旧)
 #   - UI 二进制被覆盖后, 跑着的旧进程 /proc/exe 仍匹配(带 " (deleted)"),

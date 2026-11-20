@@ -394,6 +394,10 @@ def seed_deploy_assets(repo):
         "ui/build/aarch64/lib/liblvgl.so",
         "ui/run.sh",
         "ports/rk3562/S99xiaorui-ui",
+        # 桌面图标资源在 assets/ 子目录里(factory 只复制 ES8388 下的文件,
+        # 不递归子目录), 所以这里补上, 否则部署会在资源检查就 die。
+        "ports/rk3562-es8388/assets/icon_xiaorui.png",
+        "ports/rk3562-es8388/fonts-local.conf",
     )
     for relative in files:
         path = repo / relative
@@ -1408,3 +1412,58 @@ def test_rollback_skips_weston_restart_when_ini_is_unchanged():
     # 重启条件必须同时依赖"之前在跑"和"配置真的变了"
     assert '[ "$WESTON_WAS_RUNNING" = "1" ]' in rollback
     assert '[ "$WESTON_INI_CHANGED" = "1" ]' in rollback
+
+
+def test_desktop_launchers_are_installed_for_start_and_stop():
+    """桌面必须有「小瑞」图标: 点了就启动整套。
+
+    机制: weston-desktop-shell 读 /etc/xdg/weston/weston.ini.d/*.ini 的
+    [desktop-launcher](icon=/path=/displayname=), 点图标就跑 path= 的脚本。
+    退出用小瑞界面自己的退出按钮(设置页点两次确认 -> 回桌面),
+    桌面不再重复放退出图标。
+    """
+    ini = (ES8388 / "11-xiaorui.ini").read_text()
+    assert "[desktop-launcher]" in ini
+    assert "icon=/usr/share/icons/icon_xiaorui.png" in ini
+    assert "path=/data/xiaorui-ui/xiaorui-start.sh" in ini
+    assert "displayname=小瑞" in ini
+    # 桌面不放退出图标(与界面内的退出按钮重复)
+    assert "icon_xiaorui_exit.png" not in ini
+    assert "displayname=退出小瑞" not in ini
+    # 单独开组, 不改厂商的 big 组(Chromium 占了 big 的唯一格子)
+    assert "name=xiaorui" in ini
+    assert "bottom-of=big" in ini
+
+    # 部署脚本必须把这套东西推上板
+    deploy = (ES8388 / "deploy.sh").read_text()
+    assert "11-xiaorui.ini" in deploy
+    assert "icon_xiaorui.png" in deploy
+    assert "xiaorui-start.sh" in deploy
+    assert "xiaorui-stop.sh" in deploy
+    # 图标名要显示中文: weston 走 fontconfig, 默认 sans-serif 无中文字形
+    assert "fonts-local.conf" in deploy
+    assert "fc-cache" in deploy
+
+
+def test_stop_script_withdraws_ha_watchdog():
+    """退出必须撤掉 HA 的 crond 看护, 否则 2 分钟后 HA 又自己回来。"""
+    stop = (ES8388 / "xiaorui-stop.sh").read_text()
+    assert "crontab" in stop
+    assert "grep -v 'xiaorui-server/start-ha.sh'" in stop
+    # 停 HA 本体: 按 cmdline 找, 不能用 pkill -f(会匹配承载它的 shell)
+    assert "-m homeassistant" in stop
+    assert not [line for line in stop.splitlines()
+                if line.strip().startswith("pkill") and "-f" in line]
+    # 退出也要停 UI 与语音栈
+    assert "S99xiaorui-ui" in stop
+    assert "S98xiaorui" in stop
+    # 只发信号不等待 = 没停干净(LLM 卸模型要几秒, 后台还占 NPU 内存)
+    assert "alive_matching" in stop
+    assert "KILL" in stop
+
+
+def test_start_script_brings_up_the_whole_stack():
+    """启动图标要拉起整套: 语音栈(S98, 含 HA 与看护)+ 触摸 UI(S99)。"""
+    start = (ES8388 / "xiaorui-start.sh").read_text()
+    assert "S98xiaorui" in start
+    assert "S99xiaorui-ui" in start
