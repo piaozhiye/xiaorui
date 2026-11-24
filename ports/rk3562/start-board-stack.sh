@@ -28,6 +28,10 @@ export XR_NPU_LOCK_FILE="${XR_NPU_LOCK_FILE:-/tmp/xiaorui-npu.lock}"
 # 协作式调度(2026-11-19): TTS 请求 NPU 时, RKLLM 在 token 边界主动让出 NPU,
 # TTS 合成完再续写。避免"LLM 整轮生成完(35s) TTS 才能开始"的长等待。
 export XR_NPU_COOPERATIVE="${XR_NPU_COOPERATIVE:-1}"
+# 在线音乐/电台: ffmpeg 解 HTTP 直链(mp3/aac/flac/opus -> 16k mono s16le),
+# 装法见 ports/rk3562/deploy-music.sh。目录不存在时这个赋值无害,
+# music_stream.find_ffmpeg 会继续找 /usr/bin/ffmpeg 等候选。
+export XR_FFMPEG="${XR_FFMPEG:-/data/xiaorui-gateway/deps/ffmpeg-min/ffmpeg}"
 # 人设里写明跑在 RK3562 的 NPU 上(llm_rkllm.py 默认写的是 RK3576)
 export XR_RKLLM_PERSONA="${XR_RKLLM_PERSONA:-你是小瑞，运行在 RK3562 开发板上的端侧语音助手，大脑在本机 NPU 上本地推理。回答控制在两三句话内，适合语音播报，不要用列表。}"
 
@@ -36,6 +40,10 @@ log() { echo "[board-stack $(date +%H:%M:%S)] $*"; }
 mkdir -p "$GW/work" "$GW/data" "$GW/work/tmp"
 ln -sfn "$GW/server/core" "$GW/work/core"
 ln -sfn "$GW/models" "$GW/work/models"
+# 音乐: 离线库与在线歌单。play_music 插件按 music_dir 的同级目录推歌单路径,
+# 两处软链都指向 server/ 同一层, 免得"电台有目录没歌单"。
+ln -sfn "$GW/server/music" "$GW/work/music"
+ln -sfn "$GW/server/music-online" "$GW/work/music-online"
 
 # 网关配置目录必须显式指定: 默认会去找 <pkg>/data/.config.yaml(板上是空的),
 # 结果整份默认配置生效(ASR=FunASR / LLM=ChatGLM / TTS=EdgeTTS)。

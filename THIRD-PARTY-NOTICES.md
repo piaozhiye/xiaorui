@@ -28,6 +28,7 @@ LVGL 上游 MIT 原文见 `ui/third_party/lvgl/LICENCE.txt`（Copyright (c) 2021
 | TLSF（Matthew Conte） | BSD-3-Clause | `include/lvgl/src/misc/lv_tlsf.h` 内全文 |
 | LodePNG（Lode Vandevenne） | zlib | `include/lvgl/src/extra/libs/png/lodepng.h` 内全文 |
 | QR Code（Project Nayuki） | MIT | `include/lvgl/src/extra/libs/qrcode/qrcodegen.h` 内全文 |
+| PyQRCode 1.2.1（Michael Nooner） | BSD-3-Clause | `tools/snapcast_center/pyqrcode/` 源文件内保留完整声明；用于生成本地配对二维码 |
 | stb（Sean Barrett） | MIT 或 public-domain 双选项 | `include/lvgl/src/extra/libs/tiny_ttf/stb_*.h` 内全文 |
 | GIF decoder（lecram） | 上游自述 public domain | [上游说明](https://github.com/lecram/gifdec)；本包 `.so` 有 `gd_*` 解码符号 |
 | TJpgDec（ChaN） | 宽松自定义许可 | `include/lvgl/src/extra/libs/sjpg/tjpgd.h` 保留版权；[原许可条款](https://github.com/lvgl/lvgl/blob/4495f428630cc1741bd8bfd977f080e8460e8e8d/src/extra/libs/sjpg/tjpgd.c)，本包 `.so` 有 `jd_*` 解码符号 |

@@ -28,6 +28,7 @@ The full stack auto-starts on boot (/etc/init.d/S99xrvoice → start-all.sh). Wa
 | Dialogue | Dual-gateway hybrid routing: cloud qwen-flash + cloud ASR ⇄ local RKLLM Qwen2.5-1.5B, per-turn automatic switching |
 | Noise immunity | Server-judged noise → silent turn close; the frontend ends silent turns **without granting a free follow-up window**; single-filler-token gate; short-text gate keeps <4-char noise out of the LLM |
 | Online music / radio | MCP streaming music + SomaFM radio; voice control for volume / next / station / stop during playback; questions during playback **auto-yield the music and resume after the answer**, pure wake is ignored without interrupting |
+| Music player on RK3562 | Same three-tier content source (local offline library → online direct-link radio → MCP point-song) with a **rule-based intent** instead of LLM function call (the 0.5B model does not call tools reliably); first packet 0.06–0.09 s for the local library. Deploy/verify: [ports/rk3562/MUSIC.md](ports/rk3562/MUSIC.md) |
 | Timers / alarms | Chinese clock-style expressions + cloud-ASR variants; announce channel proactively speaks due reminders; sqlite globalized across reconnects |
 | Clock / repeat | Fully offline, colloquial UTC+8 phrasing, instant answer |
 | Local voiceprint | campplus 192-d: enrollment / "who am I" / LLM personalization injection |

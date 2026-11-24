@@ -344,6 +344,10 @@ async def play_local_music(conn: "ConnectionHandler", specific_file=None):
         # kind 陈旧, 会去换台)
         _LAST_MEDIA["kind"] = "music"
         _LAST_MEDIA["radio_name"] = None
+        # 成功也留一行: 本地库这条路没有"流"的日志标记, 不留痕就没法把
+        # "真的在放音乐"和"LLM 回了一句闲聊"区分开(2026-11-23 实测踩过:
+        # 板端自检只看音频包, 把语音回答误判成音乐)。
+        conn.logger.bind(tag=TAG).info(f"播放本地音乐: {selected_music}")
         text = _get_random_play_prompt(selected_music)
         conn.tts.store_tts_text(conn.sentence_id, text)
         # conn.dialogue.put(Message(role="assistant", content=text))
