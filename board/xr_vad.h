@@ -36,6 +36,10 @@ void   xr_vad_calibrate_feed(xr_vad_t *v, double db);
 void   xr_vad_calibrate_finish(xr_vad_t *v);
 double xr_vad_noise_db(const xr_vad_t *v);
 void   xr_vad_clear_preroll(xr_vad_t *v);
+/* FIFO music is not user speech. Gate ordinary VAD while music plays; a KWS
+   hit opens the follow window and lets capture proceed. */
+int    xr_vad_should_gate_music(int music_active, int music_paused, int kws_available);
+void   xr_vad_discard_utterance(xr_vad_t *v);
 void   xr_vad_reset_gate(xr_vad_t *v);
 void   xr_vad_raise_gate(xr_vad_t *v);
 /* *started=1 表示本帧开句. 能量门触发帧不跑端点判定, KWS 强制开句帧的端点判定

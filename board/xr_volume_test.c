@@ -104,13 +104,13 @@ int main(void) {
     char path[64];
     snprintf(path, sizeof(path), "/tmp/xr_volume_test_%d", (int)getpid());
     unlink(path);
-    assert(xr_volume_load(path, 100) == 100);           /* 不存在 -> 缺省 */
+    assert(xr_volume_load(path, XR_VOLUME_DEFAULT) == XR_VOLUME_DEFAULT); /* 不存在 -> 低音量缺省 */
     xr_volume_save(path, 60);
-    assert(xr_volume_load(path, 100) == 60);
+    assert(xr_volume_load(path, XR_VOLUME_DEFAULT) == 60);
     FILE *f = fopen(path, "w"); fputs("garbage\n", f); fclose(f);
-    assert(xr_volume_load(path, 100) == 100);           /* 垃圾 -> 缺省 */
+    assert(xr_volume_load(path, XR_VOLUME_DEFAULT) == XR_VOLUME_DEFAULT); /* 垃圾 -> 缺省 */
     f = fopen(path, "w"); fputs("5\n", f); fclose(f);   /* 越下界 -> 缺省 */
-    assert(xr_volume_load(path, 100) == 100);
+    assert(xr_volume_load(path, XR_VOLUME_DEFAULT) == XR_VOLUME_DEFAULT);
     unlink(path);
     xr_volume_save("/nonexistent-dir/x", 60);           /* 写失败不崩 */
 

@@ -28,7 +28,7 @@ static void sleep_ms(long ms) {
  *   本测试用假 writei 记录每次写入量, 断言不会写出小于一个
  *   period 的块(eof 尾巴与 grace 排空路径除外)。 */
 
-static int opened, closed, prepared, inject_underrun;
+static int opened, closed, prepared, dropped, inject_underrun;
 static size_t written;
 static long long checksum;
 static atomic_int hold_drain;
@@ -36,6 +36,10 @@ static int min_write_seen = 1 << 30;   /* 观察到的最小写入量 */
 static unsigned long first_write_count = 0;  /* 首次写入量(ALSA 看到的粒度) */
 static int writes;
 static unsigned long period_set = 2880;
+static atomic_int hold_write;
+static atomic_int write_blocked;
+static atomic_int capture_next_music_block;
+static atomic_int next_music_block_first;
 
 static int open_fake(snd_pcm_t **p, const char *name, int stream, int flags) {
     (void)stream; (void)flags; assert(!strcmp(name,"xr_spk"));
@@ -56,7 +60,13 @@ static void free_fake(void *p) { (void)p; }
 static int prepare_fake(snd_pcm_t *p) { (void)p; ++prepared; return 0; }
 static int write_fake(snd_pcm_t *p, const void *data, unsigned long count) {
     (void)p;
+    if (atomic_load(&hold_write)) {
+        atomic_store(&write_blocked, 1);
+        while (atomic_load(&hold_write)) sleep_ms(1);
+    }
     if (inject_underrun) { inject_underrun = 0; return -EPIPE; }
+    if (atomic_load(&capture_next_music_block) && writes == 22)
+        atomic_store(&next_music_block_first, ((const int16_t *)data)[0]);
     ++writes;
     if (!first_write_count) first_write_count = count;
     if ((int)count < min_write_seen) min_write_seen = (int)count;
@@ -66,8 +76,13 @@ static int write_fake(snd_pcm_t *p, const void *data, unsigned long count) {
     written += n; return (int)n;
 }
 static int close_fake(snd_pcm_t *p) { (void)p; ++closed; return 0; }
-static int no_op(snd_pcm_t *p) { (void)p; return 0; }
+static int drop_fake(snd_pcm_t *p) { (void)p; ++dropped; return 0; }
 static const char *error_fake(int e) { (void)e; return "test error"; }
+static int delay_fake(snd_pcm_t *p, long *frames) {
+    (void)p;
+    *frames = 0;
+    return 0;
+}
 
 static int drain_fake(snd_pcm_t *pcm) {
     (void)pcm;
@@ -219,6 +234,109 @@ static void test_play_trace_capped(void) {
     unlink(path);
 }
 
+/* 所有权切换前置: release_device 必须真的 close 句柄(否则对端永远 EBUSY) */
+static void test_release_device_closes_handle(void) {
+    written = 0; checksum = 0; prepared = 0; inject_underrun = 0;
+    int c0 = closed;
+    int16_t buf[2880] = {0};
+    assert(xr_player_start() == 0);
+    xr_player_push_pcm(buf, 2880);
+    sleep_ms(200);
+    xr_player_release_device();
+    assert(closed > c0);                       /* 真的 close 了 */
+    /* 再次 start 会自动重新 open */
+    int o0 = opened;
+    assert(xr_player_start() == 0);
+    assert(opened > o0);
+    xr_player_drop();
+}
+
+/* ★ 音乐会话在位(Snapcast FIFO -> 播放环): 语音的 finish/drop 不能把音乐收掉。
+ *   这是 P1"音乐与语音共用一个播放环"的核心语义, 没有它音乐会被每句语音打断。 */
+static void test_music_hold_keeps_playing(void) {
+    written = 0; checksum = 0; prepared = 0; inject_underrun = 0;   /* 独立计数 */
+    int16_t buf[2880];
+    for (size_t i = 0; i < 2880; ++i) buf[i] = (int16_t)(i % 50);
+
+    xr_player_set_music(1);
+    assert(xr_player_music_active());
+    assert(xr_player_start() == 0);
+    for (int i = 0; i < 4; ++i) xr_player_push_pcm(buf, 2880);   /* 音乐 */
+    sleep_ms(300);
+    size_t before = written;
+
+    /* 语音说完: 不许置 eof / join */
+    xr_player_finish();
+    assert(xr_player_music_active());
+    sleep_ms(100);
+    /* 线程还活着: 继续推音乐, 还在写卡 */
+    for (int i = 0; i < 4; ++i) xr_player_push_pcm(buf, 2880);
+    sleep_ms(300);
+    assert(written > before);
+
+    /* 打断: 只清环余量, 线程仍在 */
+    size_t before_drop = written;
+    int drops_before = dropped;
+    xr_player_drop();
+    assert(dropped == drops_before);          /* 音乐占卡时不能 ALSA drop 到 SETUP */
+    sleep_ms(100);
+    for (int i = 0; i < 4; ++i) xr_player_push_pcm(buf, 2880);
+    sleep_ms(300);
+    assert(written > before_drop);
+
+    /* 音乐源断开超过 idle grace 后会 drain+prepare；重连必须重新预滚。 */
+    size_t before_gap = written;
+    int prep_before_gap = prepared;
+    sleep_ms(450);
+    assert(prepared > prep_before_gap);
+    xr_player_push_pcm(buf, 2880);
+    sleep_ms(100);
+    assert(written == before_gap);            /* 一周期不足 3-period 预滚量 */
+    xr_player_push_pcm(buf, 2 * 2880);
+    sleep_ms(300);
+    assert(written > before_gap);             /* 攒够后重连恢复播放 */
+
+    /* 关掉音乐开关后, finish 应恢复"收干净线程"的原语义 */
+    xr_player_set_music(0);
+    assert(!xr_player_music_active());
+    xr_player_finish();
+    assert(xr_player_queued_samples() == 0);
+}
+
+/* 重联时 Snapclient 可能把缓存 PCM 突发写入 FIFO。总待播量超过 250ms 时，
+ * 必须丢弃环里最旧的部分追到实时边沿；否则 B 曾出现 ring 500ms + ALSA 390ms，
+ * A 稳态约 250ms 的差距。ALSA mock 暂停第一 period，让生产端先积累可控积压。 */
+static void test_music_reconnect_drops_stale_ring_backlog(void) {
+    written = 0; checksum = 0; writes = 0; min_write_seen = 1 << 30;
+    first_write_count = 0;
+    atomic_store(&write_blocked, 0);
+    atomic_store(&hold_write, 1);
+    atomic_store(&capture_next_music_block, 0);
+    atomic_store(&next_music_block_first, -1);
+    xr_player_set_music(1);
+    assert(xr_player_start() == 0);
+
+    int16_t preroll[2 * 2880];
+    for (size_t i = 0; i < 2 * 2880; ++i) preroll[i] = 111;
+    xr_player_push_music_pcm(preroll, 2 * 2880);
+    for (int i = 0; i < 100 && !atomic_load(&write_blocked); ++i) sleep_ms(10);
+    assert(atomic_load(&write_blocked));
+
+    static int16_t backlog[20000];
+    for (size_t i = 0; i < 20000; ++i) backlog[i] = (int16_t)(1000 + i);
+    xr_player_push_music_pcm(backlog, 20000);
+    assert(xr_player_queued_samples() >= 20000);
+    atomic_store(&capture_next_music_block, 1);
+    atomic_store(&hold_write, 0);
+    for (int i = 0; i < 200 && atomic_load(&next_music_block_first) < 0; ++i) sleep_ms(10);
+    assert(atomic_load(&next_music_block_first) >= 15000); /* 丢掉老队列，保留最新约250ms */
+
+    atomic_store(&capture_next_music_block, 0);
+    xr_player_set_music(0);
+    xr_player_finish();
+    assert(xr_player_queued_samples() == 0);
+}
+
 int main(void) {
     const xr_audio_output_ops_t ops = {
         .a_open=open_fake, .a_hwp_malloc=alloc_fake, .a_hwp_any=any_fake,
@@ -226,8 +344,8 @@ int main(void) {
         .a_set_channels=unsigned_fake, .a_set_rate=rate_fake,
         .a_set_ps=period_fake, .a_set_periods=rate_fake,
         .a_hwp=any_fake, .a_hwp_free=free_fake, .a_prepare=prepare_fake,
-        .a_writei=write_fake, .a_drop=no_op, .a_close=close_fake,
-        .a_drain=drain_fake, .a_strerror=error_fake,
+        .a_writei=write_fake, .a_drop=drop_fake, .a_close=close_fake,
+        .a_drain=drain_fake, .a_strerror=error_fake, .a_delay=delay_fake,
     };
     assert(xr_player_init(&ops)==0);
 
@@ -258,6 +376,13 @@ int main(void) {
     /* 新增: 诊断转储文件容量上限(2026-11-20 根分区 99% 事故) */
     test_play_dump_capped();
     test_play_trace_capped();
+
+    /* 新增: 音乐会话在位时, 语音 finish/drop 不能把音乐收掉 */
+    test_music_hold_keeps_playing();
+    test_music_reconnect_drops_stale_ring_backlog();
+
+    /* 新增: release_device 真的 close 句柄, 再次 start 重新 open */
+    test_release_device_closes_handle();
 
     atomic_store(&hold_drain, 1);
     assert(xr_player_start() == 0);

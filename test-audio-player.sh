@@ -20,6 +20,11 @@ trap 'rm -f "$TEST_DIR"/*; rmdir "$TEST_DIR"' EXIT
     "$DIR/board/audio_player.c" "$DIR/board/xr_volume.c" "$DIR/board/audio_player_open_test.c" \
     -ldl -lpthread -o "$TEST_DIR/player_open"
 "$TEST_DIR/player_open"
+# P3 FIFO 让位状态机(无硬件): 环与让位态转换
+"${HOST_CC:-cc}" -std=c11 -O2 -Wall -Wextra -Werror -DXR_PLAYER_USE_DLOPEN_OPUS=1 -I"$DIR/board" \
+    "$DIR/board/audio_player.c" "$DIR/board/xr_volume.c" "$DIR/board/audio_player_yield_test.c" \
+    -ldl -lpthread -o "$TEST_DIR/yield"
+XR_TEST_REAL_RESUME_SCRIPT="$DIR/ports/rk3562/snapclient-alsa-resume.sh" "$TEST_DIR/yield"
 "${HOST_CC:-cc}" -std=c11 -O2 -Wall -Wextra -Werror -I"$DIR/board" \
     "$DIR/board/audio_capture.c" "$DIR/board/audio_capture_test.c" \
     -ldl -o "$TEST_DIR/capture"

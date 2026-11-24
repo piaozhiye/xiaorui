@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
 #include <sys/wait.h>
@@ -258,9 +259,20 @@ static int cue_load(const char *path, int16_t **out_pcm, size_t *out_n, const ch
     fprintf(stderr, "[xr] %s loaded (%zu samples @24k)\n", tag, *out_n);
     return 0;
 }
-static int ack_load(const char *path) { return cue_load(path, &ack_pcm, &ack_n, "ack"); }
+static int ack_load(const char *path) {
+    int rc = cue_load(path, &ack_pcm, &ack_n, "ack");
+    /* 唤醒确认音靠近用户且容易被感知为突兀；单独做 PCM 预衰减，仍
+       叠加用户总音量，不碰 codec/mixer，也不改变回答和音乐的电平。 */
+    if (!rc) xr_volume_apply(ack_pcm, ack_n, 60);
+    return rc;
+}
+
+static long mic_read_raw(snd_pcm_t *mic, int16_t *out16k, int frames16k);
+static int g_fifo_fd;   /* 真实定义见下方; 这里先声明给 fifo 感知的读适配用 */
 
 static long music_read(void *context, int16_t *pcm, size_t samples) {
+    if (g_fifo_fd >= 0)   /* fifo 模式没有 snd_pcm 句柄, 走外部供流读 */
+        return mic_read_raw(NULL, pcm, (int)samples);
     long n = xr_capture_read(context, pcm, samples);
     if (n == -EPIPE) { xr_capture_prepare(context); return 0; }
     return n;
@@ -328,6 +340,8 @@ static cap_accum_t g_cap_acc;
 
 static long cap_read_adapter(void *dev, int16_t *dst, unsigned long want)
 {
+    if (g_fifo_fd >= 0)   /* fifo 模式: mic 句柄为 NULL, 不能直接 readi */
+        return mic_read_raw(NULL, dst, (int)want);
     return xr_capture_read(dev, dst, want);
 }
 
@@ -740,6 +754,174 @@ static void *xr_watchdog(void *arg) {
 }
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpragmas"
+/* ---- Snapcast 音乐: FIFO -> 播放环 ----------------------------------------
+ * 音乐由板上的 snapclient 解码后写进这个 FIFO(24kHz 单声道 s16le),
+ * 前端把它推进自己的播放环, 这样:
+ *   - 声卡只有前端一个主人(不存在 snapclient 抢 hw / mixer)
+ *   - 语音提示可以和音乐在同一个环里按时间交织
+ * 用 XR_MUSIC_FIFO=<路径> 打开; 默认不开, 保持原行为。
+ *
+ * 注意: snapclient 用 fopen(path,"wb") 打开出口, FIFO 没有读者时它会卡住,
+ * 所以本线程必须在客户端启动**之前**就在跑(开机顺序)。
+ */
+static void *xr_music_fifo_thread(void *arg) {
+    const char *path = (const char *)arg;
+    int16_t buf[2880];
+    int fd = -1;
+    int announced = 0;
+    int music_started = 0;
+    int have_signal = 0;
+    struct timespec last_signal = {0};
+    /* XR_MUSIC_TRACE=1: 每次 read 打一行累计字节+本次字节, 用来量供流节奏。
+       板内核没开 /proc/<pid>/io, 只能在这里埋。默认关闭不影响行为。 */
+    const int trace = getenv("XR_MUSIC_TRACE") != NULL;
+    size_t trace_total = 0;
+    unsigned reconnects = 0;
+    /* Correlate FIFO lifecycle with audio_player's XR_PLAY_TRACE monotonic
+       timestamps.  In particular, a FIFO EOF can leave PCM already queued in
+       the frontend ring/ALSA device; record that exact queue before changing
+       session state so a reconnect phase jump is measurable, not guessed. */
+    #define MUSIC_TRACE_EVENT(event_name, nbytes) do { \
+        if (trace) { \
+            struct timespec event_ts; \
+            clock_gettime(CLOCK_MONOTONIC, &event_ts); \
+            fprintf(stderr, "[xr] music_fifo_event %ld.%06ld %s reconnect=%u bytes=%zu ring_samples=%zu\n", \
+                    (long)event_ts.tv_sec, (long)(event_ts.tv_nsec / 1000), \
+                    (event_name), reconnects, (size_t)(nbytes), xr_player_queued_samples()); \
+            fflush(stderr); \
+        } \
+    } while (0)
+    for (;;) {
+        if (fd < 0) {
+            /* 用 open+read 而不是 fopen+fread: fread 会**阻塞到读满请求的条数**
+             * (snapclient 每 ~50ms 才来一股, 凑 120ms 会让 80ms 的 ALSA 缓冲干转,
+             * 实测持续 underrun)。read() 是"有多少读多少"。
+             * open(O_RDONLY) 在 FIFO 上会等写端, 与客户端的 fopen("wb") 对称。 */
+            fd = open(path, O_RDONLY);
+            if (fd < 0) { sleep(1); continue; }
+            if (reconnects > 0) MUSIC_TRACE_EVENT("writer_reopened", trace_total);
+            if (!announced) {
+                fprintf(stderr, "[xr] music fifo: %s\n", path);
+                announced = 1;
+            }
+        }
+        ssize_t n = read(fd, buf, sizeof(buf));
+        if (n <= 0) {
+            if (n == 0 || (errno != EINTR && errno != EAGAIN)) {
+                MUSIC_TRACE_EVENT(n == 0 ? "writer_eof" : "read_error", trace_total);
+                close(fd); fd = -1;
+                if (music_started) {
+                    /* 音源写端断开，释放音乐持仓。 */
+                    xr_player_set_music(0);
+                    music_started = 0;
+                }
+                reconnects++;
+                sleep(1);                       /* 写端断开: 等下一路音频 */
+            }
+            continue;
+        }
+        /* Snapclient 的 file player 在空闲流期间也会持续输出静音 PCM，因此不能
+         * 把 FIFO 收到字节当作“正在播放”。本机音乐控制器的短时 music.active 心跳
+         * 优先；其他客户端没有这个本地文件时，用非零 PCM + 3s 静音宽限识别音频。
+         */
+        const char *active_path = getenv("XR_MUSIC_ACTIVE_FILE");
+        if (!active_path || !*active_path) active_path = "/data/xiaorui/snapcast/music.active";
+        struct stat active_stat;
+        time_t now = time(NULL);
+        int active = stat(active_path, &active_stat) == 0
+                     && active_stat.st_mtime >= now - 2
+                     && active_stat.st_mtime <= now + 2;
+        size_t samples = (size_t)n / sizeof(buf[0]);
+        int chunk_signal = 0;
+        for (size_t i = 0; i < samples; i++) {
+            if (buf[i] != 0) {
+                chunk_signal = 1;
+                break;
+            }
+        }
+        if (chunk_signal) {
+            have_signal = 1;
+            clock_gettime(CLOCK_MONOTONIC, &last_signal);
+        }
+        if (have_signal) {
+            struct timespec mono_now;
+            clock_gettime(CLOCK_MONOTONIC, &mono_now);
+            long quiet_ms = (long)(mono_now.tv_sec - last_signal.tv_sec) * 1000L
+                          + (mono_now.tv_nsec - last_signal.tv_nsec) / 1000000L;
+            if (quiet_ms >= 0 && quiet_ms <= 3000) active = 1;
+        }
+        if (active && !music_started) {
+            MUSIC_TRACE_EVENT("music_session_start", trace_total);
+            xr_player_set_music(1);
+            if (xr_player_start() != 0) {
+                fprintf(stderr, "[xr] music fifo: 播放环起不来\n");
+                xr_player_set_music(0);
+                close(fd); fd = -1; sleep(1); continue;
+            }
+            music_started = 1;
+        } else if (!active && music_started) {
+            MUSIC_TRACE_EVENT("music_session_idle", trace_total);
+            xr_player_set_music(0);
+            music_started = 0;
+        }
+        if (!active) {
+            continue;
+        }
+        trace_total += (size_t)n;
+        if (trace) {
+            struct timespec tnow;
+            clock_gettime(CLOCK_MONOTONIC, &tnow);
+            fprintf(stderr, "[xr] fifo_read %ld.%06ld total=%zu bytes=%zd ring_samples=%zu\n",
+                    (long)tnow.tv_sec, (long)(tnow.tv_nsec / 1000),
+                    trace_total, n, xr_player_queued_samples());
+        }
+        xr_player_push_music_pcm(buf, samples);
+    }
+    #undef MUSIC_TRACE_EVENT
+    return NULL;
+}
+
+/* 测试钩子(默认关): XR_VOICE_INJECT=<24k/mono/s16le 文件> 时周期注入"语音"
+ * (走正常语音 push 路径), 用来在无 ASR/TTS 后端时验证"音乐让位 -> 语音 -> 音乐恢复"。
+ *   XR_VOICE_INJECT_COUNT(默认 100)、XR_VOICE_INJECT_GAP_MS(默认 1500)。
+ * 每次: 从头读该 PCM, 按实时节奏 push(前面显式 voice_begin), 排空后 voice_end。 */
+static void *xr_voice_inject_thread(void *arg) {
+    (void)arg;
+    const char *path = getenv("XR_VOICE_INJECT");
+    if (!path || !*path) return NULL;
+    int count = 100, gap_ms = 1500;
+    if (getenv("XR_VOICE_INJECT_COUNT")) count = atoi(getenv("XR_VOICE_INJECT_COUNT"));
+    if (getenv("XR_VOICE_INJECT_GAP_MS")) gap_ms = atoi(getenv("XR_VOICE_INJECT_GAP_MS"));
+    FILE *f = fopen(path, "rb");
+    if (!f) { fprintf(stderr, "[xr] voice_inject: 打不开 %s\n", path); return NULL; }
+    int16_t pcm[2400];
+    fprintf(stderr, "[xr] voice_inject: %s x%d gap=%dms\n", path, count, gap_ms);
+    sleep(8);   /* 等音乐 FIFO 先打开并置 music_active, 避免第一轮和音乐启动抢环 */
+    for (int i = 0; i < count; i++) {
+        struct timespec d = {.tv_nsec = (long)gap_ms * 1000000L};
+        while (d.tv_nsec >= 1000000000L) { d.tv_sec++; d.tv_nsec -= 1000000000L; }
+        nanosleep(&d, NULL);
+        if (fseek(f, 0, SEEK_SET) != 0) { }
+        xr_player_start();                 /* 音乐在位: 复用线程/环 */
+        xr_player_voice_begin();           /* 显式让位(回合级) */
+        size_t total = 0, n;
+        while ((n = fread(pcm, sizeof(int16_t), 2400, f)) > 0) {
+            xr_player_push_pcm(pcm, n);    /* 语音 PCM 入环(让位已显式开启) */
+            total += n;
+            struct timespec px = {.tv_nsec = (long)(n / 24) * 1000000L};  /* 24k 实时节流 */
+            nanosleep(&px, NULL);
+        }
+        for (int w = 0; w < 200 && xr_player_queued_samples() > 0; w++) {
+            struct timespec px = {.tv_nsec = 20000000L};
+            nanosleep(&px, NULL);
+        }
+        xr_player_voice_end();
+        fprintf(stderr, "[xr] voice_inject %d/%d %zu samples\n", i + 1, count, total);
+    }
+    fclose(f);
+    return NULL;
+}
+
 int main(int argc, char **argv) {
     g_started_at = now_s();   /* 预热期起点(见 preparing_seconds) */
     g_original_argv = argv;
@@ -835,7 +1017,7 @@ int main(int argc, char **argv) {
             cue_load("/data/xiaorui-server/board-scripts/xr_volack24k.wav",
                      &vol_pcm, &vol_n, "volack");
     }
-    g_vol_pct = xr_volume_load(volume_state_path(), 100);
+    g_vol_pct = xr_volume_load(volume_state_path(), XR_VOLUME_DEFAULT);
     xr_player_set_volume(g_vol_pct);
     fprintf(stderr, "[xr] 音量=%d%% (软件增益, 状态=%s)\n", g_vol_pct, volume_state_path());
     fprintf(stderr, "[xr] buffers ready\n");
@@ -843,10 +1025,32 @@ int main(int argc, char **argv) {
     snd_pcm_t *mic = NULL;
     xr_playback_control_t playback_control = {0};
     int kws_wake_this_utt = 0;      /* 本句由 KWS 声学唤醒 */
+    int music_vad_gated = 0;
+    double music_wake_hold_until = 0.0; /* 纯唤醒后留 8s 接收分句指令 */
     /* 轮次状态机: LISTEN/RESPOND、跟说窗、冷却、轮次计时、ping 节律 */
     xr_session_t ses;
     xr_session_init(&ses);
     xr_session_set_follow_window(&ses, config->follow_window_s);
+    /* 真实后端端到端回归: XR_TEXT_INJECT 配合 _REPEAT/_GAP_MS 可连续提交 N 轮文本
+       (绕过 ASR, 但 LLM+TTS 走真实网关)。默认 REPEAT=1 即原来的单次注入行为。
+       DELAY_MS 可等外部音乐/FIFO 链启动后再提交, 仅用于受控实机测试。 */
+    char inj_text[256] = {0};
+    int inj_total = 1, inj_done = 0, inj_gap_ms = 2000, inj_delay_ms = 0;
+    double inj_next = 0;
+    {
+        const char *ie = getenv("XR_TEXT_INJECT");
+        if (ie && *ie) snprintf(inj_text, sizeof inj_text, "%s", ie);
+        const char *ir = getenv("XR_TEXT_INJECT_REPEAT");
+        if (ir) inj_total = atoi(ir);
+        const char *ig = getenv("XR_TEXT_INJECT_GAP_MS");
+        if (ig) inj_gap_ms = atoi(ig);
+        const char *id = getenv("XR_TEXT_INJECT_DELAY_MS");
+        if (id) {
+            long delay = strtol(id, NULL, 10);
+            if (delay > 0 && delay <= 60000) inj_delay_ms = (int)delay;
+        }
+        if (inj_total < 1) inj_total = 1;
+    }
     /* 后端选择: 默认 local(板上服务端); XR_BACKEND=cloud 走小智 v1 协议连
        LAN 网关/云端(端点 XR_CLOUD_URL, 详见 backend_cloud.c); XR_BACKEND=hybrid
        云端优先/本地兜底(逐轮切换, 详见 backend_hybrid.c). 会话级选择,
@@ -873,8 +1077,44 @@ int main(int argc, char **argv) {
             pthread_detach(wd_tid);
         else fprintf(stderr, "[xr] ERROR watchdog thread unavailable (no heartbeat)\n");
     }
+    {
+        const char *fifo = getenv("XR_MUSIC_FIFO");
+        if (fifo && *fifo) {
+            pthread_t mt;
+            if (pthread_create(&mt, NULL, xr_music_fifo_thread, (void *)fifo) == 0)
+                pthread_detach(mt);
+            else fprintf(stderr, "[xr] ERROR music fifo thread unavailable\n");
+            const char *vi = getenv("XR_VOICE_INJECT");
+            if (vi && *vi) {
+                pthread_t vt;
+                if (pthread_create(&vt, NULL, xr_voice_inject_thread, NULL) == 0)
+                    pthread_detach(vt);
+                else fprintf(stderr, "[xr] ERROR voice inject thread unavailable\n");
+            }
+        }
+    }
+    /* 诊断专用: 只跑 FIFO -> 播放环 -> ALSA，跳过声学采集/VAD/网关。
+       声学同步探针会被常驻 VAD 当作用户说话，触发语音中断并污染测量。
+       不设置时不改变正常语音交互行为。 */
+    const char *music_only = getenv("XR_MUSIC_ONLY");
+    if (music_only && atoi(music_only) != 0) {
+        if (!getenv("XR_MUSIC_FIFO") || !*getenv("XR_MUSIC_FIFO")) {
+            fprintf(stderr, "[xr] XR_MUSIC_ONLY requires XR_MUSIC_FIFO\n");
+            return 2;
+        }
+        fprintf(stderr, "[xr] music-only diagnostic mode (capture/VAD loop/backend connection disabled)\n");
+        while (!got_sig) {
+            xr_tick();
+            struct timespec wait = {.tv_nsec = 200000000};
+            nanosleep(&wait, NULL);
+        }
+        xr_player_release_device();
+        return 0;
+    }
 
 restart:
+    music_vad_gated = 0;   /* 重连后重新清理可能残留的音乐回声预滚 */
+    music_wake_hold_until = 0.0;
     /* 网关要重新连: 预热/兜底计时重新开始 —— 不能用进程启动时的旧
      * 时间, 否则后期重连只剩几秒就强行显示正常态(2026-11-20 review)。 */
     g_started_at = now_s();
@@ -979,18 +1219,24 @@ restart:
     fprintf(stderr, "[xr] ambient=%.1f gate=%.1f\n",
             xr_vad_noise_db(&vad), xr_vad_noise_db(&vad) + vad.margin);
 
+    /* 相对采集/标定完成时计时，给受控实机用例留出启动 Snapclient/FIFO 的窗口。 */
+    if (inj_text[0] && inj_delay_ms > 0)
+        inj_next = now_s() + inj_delay_ms / 1000.0;
+
     /* 测试钩子: XR_TEXT_INJECT=指令 -- 开麦+标定后直接提交文本(验证 backend 接口
        全链, 绕过声学; 正常使用不设此 env)。必须在 xr_capture_open 之后: TTS_STOP 的
        xr_capture_drop/xr_capture_prepare 与后续 LISTEN 读帧都依赖有效 mic 句柄 */
     {
         const char *inj = getenv("XR_TEXT_INJECT");
-        if (inj && inj[0]) {
+        if (inj && inj[0] && now_s() >= inj_next) {
             if (be_submit_text(be, inj) == 0) {
                 fprintf(stderr, "[xr] 注入指令: %s\n", inj);
                 unsetenv("XR_TEXT_INJECT"); /* A reconnect must not replay the test hook. */
                 xr_session_begin_turn(&ses, now_s());
                 ui_turn_reset(&ui);
                 xr_player_start();
+                inj_done = 1;
+                inj_next = now_s() + inj_gap_ms / 1000.0;
                 goto inject_wait;
             }
         }
@@ -1001,6 +1247,34 @@ restart:
 inject_wait:
     while (!got_sig) {
         xr_tick();   /* 每次迭代续命: 卡在 ALSA 读/RKNN 精修/poll 即停摆, 看门狗接管 */
+        /* 回合级音乐恢复: 离开 RESPOND(说完/被打断/超时)就让音乐回来。
+           FIFO 路径下音乐由 xr_player_push_music_pcm 持续供给, 这里只切让位态。 */
+        /* 音乐让位自愈: FIFO 路径下只要还处于暂停态、且已经不在 RESPOND
+           (说完/被打断/超时/ws 断线 goto restart 后 ses.state=LISTEN),
+           就恢复音乐。这样不依赖某一次状态边沿, 任何离开路径都能恢复。 */
+        if (xr_player_music_paused() && ses.state != XR_SESSION_RESPOND &&
+            !vad.in_utt && !kws_wake_this_utt && xr_player_queued_samples() == 0 &&
+            now_s() >= music_wake_hold_until) {
+            xr_player_voice_end();
+            music_wake_hold_until = 0.0;
+        }
+        /* 真实后端回归: 每轮结束(非 RESPOND)且到间隔就提交下一轮。
+           放在每轮循环里(而不是只在 RESPOND->LISTEN 那一次), 否则若首轮比
+           间隔还快, 条件在那一次不成立就永远不再尝试。 */
+        if (inj_text[0] && inj_done < inj_total &&
+            ses.state != XR_SESSION_RESPOND && now_s() >= inj_next) {
+            if (be_submit_text(be, inj_text) == 0) {
+                inj_done++;
+                xr_session_begin_turn(&ses, now_s());
+                ui_turn_reset(&ui);
+                xr_player_start();
+                inj_next = now_s() + inj_gap_ms / 1000.0;
+                fprintf(stderr, "[xr] 注入指令 %d/%d: %s\n",
+                        inj_done, inj_total, inj_text);
+            } else {
+                inj_next = now_s() + 1.0;   /* 发送失败(多半断连): 1s 后重试 */
+            }
+        }
         if (service_ui(&ui)) {
             xr_playback_control_stop(&playback_control, g_vol_pct);
             if (be_abort(be) != 0) goto restart;
@@ -1184,6 +1458,7 @@ inject_wait:
                    missing-command 就是这个), 最后还会播一声弃轮提示音, 用户
                    观感是"喊了没反应/总是断开"。 */
                 int is_wake = !strcmp(ev_text, "wake");
+                if (!is_wake) music_wake_hold_until = 0.0;
                 xr_playback_control_stop(&playback_control, g_vol_pct);
                 xr_player_drop();
                 /* 文本没确认唤醒(KWS 误触/噪声): 撤销声学临时窗口, 恢复命中前
@@ -1217,6 +1492,11 @@ inject_wait:
                 continue;
             }
             if (ev == EV_TTS_STOP) {
+                music_wake_hold_until = 0.0;
+                /* 先量 TTS_STOP 时环里还剩多少语音: 决定 voice_end 硬清环是否会截尾。 */
+                fprintf(stderr, "[xr] tts stop: queued=%zu (%.2fs)\n",
+                        xr_player_queued_samples(),
+                        xr_player_queued_samples() / 24000.0);
                 xr_playback_control_stop(&playback_control, g_vol_pct);
                 ui.abort_failed = 0;
                 int cancelled = xr_player_finish_with_poll(
@@ -1285,6 +1565,7 @@ inject_wait:
                 xr_vad_reset_gate(&vad);
                 fprintf(stderr, "[xr] 回答完毕, 30s 内免唤醒\n");
             } else if (ev == EV_TTS_START) {
+                music_wake_hold_until = 0.0;
                 /* 语音真的能用了: 网关发得出 TTS, 说明 RockTTS 已加载就绪。
                  * 界面据此结束"正在准备语音…"—— 比固定 60 秒窗口准:
                  * 慢机器上 60 秒可能还没好, 快机器上早就能说了(2026-11-20
@@ -1330,6 +1611,8 @@ inject_wait:
                 }
                 printf("[event] %.160s\n", (const char *)wsbuf);
             } else if (ev == EV_TTS_AUDIO) {
+                /* 第一句 TTS 音频到达: 此刻才让位(思考期音乐照常)。幂等。 */
+                xr_player_voice_begin();
                 int ns = xr_player_push_opus(wsbuf, l);
                 xr_session_note_packet(&ses, now_s(), ns,
                                        xr_player_queued_samples() / 24000.0,
@@ -1420,11 +1703,29 @@ inject_wait:
             }
         }
 
+        /* FIFO 音乐在所有播放期都会回灌麦克风。仅靠 VQE/AEC 配置不能保证
+           消除它(板端实测音乐触发过 VAD 并上传静音轮), 所以只喂 KWS、不喂
+           普通能量 VAD。KWS 命中即暂停音乐；纯唤醒后最多留 8s 接分句指令，
+           超时恢复音乐后仍只接受 KWS。进入 gate 时清掉已积累的回声句和预滚。 */
+        int music_gate = xr_vad_should_gate_music(
+            xr_player_music_active(), xr_player_music_paused(), wake_available());
+        if (music_gate && !music_vad_gated) {
+            xr_vad_discard_utterance(&vad);
+            g_pending_n = 0;
+            kws_wake_this_utt = 0;
+            fprintf(stderr, "[xr] music VAD gate on (KWS remains active)\n");
+        }
+        music_vad_gated = music_gate;
+
         /* 声学 KWS 常驻: 无论是否在采集语句中都持续喂(命中需积累 ~640ms chunk,
            若只在空闲喂, 能量门总会在唤醒词第一个字就先触发 in_utt 导致 KWS 永远吃不满) */
         if (wake_available()) {
             if (wake_poll(frame, (int)n)) {
                 kws_wake_this_utt = 1;      /* 声学证据: 后续文本判定兜底用 */
+                if (xr_player_music_active() && !xr_player_music_paused()) {
+                    xr_player_voice_begin(); /* 先停音乐, 再录用户指令 */
+                    music_wake_hold_until = now_s() + 8.0;
+                }
                 /* ★ 声学唤醒命中 -> 本地**立刻**开跟说窗, 不等服务端判。
                    服务端判唤醒要等: VAD 静音 1.2~1.6s 判"说完" + RockASR 1.4s
                    + 一来一回, 约 3s。这 3s 里用户紧接着说的指令整段丢失
@@ -1452,6 +1753,9 @@ inject_wait:
             }
         }
 
+        if (music_gate && !kws_wake_this_utt)
+            continue;   /* 唤醒检测仍持续; 普通音乐能量不进入 ASR */
+
         int vad_started = 0;
         xr_vad_result_t vr = XR_VAD_CONTINUE;
         /* 上一轮等待服务端判定期间积压的帧: **先**补喂(它们比当前帧更早),
@@ -1469,6 +1773,13 @@ inject_wait:
         }
         vr = xr_vad_feed(&vad, frame, (int)n, db, &vad_started);
         if (vr == XR_VAD_TOO_SHORT) {
+            if (xr_player_music_paused() && ses.state != XR_SESSION_RESPOND) {
+                kws_wake_this_utt = 0;
+                if (now_s() >= music_wake_hold_until) {
+                    xr_player_voice_end();
+                    music_wake_hold_until = 0.0;
+                }
+            }
             /* VAD已抬门；必须继续读麦。1.5s阻塞大于VQE的400ms硬件缓冲，
                会造成overrun并吞掉紧接着的短指令/KWS。采样节律由readi约束。 */
             continue;

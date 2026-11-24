@@ -27,6 +27,7 @@ int xr_volume_parse(const char *text, xr_vol_op_t *op, int *value);
 #define XR_VOLUME_MIN 10
 #define XR_VOLUME_MAX 100
 #define XR_VOLUME_STEP 20
+#define XR_VOLUME_DEFAULT 15
 int xr_volume_next(int current, xr_vol_op_t op, int value);
 
 /* pct 超出 (0,100) 不动样本(100 逐位直通, 0/负值视为未设置)。 */

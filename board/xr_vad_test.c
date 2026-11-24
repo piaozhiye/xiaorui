@@ -30,6 +30,13 @@ int main(void) {
     int started = 0;
     xr_vad_result_t r;
 
+    /* 0. Music playback must not open ordinary VAD; KWS-follow capture and
+       paused playback are deliberately allowed through. */
+    CHECK(xr_vad_should_gate_music(1, 0, 1), "音乐期间应屏蔽能量 VAD");
+    CHECK(!xr_vad_should_gate_music(0, 0, 1), "无音乐时保持原 VAD 行为");
+    CHECK(!xr_vad_should_gate_music(1, 1, 1), "音乐已让位时允许采集");
+    CHECK(!xr_vad_should_gate_music(1, 0, 0), "没有 KWS 时保留能量 VAD 兜底");
+
     /* 1. 标定: 中位数, 且 -75 下限 */
     xr_vad_init(&v, utt, sizeof utt / sizeof utt[0]);
     calibrate(-50.0);
@@ -252,6 +259,16 @@ int main(void) {
     }
     CHECK(r == XR_VAD_UTT_DONE && quiet_frames <= 5,
           "重置后开句必须在 0.5s 静音内收尾(修复前会拖到 12.1s 上限)");
+
+    /* 14. 进入音乐抑制时丢掉此前累积的回声句子和预滚, 不把它们上传。 */
+    xr_vad_init(&v, utt, sizeof utt / sizeof utt[0]);
+    calibrate(-50.0);
+    fill(2000);
+    xr_vad_feed(&v, frame, FRAME_SAMPLES, -20.0, &started);
+    CHECK(v.in_utt && v.pre_n > 0, "预备 discard 用的活动句子和预滚");
+    xr_vad_discard_utterance(&v);
+    CHECK(!v.in_utt && v.utt_n == 0 && v.pre_n == 0 && v.quiet == 0,
+          "discard 应清除活动句子、预滚和端点状态");
 
     fprintf(stderr, failures ? "xr_vad_test: %d FAILED\n" : "xr_vad_test: OK\n", failures);
     return failures ? 1 : 0;
