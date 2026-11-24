@@ -1,5 +1,5 @@
 #!/bin/bash
-# 最小化交叉构建 ffmpeg：仅 http/https 拉流 + mp3/aac/flac/opus 解码 + swresample。
+# 最小化交叉构建 ffmpeg：仅 http/https 拉流 + mp3/aac/flac/opus/PCM WAV 解码 + swresample。
 # 产物约 2M/个，动态链接板上系统库（libssl/libcrypto/libc），DNS 走系统 NSS。
 # 用途：网关 pcm_frames() 的解码子进程（见 README §3.1/3.2）。
 #
@@ -37,6 +37,17 @@ fi
 W=${WORK:-$HOME/ffmpeg-min}
 mkdir -p "$W"
 
+# The existing gateway build keeps HTTPS support by default. A board-local
+# Snapcast controller only reads the local music library, so it can build an
+# isolated no-TLS decoder to avoid binding to a particular OpenSSL ABI.
+WITH_OPENSSL=${XR_FFMPEG_ENABLE_OPENSSL:-1}
+TARGET_CPU=${XR_FFMPEG_CPU:-cortex-a53}
+case "$WITH_OPENSSL" in
+  1) OPENSSL_CONFIG=--enable-openssl; PROTOCOLS=file,http,https,tcp,tls,pipe ;;
+  0) OPENSSL_CONFIG=--disable-openssl; PROTOCOLS=file,http,tcp,pipe ;;
+  *) echo "XR_FFMPEG_ENABLE_OPENSSL must be 0 or 1" >&2; exit 2 ;;
+esac
+
 # 源码自动获取: 缺失或指纹不符时从 ffmpeg.org 断点续传下载(国内链路常见截断,
 # -C - 续传可救, 最多 5 次)。sha256 是 2026-11-02 自 ffmpeg.org 取得、经上板
 # 验证构建的同一份文件 —— 锁指纹保证 runbook 复现的是验证过的源码。
@@ -69,14 +80,15 @@ cd src
 ./configure \
   --cross-prefix="$CROSS" \
   --arch=aarch64 --target-os=linux --enable-cross-compile \
+  --cpu="$TARGET_CPU" \
   --sysroot="$STAGING" \
   --prefix="$W/installed" \
   --disable-autodetect --disable-doc --disable-debug --disable-ffplay \
   --disable-everything --enable-small \
-  --enable-openssl \
-  --enable-protocol=file,http,https,tcp,tls,pipe \
+  "$OPENSSL_CONFIG" \
+  --enable-protocol="$PROTOCOLS" \
   --enable-demuxer=aac,flac,hls,mp3,mov,ogg,wav \
-  --enable-decoder=aac,flac,mp3,mp3float,opus \
+  --enable-decoder=aac,flac,mp3,mp3float,opus,pcm_s16le \
   --enable-parser=aac,flac,mp3,opus \
   --enable-filter=aformat,aresample,anull \
   --enable-muxer=pcm_s16le,null \

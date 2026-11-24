@@ -1,0 +1,22 @@
+#!/bin/sh
+# Installed after S98xiaorui so the frontend has opened its music FIFO first.
+SERVICE=/data/xiaorui/snapcast/service.sh
+case "${1:-start}" in
+    start)
+        if [ -x "$SERVICE" ] && [ -r /data/xiaorui/snapcast/service.env ]; then
+            "$SERVICE" start
+        else
+            echo "xiaorui-snapcast: not configured; skipping"
+        fi
+        ;;
+    stop)
+        [ -x "$SERVICE" ] && "$SERVICE" stop || true
+        ;;
+    restart)
+        [ -x "$SERVICE" ] && "$SERVICE" restart
+        ;;
+    status)
+        [ -x "$SERVICE" ] && "$SERVICE" status
+        ;;
+    *) echo "usage: $0 {start|stop|restart|status}" >&2; exit 2 ;;
+esac

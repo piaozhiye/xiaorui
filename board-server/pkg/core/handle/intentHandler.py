@@ -306,6 +306,38 @@ async def _h_radio(conn, text, m):
     return await try_radio_intent(conn, text)
 
 
+async def _h_music(conn, text, m):
+    """规则命中"放歌": 直接进 play_music, 不等 LLM 发起 function call。
+
+    Qwen2.5-0.5B 的 function call 命中率不稳(实测"播放音乐"被它答成
+    "对不起, 我无法直接播放音乐"), 所以放歌走原文规则, 和电台一样。
+    这条路没有 LLM 的正文, 收尾的 FIRST/LAST 动作标记得自己发,
+    否则客户端收不到 stop, 整轮挂住。
+    """
+    from plugins_func.functions.play_music import (
+        _genre_like, handle_music_command, try_radio_intent)
+    from core.providers.tts.dto.dto import TTSMessageDTO, SentenceType, ContentType
+    from core.handle.sendAudioHandle import send_stt_message
+    import uuid
+
+    song = (m or "").strip()
+    # 风格词("轻音乐"/"爵士")当电台走: 硬搜歌名只会拿到几秒试听
+    if song and _genre_like(song):
+        if await try_radio_intent(conn, f"播放{song}电台"):
+            return True
+    await send_stt_message(conn, text)
+    conn.sentence_id = str(uuid.uuid4().hex)
+    conn.tts.tts_text_queue.put(TTSMessageDTO(
+        conn.sentence_id, SentenceType.FIRST, ContentType.ACTION))
+    command = f"播放音乐 {song}" if song else "随机播放音乐"
+    if not await handle_music_command(conn, command):
+        conn.logger.bind(tag=TAG).info(f"音乐意图没找到可播放内容: {text}")
+        return False
+    conn.tts.tts_text_queue.put(TTSMessageDTO(
+        conn.sentence_id, SentenceType.LAST, ContentType.ACTION))
+    return True
+
+
 async def _h_timer_list(conn, text, m):
     from core.handle.timerIntent import handle_timer_list_intent
     return await handle_timer_list_intent(conn, text)
@@ -332,6 +364,7 @@ def _local_intents():
     from core.handle.repeatIntent import match_repeat_query
     from core.handle.timeIntent import match_time_query
     from core.handle.nextIntent import match_next_query
+    from core.handle.musicIntent import match_music
     from core.handle.timerIntent import (match_timer_intent, match_clock_alarm,
                                          match_timer_list_query)
     return [
@@ -345,6 +378,7 @@ def _local_intents():
         ("next",     "filtered", _b(match_next_query),           _h_next),
         ("radio",    "filtered", lambda t: t if ("电台" in t or "广播" in t) else None,
                     _h_radio),
+        ("music",    "filtered", match_music,                  _h_music),
         ("timer-list", "filtered", _b(match_timer_list_query),   _h_timer_list),
         ("timer-set",  "filtered", match_timer_intent,           _h_timer_set),
         ("clock",      "raw",      match_clock_alarm,            _h_clock),

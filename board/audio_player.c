@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <sys/wait.h>
 typedef long snd_pcm_sframes_t;
 #define A_RW 3
 #define A_S16 2
@@ -61,13 +62,17 @@ static snd_pcm_t *spk;
 static int16_t ring[RING_SAMPLES];
 static size_t ring_w, ring_r;            /* 写/读指针 (样本) */
 static atomic_int ring_eof;              /* 主线程置 1: 数据发完了, 播完即收尾 */
+static atomic_int music_active;           /* 音乐会话在位(FIFO -> 播放环); 见 xr_player_set_music */
+static atomic_int music_paused;            /* 语音发声期间音乐让位(FIFO 路径): 丢弃音乐、让语音独占环 */
+static int music_prerolled;                /* 本轮音乐是否已完成预滚 */
+static int music_yielded;                  /* 本轮语音是否已让音乐让出过声卡 */
 static atomic_int player_running;
 /* 软件音量(百分比, -1=未设置直通): 回答/ack/全部提示音共用这一个旋钮,
    换值在下一批 writei 生效(≤120ms)。板上喇叭节点无稳定 mixer 控制, 数字
    增益与声卡无关、可持久化、主机可测。 */
 static atomic_int volume_pct = -1;
 /* 诊断开关(默认关, 环境变量打开): XR_PLAY_DUMP=路径.pcm 转储写卡内容,
- * XR_PLAY_TRACE=路径.txt 记录每次 writei 的耗时。
+ * XR_PLAY_TRACE=路径.txt 记录每次 writei 耗时、环余量和音乐 ALSA delay。
  * 用途: 区分"下发的数据本身有断点"与"设备端写卡节奏有问题"。 */
 static FILE *play_dump;
 static FILE *play_trace;
@@ -134,6 +139,7 @@ static void ring_cv_ensure(void) { pthread_once(&ring_cv_once, ring_cv_init_mono
  * player_thread 里的 tmp[SPK_PERIOD_SAMPLES](独立写死会静默溢栈)。 */
 #define SPK_PERIOD_SAMPLES 2880    /* 24kHz 下 120ms */
 static size_t spk_period_samples = SPK_PERIOD_SAMPLES;
+#define MUSIC_QUEUE_TARGET_FRAMES (250L * 24L) /* 250ms in ALSA client-rate frames */
 
 size_t xr_player_queued_samples(void) {
     size_t w, r;
@@ -141,17 +147,79 @@ size_t xr_player_queued_samples(void) {
     return w >= r ? w - r : RING_SAMPLES - r + w;
 }
 
-void xr_player_push_pcm(const int16_t *pcm, size_t n) {
-    ring_cv_ensure();
-    pthread_mutex_lock(&ring_mu);
+static void ring_push_locked(const int16_t *pcm, size_t n) {
     for (size_t i = 0; i < n; i++) {
         ring[ring_w] = pcm[i];
         ring_w = (ring_w + 1) % RING_SAMPLES;
         if (ring_w == ring_r) ring_r = (ring_r + 1) % RING_SAMPLES;
     }
+}
+/* 语音 PCM 入环。让位由前端按回合显式调用 xr_player_voice_begin/end 控制,
+ * 这里只负责写环(保持通用语义: 旧的"音乐/语音共用 push"测试不受影响)。 */
+void xr_player_push_pcm(const int16_t *pcm, size_t n) {
+    ring_cv_ensure();
+    pthread_mutex_lock(&ring_mu);
+    ring_push_locked(pcm, n);
     pthread_cond_broadcast(&ring_cv);
     pthread_mutex_unlock(&ring_mu);
 }
+/* 音乐 PCM 入环(FIFO 线程专用)。语音期间直接丢弃: 既不和语音抢环,
+ * 也不让 FIFO 在语音期间堆积(读端持续读走, 只是不写环), 恢复时不追播旧音频。 */
+void xr_player_push_music_pcm(const int16_t *pcm, size_t n) {
+    if (atomic_load(&music_paused)) return;
+    ring_cv_ensure();
+    pthread_mutex_lock(&ring_mu);
+    /* 锁内二次确认: 否则刚好在 voice_begin 清环前通过检查的这一包会在清环后写入,
+       给语音开头带回最多 120ms 旧音乐。 */
+    if (atomic_load(&music_paused)) { pthread_mutex_unlock(&ring_mu); return; }
+    ring_push_locked(pcm, n);
+    pthread_cond_broadcast(&ring_cv);
+    pthread_mutex_unlock(&ring_mu);
+}
+/* 语音开始: 音乐整轮让位。幂等; 没有音乐会话时无动作。
+ * music_prerolled 置 1: 语音不套用"音乐 2 period 预滚", 立即出声。 */
+void xr_player_voice_begin(void) {
+    if (!atomic_load(&music_active)) return;
+    ring_cv_ensure();
+    pthread_mutex_lock(&ring_mu);
+    if (atomic_load(&music_paused)) { pthread_mutex_unlock(&ring_mu); return; }
+    ring_w = ring_r = 0;
+    ring_eof = 0;
+    music_prerolled = 1;
+    atomic_store(&music_paused, 1);
+    pthread_cond_broadcast(&ring_cv);
+    pthread_mutex_unlock(&ring_mu);
+    fprintf(stderr, "[xr] yield: 音乐暂停(语音开始)\n");
+}
+/* 语音结束: 音乐恢复。先让环里剩余语音播完(最多 300ms)再清环, 避免硬切截尾;
+ * 然后清掉残余、重新预滚(2 period)后再接回当前 Snapcast 时间线。
+ * 实测 TTS_STOP 时剩余 0~0.18s(网关按实时供流), 300ms 足够; 中止时最多多播 300ms。 */
+void xr_player_voice_end(void) {
+    if (!atomic_load(&music_active)) return;
+    if (!atomic_load(&music_paused)) return;   /* 没在让位: 直接返回(别白等) */
+    for (int i = 0; i < 30; i++) {
+        pthread_mutex_lock(&ring_mu);
+        size_t q = ring_w >= ring_r ? ring_w - ring_r : RING_SAMPLES - ring_r + ring_w;
+        pthread_mutex_unlock(&ring_mu);
+        if (q == 0) break;
+        struct timespec d = {.tv_nsec = 10000000};
+        nanosleep(&d, NULL);
+    }
+    ring_cv_ensure();
+    pthread_mutex_lock(&ring_mu);
+    if (!atomic_load(&music_paused)) { pthread_mutex_unlock(&ring_mu); return; }
+    size_t leftover = ring_w >= ring_r ? ring_w - ring_r : RING_SAMPLES - ring_r + ring_w;
+    ring_w = ring_r = 0;
+    ring_eof = 0;
+    music_prerolled = 0;
+    atomic_store(&music_paused, 0);
+    pthread_cond_broadcast(&ring_cv);
+    pthread_mutex_unlock(&ring_mu);
+    if (leftover)
+        fprintf(stderr, "[xr] yield: 语音尾 %zu 样本未排空(已清)\n", leftover);
+    fprintf(stderr, "[xr] yield: 音乐恢复(语音结束)\n");
+}
+int xr_player_music_paused(void) { return atomic_load(&music_paused); }
 
 static int spk_open(void) {
     /* ALSA period 大小(2880 样本 @24kHz = 120ms): 决定单次写卡落下的
@@ -268,6 +336,12 @@ static void *player_thread(void *arg) {
                     fprintf(stderr, "[xr] spk idle prepare failed\n");
                 pcm_active = 0;
                 pthread_mutex_lock(&ring_mu);
+                /* 音乐源可能断开后再连。流已 drain+prepare，旧预滚水位不再
+                   代表当前 ALSA 队列；重连后必须重新攒够预滚量再启动。
+                   语音让位期间不算"音乐在播", 否则语音句间空环会把
+                   music_prerolled 清 0, 下一包语音反被音乐预滚门挡住。 */
+                if (atomic_load(&music_active) && !atomic_load(&music_paused))
+                    music_prerolled = 0;
             }
             if (ring_w != ring_r || ring_eof || !player_running) break;
             pthread_cond_wait(&ring_cv, &ring_mu);
@@ -288,10 +362,14 @@ static void *player_thread(void *arg) {
          *   按 period 凑整再写, 每次 writei 都给卡垫进整 120ms 余量,
          *   供给抖动被垫子吸收。
          *   收尾(eof)时按实际有的写, 不能因为凑不满而丢尾巴。 */
-        if (avail < spk_period_samples && !ring_eof) {
+        /* 音乐会话在位时不"凑整 period": 音乐是 snapclient 每 ~50ms 一股的细水,
+           凑满 120ms 才写会让 80ms 的 ALSA 缓冲中间干转(实测持续 underrun)。
+           有多少写多少, 由声卡缓冲吸收。语音路径仍保留凑整(那是 2026-11-19 的修复)。 */
+        if (avail < spk_period_samples && !ring_eof && !atomic_load(&music_active)) {
             /* 继续等下一包, 直到凑够一个 period。 */
             int tail_hold_ms = 0;
-            while (avail < spk_period_samples && !ring_eof && player_running) {
+            while (avail < spk_period_samples && !ring_eof && player_running
+                   && !atomic_load(&music_active)) {
                 struct timespec ts;
                 clock_gettime(CLOCK_MONOTONIC, &ts);
                 ts.tv_nsec += 50L * 1000000L;
@@ -331,6 +409,67 @@ static void *player_thread(void *arg) {
             if (!player_running) { pthread_mutex_unlock(&ring_mu); break; }
             if (avail == 0 && ring_eof) { pthread_mutex_unlock(&ring_mu); break; }
         }
+        /* 音乐预滚: 开流前先攒够 3 个 period(~360ms)。
+         * 实测(FIFO 埋点): 不预滚时队列深度只有 ~38ms, 欠载->prepare 把缓冲清空
+         * -> 队列归零 -> 再欠载, 设备 29% 时间空转、有效吞吐只有实时的 68%。
+         * 设备缓冲本身有 2.4s, 预滚是安全的(FIFO 供给实测 1.00x 实时)。 */
+        if (atomic_load(&music_active) && !music_prerolled) {
+            /* 2 个 period(2880*2=5760 样本 @24k ≈ 240ms) 而不是 3 个: 实测 3 个
+               period 时 ALSA delay 稳态 335~412ms, 超出交接文档建议的 150~250ms.
+               预滚只要够打断"欠载->prepare->清零"的循环即可(无预滚时会周期欠载). */
+            size_t target = spk_period_samples * 2;
+            if (avail < target) {
+                struct timespec ts;
+                clock_gettime(CLOCK_MONOTONIC, &ts);
+                ts.tv_nsec += 50L * 1000000L;
+                if (ts.tv_nsec >= 1000000000L) { ts.tv_sec += 1; ts.tv_nsec -= 1000000000L; }
+                pthread_cond_timedwait(&ring_cv, &ring_mu, &ts);
+                pthread_mutex_unlock(&ring_mu);   /* cond_wait 返回后仍持锁 */
+                continue;
+            }
+            music_prerolled = 1;
+            fprintf(stderr, "[xr] music preroll: %zu 样本 (~%.0f ms)\n",
+                    avail, (double)avail / 24.0);
+        }
+        /* 音乐路径按“前端环 + ALSA delay”限制总待播量。
+         * 只限制 ALSA delay 会漏掉写入环里尚未送卡的 PCM：B 板重联实测
+         * ring≈500ms + ALSA≈390ms，A 稳态约 250ms，声学差异约 0.63s。
+         * 超出目标时丢弃环里最旧 PCM，让重联客户端追到实时边沿；已送入 ALSA
+         * 的帧继续自然播放。250ms 取 A 稳态实测总队列(约252ms)，目标是恢复
+         * 同一播放延迟，而不是仅限制某一层缓冲。 */
+        long music_delay_frames = -1;
+        if (atomic_load(&music_active) && !atomic_load(&music_paused) && spk && output.a_delay) {
+            long q = 0;
+            if (output.a_delay(spk, &q) == 0) {
+                music_delay_frames = q;
+                if (q < 0) q = 0;
+                /* snd_pcm_delay returns client-rate frames (24k mono here),
+                 * matching the ring sample unit. Each frame is counted once
+                 * across the ring and ALSA delay. */
+                long total_before = q + (long)avail;
+                long excess = total_before - MUSIC_QUEUE_TARGET_FRAMES;
+                if (excess > 0 && avail > 0) {
+                    size_t discard = (size_t)excess < avail ? (size_t)excess : avail;
+                    ring_r = (ring_r + discard) % RING_SAMPLES;
+                    avail -= discard;
+                    if (getenv("XR_MUSIC_TRACE")) {
+                        struct timespec ts;
+                        clock_gettime(CLOCK_MONOTONIC, &ts);
+                        fprintf(stderr,
+                                "[xr] music_catchup %ld.%06ld q=%ld drop=%zu ring=%zu total_before=%ld target=%ld\n",
+                                (long)ts.tv_sec, (long)(ts.tv_nsec / 1000), q,
+                                discard, avail, total_before,
+                                (long)MUSIC_QUEUE_TARGET_FRAMES);
+                    }
+                }
+                if (q >= MUSIC_QUEUE_TARGET_FRAMES) {
+                    struct timespec d = {.tv_nsec = 20000000};
+                    nanosleep(&d, NULL);
+                    pthread_mutex_unlock(&ring_mu);
+                    continue;
+                }
+            }
+        }
         size_t take = avail < spk_period_samples ? avail : spk_period_samples;
         for (size_t i = 0; i < take; i++) {
             tmp[i] = ring[ring_r];
@@ -355,9 +494,9 @@ static void *player_thread(void *arg) {
             if (play_trace) {  /* 诊断: 写卡耗时(阻塞=卡满, 长时间=被饿住) */
                 double ms = (t1.tv_sec - t0.tv_sec) * 1000.0 +
                             (t1.tv_nsec - t0.tv_nsec) / 1e6;
-                int n = fprintf(play_trace, "%.3f %ld %ld %.1f\n",
+                int n = fprintf(play_trace, "%.3f %ld %ld %.1f %zu %ld\n",
                         (t1.tv_sec % 100000) + t1.tv_nsec / 1e9,
-                        (long)written, (long)wn, ms);
+                        (long)written, (long)wn, ms, avail, music_delay_frames);
                 /* 必须 flush: 不 flush 时 trace 落后 stdio 缓冲几个 KB,
                  * 正在播的轮次在文件里看着像"只播了一半"(2026-11-19 误判)。 */
                 fflush(play_trace);
@@ -393,15 +532,118 @@ static void *player_thread(void *arg) {
 /* 主线程调: 开卡 + 起播放线程 + 清环 */
 static pthread_t player_tid;
 static int player_active;                /* 线程存活标记, 防双开泄漏声卡 */
+
+void xr_player_set_music(int on) {
+    atomic_store(&music_active, on ? 1 : 0);
+    ring_cv_ensure();
+    pthread_mutex_lock(&ring_mu);
+    if (!on) {
+        music_prerolled = 0;              /* 结束一轮音乐: 下次开流重新预滚 */
+        atomic_store(&music_paused, 0);   /* 音乐会话结束: 清掉让位态 */
+    }
+    pthread_cond_broadcast(&ring_cv);
+    pthread_mutex_unlock(&ring_mu);
+}
+int xr_player_music_active(void) { return atomic_load(&music_active); }
 void xr_player_finish(void);
 void xr_player_drop(void);
+/* 挂起/恢复默认 PA sink。snapclient 经 PulseAudio 出声, PA 的
+ * module-suspend-on-idle 默认 ~5s 才放 hw; 显式挂起可压到 ~90ms(实测)。
+ * timeout 2: PA 卡死时不能把语音播放一起拖住。
+ * XR_PA_AUTO_SUSPEND=1 仅在 default.pa 已配置
+ * `load-module module-suspend-on-idle timeout=0` 并重启 PA 后启用: 交给
+ * PA 空闲策略自动释放/恢复硬件, 不再每轮 fork pactl。缺配置时保留旧路径。 */
+static int pa_auto_suspend_enabled(void) {
+    const char *value = getenv("XR_PA_AUTO_SUSPEND");
+    return value && atoi(value) > 0;
+}
+static void pa_sink_suspend(int on) {
+    if (pa_auto_suspend_enabled()) return;
+    int rc = system(on
+        ? "timeout 2 sh -c 'S=$(pactl get-default-sink 2>/dev/null); "
+          "[ -n \"$S\" ] && pactl suspend-sink \"$S\" 1' >/dev/null 2>&1"
+        : "timeout 2 sh -c 'S=$(pactl get-default-sink 2>/dev/null); "
+          "[ -n \"$S\" ] && pactl suspend-sink \"$S\" 0' >/dev/null 2>&1");
+    (void)rc;
+}
+/* 把声卡还给音乐(直占 ALSA 路径)。finish 和 drop(中止/重连)都必须调用,
+ * 否则中止一轮后 snapclient 不再起、sink 仍挂起、spk 还占着卡 -> 永久静音。 */
+static void music_unyield(void) {
+    if (!music_yielded) return;
+    music_yielded = 0;
+    xr_player_release_device();          /* 先关 spk, 再让 PA/客户端拿卡 */
+    pa_sink_suspend(0);
+    const char *cmd = getenv("XR_SNAPCLIENT_RESTART");
+    if (cmd && *cmd) {
+        fprintf(stderr, "[xr] yield: 重启 snapclient\n");
+        int rc = system(cmd);
+        if (rc == -1) {
+            fprintf(stderr, "[xr] yield: 无法执行 snapclient 重启命令\n");
+        } else if (!WIFEXITED(rc) || WEXITSTATUS(rc) != 0) {
+            fprintf(stderr, "[xr] yield: snapclient 重启命令失败 status=%d\n", rc);
+        }
+    }
+}
+/* 语音要出声、而音乐(snapclient)正占着声卡时, 让音乐让位:
+ * 停掉 snapclient -> 重试打开声卡。由 XR_MUSIC_YIELD=1 打开, 默认关闭(不改变行为)。
+ * 让位后由 xr_player_finish_with_poll() 负责还卡 + 用 XR_SNAPCLIENT_RESTART 重启它。
+ */
+static int yield_music_if_needed(void) {
+    const char *enabled = getenv("XR_MUSIC_YIELD");
+    if (!enabled || atoi(enabled) <= 0) return 0;
+    /* 不看 music_active: 音乐可能是 snapclient 直出 ALSA(FIFO 线程没跑), 但只要
+       有 snapclient 在跑, 它就占着声卡, 语音就得让它让位 */
+    int running = system("pgrep -x snapclient >/dev/null 2>&1");
+    if (running != 0) return 0;                  /* 没在跑: 不用让 */
+    fprintf(stderr, "[xr] yield: 停 snapclient 让出声卡\n");
+    { int rc = system("pkill -x snapclient 2>/dev/null"); if (rc < 0) {} }
+    /* 从这里开始 snapclient 已被要求退出。无论后续开卡是否成功，失败路径
+       都必须经 music_unyield() 恢复 sink/客户端，不能留下永久静音。 */
+    music_yielded = 1;
+    /* snapclient 默认经 PulseAudio 出声; PA 的 module-suspend-on-idle 默认 ~5s 才
+     * 释放 hw(实测 pkill 后 5.1s), 前端 3s 重试必然拿不到卡。显式挂起默认 sink
+     * 可把 hw 释放压到 ~90ms(2026-11-24 实测)。没有 pactl 时静默跳过。 */
+    pa_sink_suspend(1);
+    for (int i = 0; i < 30; i++) {          /* 最多等 3s */
+        if (spk_open() == 0) {
+            return 1;
+        }
+        struct timespec d = {.tv_nsec = 100000000};
+        nanosleep(&d, NULL);
+    }
+    fprintf(stderr, "[xr] yield: 3s 内没拿回声卡\n");
+    music_unyield();
+    return -1;
+}
+
 int xr_player_start(void) {
+    if (atomic_load(&music_active)) {
+        /* 音乐会话在位: 环里有音乐, 不能清; 线程在跑就直接复用 */
+        ring_eof = 0;
+        ring_cv_ensure();
+        pthread_mutex_lock(&ring_mu);
+        pthread_cond_broadcast(&ring_cv);
+        pthread_mutex_unlock(&ring_mu);
+        if (player_active) return 0;
+        /* 线程没跑(刚收完一轮语音): 必须走 spk_open() —— 它会复用常驻句柄
+         * **并 prepare**。句柄常驻时不能只看 !spk 就跳过, 否则设备还停在
+         * SETUP, 线程第一笔 writei 就是 EBADFD(实测踩到)。 */
+        if (spk_open()) return -1;
+        player_running = 1;
+        if (pthread_create(&player_tid, NULL, player_thread, NULL)) {
+            player_running = 0; return -1;
+        }
+        player_active = 1;
+        return 0;
+    }
     if (player_active) xr_player_finish();  /* 上一轮线程还活着: 先收干净再开新的 */
+    if (yield_music_if_needed() < 0) return -1; /* 让位失败已回滚, 不再盲目重试开卡 */
     ring_w = ring_r = 0; ring_eof = 0;
-    if (spk_open()) return -1;
+    if (spk_open()) { music_unyield(); return -1; }
     player_running = 1;
     if (pthread_create(&player_tid, NULL, player_thread, NULL)) {
-        output.a_drop(spk); player_running = 0; return -1;   /* 常驻不关 */
+        output.a_drop(spk); player_running = 0;
+        music_unyield(); return -1;   /* 常驻句柄; 若曾让位则释放并恢复音乐 */
     }
     player_active = 1;
     return 0;
@@ -412,6 +654,10 @@ void xr_player_finish(void) {
 }
 
 int xr_player_finish_with_poll(int (*poll_callback)(void *), void *context) {
+    if (atomic_load(&music_active)) {
+        /* 音乐会话在位: 只表示"这句语音说完了"。置 eof/join 会把音乐一起收掉 */
+        return 0;
+    }
     if (!player_active) return 0;   /* 以 player_active 判活: 线程可能已因 writei 错自杀,
                                       此时仍需语义复位(player_running 由线程自己清了) */
     ring_eof = 1;
@@ -431,12 +677,24 @@ int xr_player_finish_with_poll(int (*poll_callback)(void *), void *context) {
     }
     pthread_join(player_tid, NULL);   /* join 僵尸线程, 防资源泄漏 */
     player_active = 0; player_running = 0;
+    music_unyield();                  /* 直占路径: 还卡 + 恢复 sink + 重启客户端 */
     fprintf(stderr, "[xr] 播放线程收尾 ok\n");
     return cancelled;
 }
 /* 立即停 (打断/重连): 清 eof 让线程下一轮退出, drop 丢余音 */
 void xr_player_drop(void) {
-    if (!player_active) { if (spk) output.a_drop(spk); return; }   /* 常驻不关 */
+    if (atomic_load(&music_active)) {
+        /* 音乐会话在位: 只清软件环余量, 保持 ALSA 流继续运行。
+           snd_pcm_drop 会把句柄切到 SETUP, 后续 writei 报 EBADFD 并杀死播放线程。 */
+        ring_cv_ensure();
+        pthread_mutex_lock(&ring_mu);
+        ring_w = ring_r = 0;
+        ring_eof = 0;
+        pthread_cond_broadcast(&ring_cv);
+        pthread_mutex_unlock(&ring_mu);
+        return;
+    }
+    if (!player_active) { music_unyield(); if (spk) output.a_drop(spk); return; }   /* 常驻不关 */
     player_running = 0;
     ring_eof = 1;
     ring_cv_ensure();
@@ -445,7 +703,32 @@ void xr_player_drop(void) {
     pthread_mutex_unlock(&ring_mu);
     pthread_join(player_tid, NULL);
     player_active = 0; player_running = 0;
+    music_unyield();               /* 中止一轮(打断/断线): 也必须还卡+恢复音乐 */
     if (spk) output.a_drop(spk);   /* 常驻不关 */
+}
+
+void xr_player_release_device(void) {
+    /* 音乐会话也要一起复位: 释放后由对端(音乐)接管 */
+    atomic_store(&music_active, 0);
+    atomic_store(&music_paused, 0);
+    music_prerolled = 0;
+    if (player_active) {
+        player_running = 0;
+        ring_eof = 1;
+        ring_cv_ensure();
+        pthread_mutex_lock(&ring_mu);
+        pthread_cond_broadcast(&ring_cv);
+        pthread_mutex_unlock(&ring_mu);
+        pthread_join(player_tid, NULL);
+        player_active = 0;
+        player_running = 0;
+    }
+    if (spk) {
+        output.a_drain(spk);
+        output.a_close(spk);
+        spk = NULL;                   /* 下次 xr_player_start 会重新 open */
+    }
+    fprintf(stderr, "[xr] 声卡已释放(close spk)\n");
 }
 
 void xr_player_set_volume(int pct) {

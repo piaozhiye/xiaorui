@@ -8,6 +8,7 @@ typedef struct _snd_pcm snd_pcm_t;
 typedef long snd_pcm_sframes_t;
 static void *alsa_lib;
 static int (*a_writei)(snd_pcm_t *, const void *, unsigned long);
+static int (*a_delay_fn)(snd_pcm_t *, snd_pcm_sframes_t *);
 static int (*a_open)(snd_pcm_t **, const char *, int, int);
 static int (*a_hwp_malloc)(void **);
 static int (*a_hwp_any)(snd_pcm_t *, void *);
@@ -51,6 +52,7 @@ int xr_audio_load(void) {
         {"snd_pcm_close", (void**)&a_close},
         {"snd_pcm_drain", (void**)&a_drain},
         {"snd_pcm_writei", (void**)&a_writei},
+        {"snd_pcm_delay", (void**)&a_delay_fn},
         {"snd_strerror", (void**)&a_strerror},
     };
     for (size_t i = 0; i < sizeof(t)/sizeof(t[0]); i++) {
@@ -61,6 +63,14 @@ int xr_audio_load(void) {
         }
     }
     return 0;
+}
+
+static int a_delay_wrap(snd_pcm_t *p, long *frames) {
+    if (!a_delay_fn || !frames) return -1;
+    snd_pcm_sframes_t d = 0;
+    int rc = a_delay_fn(p, &d);
+    if (rc >= 0) *frames = (long)d;
+    return rc;
 }
 
 const xr_audio_output_ops_t *xr_audio_output_ops(void) {
@@ -80,6 +90,7 @@ const xr_audio_output_ops_t *xr_audio_output_ops(void) {
         .a_hwp_free = a_hwp_free,
         .a_prepare = a_prepare,
         .a_writei = a_writei,
+        .a_delay = a_delay_wrap,
         .a_drop = a_drop,
         .a_close = a_close,
         .a_drain = a_drain,
@@ -125,9 +136,12 @@ fail:
 }
 
 long xr_capture_read(snd_pcm_t *p, void *pcm, unsigned long frames) {
+    if (!p) return 0;            /* fifo 模式无 snd_pcm 句柄: 无效读返回 0, 不崩 */
     return a_readi(p, pcm, frames);
 }
-int xr_capture_prepare(snd_pcm_t *p) { return a_prepare(p); }
-int xr_capture_drop(snd_pcm_t *p) { return a_drop(p); }
-int xr_capture_close(snd_pcm_t *p) { return a_close(p); }
+/* fifo 模式下句柄为 NULL: prepare/drop/close 都是无害空操作(别把 NULL 传给 ALSA,
+ * snd_pcm_* 会 assert 直接 abort —— 实测踩到)。 */
+int xr_capture_prepare(snd_pcm_t *p) { return p ? a_prepare(p) : 0; }
+int xr_capture_drop(snd_pcm_t *p) { return p ? a_drop(p) : 0; }
+int xr_capture_close(snd_pcm_t *p) { return p ? a_close(p) : 0; }
 const char *xr_audio_error(int error) { return a_strerror(error); }

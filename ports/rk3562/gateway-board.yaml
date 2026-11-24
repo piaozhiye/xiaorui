@@ -108,3 +108,26 @@ VAD:
     threshold_low: 0.3
     model_dir: models/snakers4_silero-vad
     min_silence_duration_ms: 200
+
+# 音乐插件: 离线库 + 在线直链歌单(电台)。
+# music_dir 必须是绝对路径: 网关 cwd 是 work/, 相对路径会把离线库和歌单
+# 拆到 work/music 与 work/music-online 两处软链上, 容易只补一处。
+# 绝对路径让两者同层(server/music 与 server/music-online/playlist.json)。
+# 在线直链靠板端 2MB 交叉编译 ffmpeg 解流, 装法见 ports/rk3562/deploy-music.sh。
+plugins:
+  play_music:
+    music_dir: "/data/xiaorui-gateway/server/music"
+    music_ext:
+      - ".p3"
+      - ".wav"
+      - ".mp3"
+    refresh_time: 300
+
+# 工具白名单: 这套 fork 只把 Intent.function_call.functions 里列出的函数
+# 暴露给 LLM(见 core/providers/tools/server_plugins/plugin_executor.py
+# 的 get_tools())。play_music 不列出来, LLM 就看不到这个工具, 问"播放音乐"
+# 只会得到"对不起, 我无法直接播放音乐"(2026-11-23 实测)。
+Intent:
+  function_call:
+    functions:
+      - play_music

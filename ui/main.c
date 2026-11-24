@@ -7,8 +7,11 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
 
 #include <lvgl/src/extra/libs/freetype/lv_freetype.h>
+#include "third_party/lvgl/include/lvgl/src/extra/libs/qrcode/qrcodegen.h"
 
 #include "ui_client.h"
 #include "wayland_port.h"
@@ -40,6 +43,10 @@ static lv_obj_t *halo;
 static lv_obj_t *service_label;
 static lv_obj_t *detail_volume;
 static lv_obj_t *memory_label;
+static lv_obj_t *pairing_qr_canvas;
+static lv_obj_t *pairing_code_label;
+static lv_obj_t *pairing_url_label;
+static lv_obj_t *pairing_refresh_button;
 static lv_obj_t *uptime_label;
 static lv_obj_t *eyes[2];
 static bool settings_visible;
@@ -60,10 +67,16 @@ static uint32_t displayed_eye_color;
 static uint32_t displayed_ring_color;
 static uint64_t started_ms;
 static uint64_t last_memory_ms;
+static uint64_t last_pairing_refresh_ms;
 static int displayed_volume = -1;
 static int displayed_speaking = -1;
 static char displayed_question[256];
 static char displayed_answer[XR_UI_ANSWER_CAPACITY];
+#define PAIRING_QR_SIZE 260
+static lv_color_t pairing_qr_pixels[PAIRING_QR_SIZE * PAIRING_QR_SIZE];
+static char displayed_pairing_payload[320];
+static char pairing_info_path[512];
+static char pairing_rotate_path[512];
 
 static const uint32_t state_palette[6] = {0x8ca5aa, 0x8fe3c3, 0xf0d38a, 0xa8d8f0, 0xf0d38a, 0xe87070};
 static const char *state_text[6] = {
@@ -184,6 +197,111 @@ static void volume_changed(lv_event_t *event) {
     unsigned int value = (unsigned int)lv_slider_get_value(volume_slider);
     if (connected && !demo && xr_ui_client_command(XR_UI_VOLUME, value) != 0)
         lv_label_set_text(connection_label, "音量请求未发送，请稍后重试");
+}
+
+static bool pairing_qr_update(const char *payload) {
+    if (!payload || !*payload || strlen(payload) >= sizeof(displayed_pairing_payload))
+        return false;
+    uint8_t temporary[qrcodegen_BUFFER_LEN_MAX];
+    uint8_t qr[qrcodegen_BUFFER_LEN_MAX];
+    if (!qrcodegen_encodeText(payload, temporary, qr, qrcodegen_Ecc_MEDIUM,
+                              qrcodegen_VERSION_MIN, 10, qrcodegen_Mask_AUTO, true))
+        return false;
+    const int modules = qrcodegen_getSize(qr);
+    const int quiet = 4;
+    const int total = modules + quiet * 2;
+    if (modules <= 0 || total > PAIRING_QR_SIZE)
+        return false;
+    const int scale = PAIRING_QR_SIZE / total;
+    const int drawn = total * scale;
+    const int offset = (PAIRING_QR_SIZE - drawn) / 2;
+    const lv_color_t white = lv_color_hex(0xffffff);
+    const lv_color_t black = lv_color_hex(0x10151d);
+    for (int y = 0; y < PAIRING_QR_SIZE; y++)
+        for (int x = 0; x < PAIRING_QR_SIZE; x++)
+            pairing_qr_pixels[y * PAIRING_QR_SIZE + x] = white;
+    for (int y = 0; y < modules; y++) {
+        for (int x = 0; x < modules; x++) {
+            if (!qrcodegen_getModule(qr, x, y)) continue;
+            const int left = offset + (x + quiet) * scale;
+            const int top = offset + (y + quiet) * scale;
+            for (int py = 0; py < scale; py++)
+                for (int px = 0; px < scale; px++)
+                    pairing_qr_pixels[(top + py) * PAIRING_QR_SIZE + left + px] = black;
+        }
+    }
+    lv_obj_invalidate(pairing_qr_canvas);
+    memcpy(displayed_pairing_payload, payload, strlen(payload) + 1);
+    return true;
+}
+
+static void pairing_refresh(lv_event_t *event) {
+    (void)event;
+    if (!pairing_rotate_path[0]) {
+        lv_label_set_text(pairing_code_label, "音乐服务未配置配对功能");
+        return;
+    }
+    int fd = open(pairing_rotate_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0 && errno != EEXIST) {
+        lv_label_set_text(pairing_code_label, "刷新失败，请检查音乐服务状态");
+        return;
+    }
+    if (fd >= 0) {
+        const ssize_t written = write(fd, "rotate\n", 7);
+        close(fd);
+        if (written != 7) {
+            unlink(pairing_rotate_path);
+            lv_label_set_text(pairing_code_label, "刷新请求写入失败");
+            return;
+        }
+    }
+    displayed_pairing_payload[0] = '\0';
+    lv_label_set_text(pairing_code_label, "正在生成新的配对码…");
+}
+
+static void refresh_pairing_info(uint64_t now_ms) {
+    if (!pairing_code_label || now_ms - last_pairing_refresh_ms < 1000) return;
+    last_pairing_refresh_ms = now_ms;
+    FILE *file = pairing_info_path[0] ? fopen(pairing_info_path, "r") : NULL;
+    if (!file) {
+        lv_obj_add_flag(pairing_qr_canvas, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(pairing_code_label, "音乐服务未启动或未开启扫码配对");
+        lv_label_set_text(pairing_url_label, "启动音乐服务后，此处会显示连接二维码");
+        return;
+    }
+    char url[220] = {0}, code[32] = {0}, created_text[40] = {0};
+    const bool info_valid = fgets(url, sizeof(url), file) &&
+                            fgets(code, sizeof(code), file) &&
+                            fgets(created_text, sizeof(created_text), file);
+    fclose(file);
+    if (!info_valid) {
+        lv_obj_add_flag(pairing_qr_canvas, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(pairing_code_label, "配对信息文件格式无效");
+        return;
+    }
+    url[strcspn(url, "\r\n")] = '\0';
+    code[strcspn(code, "\r\n")] = '\0';
+    const double created = strtod(created_text, NULL);
+    const double now = (double)time(NULL);
+    if (strlen(code) != 8 || strspn(code, "0123456789") != 8 || created <= 0 ||
+        now < created || now - created >= 900 || !url[0]) {
+        displayed_pairing_payload[0] = '\0';
+        lv_obj_add_flag(pairing_qr_canvas, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(pairing_code_label, "当前没有有效配对码");
+        lv_label_set_text(pairing_url_label, "点“生成扫码配对码”，再用手机相机扫码");
+        return;
+    }
+    char payload[sizeof(displayed_pairing_payload)];
+    snprintf(payload, sizeof(payload), "%s/?pair=%s", url, code);
+    if (strcmp(payload, displayed_pairing_payload) && !pairing_qr_update(payload)) {
+        lv_label_set_text(pairing_code_label, "二维码生成失败，请检查设备访问地址");
+        return;
+    }
+    lv_obj_clear_flag(pairing_qr_canvas, LV_OBJ_FLAG_HIDDEN);
+    char line[128];
+    snprintf(line, sizeof(line), "配对码：%s（15 分钟有效）", code);
+    lv_label_set_text(pairing_code_label, line);
+    lv_label_set_text(pairing_url_label, url);
 }
 
 static void exit_ui(lv_event_t *event) {
@@ -325,6 +443,8 @@ static void build_conversation(lv_obj_t *screen) {
 
 static void build_settings(lv_obj_t *screen) {
     settings_page = panel(screen, 0, 185, 1080, 1450, 0x0c171b, 0);
+    lv_obj_add_flag(settings_page, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(settings_page, LV_DIR_VER);
     label(settings_page, "把小瑞调到刚刚好", 74, 16, 950, large_font.font, 0xf2f0e8);
     label(settings_page, "触摸控制与语音主链路相互独立",
           76, 105, 920, body_font.font, 0x8ca5aa);
@@ -345,7 +465,23 @@ static void build_settings(lv_obj_t *screen) {
     label(card, "10", 52, 240, 120, tag_font, 0x6a9499);
     label(card, "50", 450, 240, 120, tag_font, 0x6a9499);
     label(card, "100", 800, 240, 120, tag_font, 0x6a9499);
-    lv_obj_t *details = panel(settings_page, 64, 640, 952, 470, 0x122327, 28);
+    lv_obj_t *pairing = panel(settings_page, 64, 640, 952, 470, 0x122327, 28);
+    label(pairing, "手机扫码连接音乐", 40, 24, 800, title_font.font, 0xdce5e4);
+    pairing_qr_canvas = lv_canvas_create(pairing);
+    lv_canvas_set_buffer(pairing_qr_canvas, pairing_qr_pixels, PAIRING_QR_SIZE,
+                         PAIRING_QR_SIZE, LV_IMG_CF_TRUE_COLOR);
+    lv_obj_set_pos(pairing_qr_canvas, 40, 92);
+    lv_obj_add_flag(pairing_qr_canvas, LV_OBJ_FLAG_HIDDEN);
+    pairing_code_label = label(pairing, "正在读取音乐服务配对状态…", 340, 102,
+                               560, body_font.font, 0x82c6b0);
+    pairing_url_label = label(pairing, "", 340, 166, 560, tag_font, 0x8ca5aa);
+    label(pairing, "手机连接同一局域网后扫码；确认绑定即可控制音乐。",
+          340, 220, 560, tag_font, 0x8ca5aa);
+    pairing_refresh_button = button(pairing, "生成扫码配对码", 340, 300, 540,
+                                     pairing_refresh, NULL);
+    (void)pairing_refresh_button;
+
+    lv_obj_t *details = panel(settings_page, 64, 1140, 952, 470, 0x122327, 28);
     label(details, "设备与连接", 40, 38, 800, title_font.font, 0xdce5e4);
     label(details, "语音服务", 40, 120, 280, body_font.font, 0x8ca5aa);
     service_label = label(details, "未连接", 320, 120, 560, body_font.font, 0x82c6b0);
@@ -359,11 +495,11 @@ static void build_settings(lv_obj_t *screen) {
           40, 390, 880, tag_font, 0x7f9ea0);
     label(settings_page, "连接中断时控制会自动禁用，"
           "不影响语音程序继续运行。",
-          76, 1180, 900, body_font.font, 0x8ca5aa);
-    lv_obj_t *exit = button(settings_page, "退出小瑞", 64, 1250, 952, exit_ui, NULL);
+          76, 1640, 900, body_font.font, 0x8ca5aa);
+    lv_obj_t *exit = button(settings_page, "退出小瑞", 64, 1700, 952, exit_ui, NULL);
     exit_caption = lv_obj_get_child(exit, 0);
     label(settings_page, "退出后回到系统界面，语音服务与 NPU 一并释放。",
-          76, 1370, 900, body_font.font, 0x8ca5aa);
+          76, 1810, 900, body_font.font, 0x8ca5aa);
     lv_obj_add_flag(settings_page, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -416,6 +552,7 @@ static void refresh(lv_timer_t *timer) {
     if (!fonts_ready)
         return;
     refresh_header();
+    refresh_pairing_info(now_ms);
     bool available = !demo && xr_ui_client_connected(now_ms);
     if (available != connected)
     {
@@ -610,10 +747,22 @@ int main(int argc, char **argv) {
     const char *snapshot = NULL;
     const char *font_path = getenv("XR_UI_FONT");
     const char *socket_path = getenv("XR_UI_SOCKET");
+    const char *pairing_info = getenv("XR_UI_PAIRING_INFO_FILE");
+    const char *pairing_rotate = getenv("XR_UI_PAIRING_ROTATE_REQUEST_FILE");
     if (!font_path)
         font_path = "/usr/share/fonts/source-han-sans-cn/SourceHanSansCN-Regular.otf";
     if (!socket_path)
         socket_path = "/run/xiaorui/frontend.sock";
+    if (pairing_info)
+        snprintf(pairing_info_path, sizeof(pairing_info_path), "%s", pairing_info);
+    else
+        snprintf(pairing_info_path, sizeof(pairing_info_path),
+                 "/data/xiaorui/snapcast/music-state/pairing-display.txt");
+    if (pairing_rotate)
+        snprintf(pairing_rotate_path, sizeof(pairing_rotate_path), "%s", pairing_rotate);
+    else
+        snprintf(pairing_rotate_path, sizeof(pairing_rotate_path),
+                 "/data/xiaorui/snapcast/music-state/pairing-rotate.request");
     for (int index = 1; index < argc; index++)
     {
         if (!strcmp(argv[index], "--demo"))
