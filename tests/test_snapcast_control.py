@@ -344,6 +344,17 @@ class MusicSessionTests(unittest.TestCase):
         self.assertEqual(params["volume"]["percent"], 42)
         self.assertFalse(params["volume"]["muted"])
 
+    def test_group_mute_op_can_clear_a_muted_group(self):
+        result = self.session.handle({"op": "group.mute", "group_id": "grp-1", "muted": False})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self.transport.calls[-1],
+                         ("Group.SetMute", {"id": "grp-1", "mute": False}))
+
+    def test_group_mute_rejects_non_boolean(self):
+        result = self.session.handle({"op": "group.mute", "group_id": "grp-1", "muted": "false"})
+        self.assertFalse(result["ok"])
+        self.assertIn("muted", result["error"])
+
     def test_player_volume_preserves_existing_mute_without_explicit_choice(self):
         result = self.session.handle({"op": "player.volume", "player_id": "aa:bb:cc:dd:ee:ff",
                                       "volume": 42})

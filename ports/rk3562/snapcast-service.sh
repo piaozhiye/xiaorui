@@ -54,6 +54,7 @@ BRIDGE_PID_FILE=$PID_DIR/bridge.pid
 UI_PID_FILE=$PID_DIR/music-ui.pid
 WATCHDOG_PID_FILE=$PID_DIR/watchdog.pid
 SERVER_CACHE_FILE=${XR_SNAPCAST_SERVER_CACHE:-$PID_DIR/server-host}
+DISCOVERY_RETRY_FILE=$PID_DIR/server-discovery-last-at
 
 log() { echo "[snapcast-service] $*"; }
 
@@ -285,6 +286,42 @@ reconcile_all() {
     esac
     case "$ROLE" in
         client|server-client)
+            # A live Snapclient can keep retrying an old server forever after
+            # that host disappears. When discovery is enabled, probe the
+            # cached host and switch only after a different advertised server
+            # is reachable; preserve the current client while discovery fails.
+            case "$SERVER_HOST" in
+                auto|discover)
+                    cached_host=
+                    [ -r "$SERVER_CACHE_FILE" ] && cached_host=$(cat "$SERVER_CACHE_FILE" 2>/dev/null || true)
+                    case "$cached_host" in ''|*[!0-9.]*) cached_host= ;; esac
+                    if [ -n "$cached_host" ] && ! server_port_open "$cached_host"; then
+                        now=$(date +%s 2>/dev/null || echo 0)
+                        last=0
+                        if [ -r "$DISCOVERY_RETRY_FILE" ]; then
+                            last=$(cat "$DISCOVERY_RETRY_FILE" 2>/dev/null || echo 0)
+                            case "$last" in ''|*[!0-9]*) last=0 ;; esac
+                        fi
+                        if [ "$now" -ge "$last" ] && [ $((now - last)) -ge 4 ]; then
+                            printf '%s\n' "$now" > "$DISCOVERY_RETRY_FILE"
+                            SERVER_HOST=auto
+                            if resolve_server_host; then
+                                if [ "$SERVER_HOST" != "$cached_host" ]; then
+                                    log "music server changed $cached_host -> $SERVER_HOST; restarting client"
+                                    stop_pidfile "$CLIENT_PID_FILE" "$CLIENT" Snapclient
+                                    stop_pidfile "$BRIDGE_PID_FILE" "$BRIDGE" bridge
+                                    # Discard any bytes still queued in the old
+                                    # raw FIFO before the new stream attaches.
+                                    [ ! -p "$RAW_FIFO" ] || rm -f "$RAW_FIFO"
+                                    start_client || true
+                                fi
+                            else
+                                SERVER_HOST=auto
+                            fi
+                        fi
+                    fi
+                    ;;
+            esac
             client_pattern="$CLIENT tcp://$SERVER_HOST:$SERVER_PORT"
             case "$SERVER_HOST" in auto|discover) client_pattern="$CLIENT tcp://" ;; esac
             if ! find_pid "$client_pattern" >/dev/null \

@@ -42,6 +42,7 @@ class MusicLibraryTests(unittest.TestCase):
             w.setframerate(44100)
             w.writeframes(b"\0\0\0\0" * 44100)
         self.processes = []
+        self.now = [100.0]
 
         def popen(command, **kwargs):
             process = FakeProcess()
@@ -49,7 +50,7 @@ class MusicLibraryTests(unittest.TestCase):
             return process
 
         self.library = MusicLibrary(self.root, self.base / "pipes", ffmpeg="/usr/bin/ffmpeg",
-                                    popen=popen)
+                                    popen=popen, monotonic=lambda: self.now[0])
 
     def tearDown(self):
         with mock.patch("music_library.os.killpg"):
@@ -138,6 +139,28 @@ class MusicLibraryTests(unittest.TestCase):
             mock.call(process.pid, signal.SIGSTOP),
             mock.call(process.pid, signal.SIGCONT),
         ])
+
+    def test_position_clock_advances_freezes_on_pause_and_resumes(self):
+        track_id = self.library.list_tracks()[0]["id"]
+        self.library.start(track_id)
+        self.now[0] += 0.4
+        self.assertAlmostEqual(self.library.position(track_id), 0.4)
+        with mock.patch("music_library.os.killpg"):
+            self.library.pause(track_id)
+            self.now[0] += 5
+            self.assertAlmostEqual(self.library.position(track_id), 0.4)
+            self.library.resume(track_id)
+            self.now[0] += 0.25
+        self.assertAlmostEqual(self.library.position(track_id), 0.65)
+
+    def test_duration_probe_is_cached_for_non_wav_track(self):
+        mp3 = self.root / "sample.mp3"
+        mp3.write_bytes(b"audio")
+        track_id = next(t["id"] for t in self.library.list_tracks() if t["title"] == "sample.mp3")
+        with mock.patch.object(self.library, "_probe_duration", return_value=123.4) as probe:
+            self.assertEqual(self.library.duration(track_id), 123.4)
+            self.assertEqual(self.library.duration(track_id), 123.4)
+        probe.assert_called_once()
 
     def test_sync_keeps_paused_sources_stopped_and_resumes_playing_sources(self):
         track_id = self.library.list_tracks()[0]["id"]

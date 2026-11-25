@@ -53,6 +53,7 @@ class FakeLibrary:
         self.paused = []
         self.resumed = []
         self.ended = []
+        self.position_seconds = 0.55
 
     def list_tracks(self):
         return [self.track]
@@ -83,6 +84,12 @@ class FakeLibrary:
 
     def resume(self, track_id):
         self.resumed.append(track_id)
+
+    def position(self, _track_id):
+        return self.position_seconds
+
+    def duration(self, track_id):
+        return self.get_track(track_id)[0]["duration_seconds"]
 
 
 class MusicUiHttpTests(unittest.TestCase):
@@ -126,14 +133,26 @@ class MusicUiHttpTests(unittest.TestCase):
         self.assertNotIn('id="queue-resume"', page)
         self.assertIn('id="select-all-tracks"', page)
         self.assertIn("播放勾选队列", page)
+        self.assertIn('id="select-all-players"', page)
+        self.assertIn('id="clear-player-selection"', page)
+        self.assertIn('id="player-selection-status"', page)
+        self.assertIn("已选 ${selected}/${online.length} 台在线设备", page)
+        self.assertIn("button:focus-visible", page)
         self.assertIn("下一首", page)
         self.assertIn('id="queue-retry"', page)
         self.assertIn("queue.retry", page)
+        self.assertIn('id="queue-previous"', page)
+        self.assertIn("queue.jump", page)
+        self.assertIn("queue.remove", page)
+        self.assertIn('id="connection-banner"', page)
+        self.assertIn("navigator.mediaSession", page)
+        self.assertIn("正在播放", page)
+        self.assertIn("安全音量上限", page)
 
     def test_serves_installable_mobile_app_assets(self):
         cases = {
             "/manifest.webmanifest": ("application/manifest+json", '"display": "standalone"'),
-            "/service-worker.js": ("text/javascript", 'xiaorui-music-shell-v2'),
+            "/service-worker.js": ("text/javascript", 'xiaorui-music-shell-v3'),
             "/icon.svg": ("image/svg+xml", "<svg"),
             "/icon-192.png": ("image/png", ""),
             "/icon-512.png": ("image/png", ""),
@@ -455,6 +474,88 @@ class MusicUiHttpTests(unittest.TestCase):
         self.assertEqual(cleared["queue"]["track_ids"], [])
         self.assertEqual(self.httpd.session.handle({"op": "sessions.list"})["sessions"], [])
         self.assertFalse(self.httpd.music_active_file.exists())
+
+    def test_queue_previous_jump_and_remove_are_index_based(self):
+        self.httpd.music_max_start_volume = 100
+        player = "aa:bb:cc:dd:ee:01"
+        self.transport.status["server"]["groups"][0]["clients"][0]["config"]["volume"]["percent"] = 20
+
+        def post(payload):
+            req = urllib.request.Request(self.base + "/api", data=json.dumps(payload).encode(),
+                                         headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=2) as response:
+                return json.loads(response.read())
+
+        started = post({"op": "queue.play", "track_ids": ["a" * 20] * 3,
+                        "players": [player]})
+        at_two = post({"op": "queue.jump", "index": 2})
+        self.assertEqual(at_two["queue"]["index"], 2)
+        previous = post({"op": "queue.previous"})
+        self.assertEqual(previous["queue"]["index"], 1)
+        removed_before = post({"op": "queue.remove", "index": 0})
+        self.assertEqual(removed_before["queue"]["track_ids"], ["a" * 20] * 2)
+        self.assertEqual(removed_before["queue"]["index"], 0)
+        removed_current = post({"op": "queue.remove", "index": 0})
+        self.assertEqual(removed_current["queue"]["track_ids"], ["a" * 20])
+        self.assertEqual(removed_current["queue"]["index"], 0)
+        self.assertEqual(removed_current["queue"]["state"], "playing")
+        self.assertNotEqual(started["queue"]["session_id"], removed_current["queue"]["session_id"])
+
+    def test_queue_snapshot_reports_estimated_progress_and_duration(self):
+        self.httpd.music_max_start_volume = 100
+        self.transport.status["server"]["groups"][0]["clients"][0]["config"]["volume"]["percent"] = 20
+        req = urllib.request.Request(self.base + "/api", data=json.dumps({
+            "op": "queue.play", "track_ids": ["a" * 20],
+            "players": ["aa:bb:cc:dd:ee:01"]}).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=2):
+            pass
+        with urllib.request.urlopen(self.base + "/api/state", timeout=2) as response:
+            state = json.loads(response.read())
+        queue = state["queue"]
+        self.assertEqual(queue["position_seconds"], 0.55)
+        self.assertEqual(queue["duration_seconds"], 1.0)
+        self.assertEqual(queue["current_track_id"], "a" * 20)
+
+    def test_queue_completion_is_kept_for_ui_and_can_be_replayed(self):
+        self.httpd.music_max_start_volume = 100
+        self.transport.status["server"]["groups"][0]["clients"][0]["config"]["volume"]["percent"] = 20
+        track_id = "a" * 20
+        req = urllib.request.Request(self.base + "/api", data=json.dumps({
+            "op": "queue.play", "track_ids": [track_id],
+            "players": ["aa:bb:cc:dd:ee:01"]}).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=2):
+            pass
+        self.httpd.library.ended = [self.httpd.music_queue["session_id"]]
+        helper = Handler.__new__(Handler)
+        helper.server = self.httpd
+        helper._sync_library_sessions()
+        self.assertEqual(self.httpd.music_queue["state"], "completed")
+        self.assertEqual(self.httpd.music_queue["track_ids"], [track_id])
+
+    def test_batch_volume_and_group_mute_operations(self):
+        first, second = [p["id"] for p in STATUS["server"]["groups"][0]["clients"]]
+        self.transport.status["server"]["groups"][0]["clients"][1]["connected"] = True
+        group_id = STATUS["server"]["groups"][0]["id"]
+        body = json.dumps({"op": "players.volume", "player_ids": [first, second],
+                           "volume": 27}).encode()
+        req = urllib.request.Request(self.base + "/api", data=body,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=2) as response:
+            result = json.loads(response.read())
+        self.assertTrue(result["ok"], result)
+        calls = [params for method, params in self.transport.calls if method == "Client.SetVolume"]
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(row["volume"]["percent"] == 27 for row in calls))
+
+        body = json.dumps({"op": "group.mute", "group_id": group_id, "muted": False}).encode()
+        req = urllib.request.Request(self.base + "/api", data=body,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=2) as response:
+            result = json.loads(response.read())
+        self.assertTrue(result["ok"], result)
+        self.assertIn(("Group.SetMute", {"id": group_id, "mute": False}), self.transport.calls)
 
     def test_queue_automatically_advances_when_track_ends(self):
         self.httpd.music_max_start_volume = 35
