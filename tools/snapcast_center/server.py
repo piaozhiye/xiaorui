@@ -19,9 +19,10 @@ import urllib.parse
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from music_library import MusicLibrary, MusicLibraryError
+from music_library import MAX_UPLOAD_BYTES, MusicLibrary, MusicLibraryError
 from music_session import MusicSession
 from pairing_auth import PairingAuth
+from music_collections import CollectionError, MusicCollections
 from snapcast_control import SnapcastClient, SnapcastError
 
 _PAIRING_DISPLAY_LOCK = threading.Lock()
@@ -269,14 +270,18 @@ class Handler(BaseHTTPRequestHandler):
                             self._start_queued_track(enforce_start_limit=False)
                         else:
                             queue["session_id"] = None
-                            queue["state"] = "completed"
-                            queue["error"] = None
+                            last_track = queue["track_ids"][queue["index"]]
+                            failure = (self.server.library.last_error(last_track)
+                                       if hasattr(self.server.library, "last_error") else None)
+                            queue["state"] = "error" if failure else "completed"
+                            queue["error"] = failure
                         self._save_queue()
 
     @staticmethod
     def _empty_queue():
         return {"track_ids": [], "players": [], "index": 0, "session_id": None,
-                "state": "stopped", "error": None}
+                "state": "stopped", "error": None, "source_kind": "tracks",
+                "current_title": None, "station_id": None}
 
     def _save_queue(self):
         path = getattr(self.server, "queue_state_file", None)
@@ -333,6 +338,30 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(payload, dict):
                 return cls._empty_queue()
+            sessions = session.handle({"op": "sessions.list"}).get("sessions", [])
+            if payload.get("source_kind") == "radio":
+                station_id = payload.get("station_id")
+                radio_players = payload.get("players")
+                if (not isinstance(station_id, str) or not re.fullmatch(r"[a-f0-9]{32}", station_id)
+                        or not isinstance(radio_players, list)
+                        or any(not isinstance(pid, str) for pid in radio_players)):
+                    return cls._empty_queue()
+                active = next((row for row in sessions
+                               if row.get("session_id") == payload.get("session_id")
+                               and row.get("track_id") == "radio:" + station_id
+                               and row.get("state") in ("playing", "paused")), None)
+                if active:
+                    return {"track_ids": [], "players": radio_players, "index": 0,
+                            "session_id": active["session_id"], "state": active["state"],
+                            "error": None, "source_kind": "radio",
+                            "current_title": payload.get("current_title"), "station_id": station_id}
+                if payload.get("state") == "error":
+                    return {"track_ids": [], "players": radio_players, "index": 0,
+                            "session_id": None, "state": "error",
+                            "error": payload.get("error", "电台播放失败")[:500] if isinstance(payload.get("error", "电台播放失败"), str) else "电台播放失败",
+                            "source_kind": "radio", "current_title": payload.get("current_title"),
+                            "station_id": station_id}
+                return cls._empty_queue()
             track_ids, players, index = payload.get("track_ids"), payload.get("players"), payload.get("index")
             if (not isinstance(track_ids, list) or not track_ids or len(track_ids) > 20
                     or any(not isinstance(track_id, str) for track_id in track_ids)
@@ -343,7 +372,6 @@ class Handler(BaseHTTPRequestHandler):
                 return cls._empty_queue()
             for track_id in track_ids:
                 library.get_track(track_id)
-            sessions = session.handle({"op": "sessions.list"}).get("sessions", [])
             active = next((row for row in sessions
                            if row.get("session_id") == payload.get("session_id")
                            and row.get("state") in ("playing", "paused")
@@ -362,7 +390,8 @@ class Handler(BaseHTTPRequestHandler):
                 return cls._empty_queue()
             return {"track_ids": track_ids, "players": players, "index": index,
                     "session_id": active["session_id"], "state": active["state"],
-                    "error": payload.get("error")}
+                    "error": payload.get("error"), "source_kind": "tracks",
+                    "current_title": None, "station_id": None}
         except (OSError, ValueError, TypeError, MusicLibraryError):
             return cls._empty_queue()
 
@@ -452,7 +481,33 @@ class Handler(BaseHTTPRequestHandler):
 
     def _queue_snapshot(self):
         queue = self.server.music_queue
+        if queue.get("source_kind") == "radio":
+            session = next((row for row in self.server.session.handle({"op": "sessions.list"}).get("sessions", [])
+                            if row.get("session_id") == queue.get("session_id")), None)
+            player_rows = self.server.session.handle({"op": "players.list"}).get("players", [])
+            by_id = {row.get("id"): row for row in player_rows}
+            online = {pid for pid, row in by_id.items() if row.get("connected")}
+            missing = [by_id.get(pid, {}).get("name") or pid
+                       for pid in queue.get("players", []) if pid not in online]
+            warning = None
+            if queue.get("state") in ("playing", "paused") and not session:
+                warning = "电台播放会话已断开，等待恢复或手动重试"
+            elif session and session.get("state") not in ("playing", "paused"):
+                warning = session.get("error") or f"电台会话状态异常：{session.get('state', 'unknown')}"
+            elif missing:
+                warning = "等待设备重连：" + "、".join(missing)
+            return {"track_ids": [], "tracks": [], "players": list(queue.get("players", [])),
+                    "index": 0, "session_id": queue.get("session_id"),
+                    "state": queue.get("state", "stopped"), "current_track_id": None,
+                    "current_title": queue.get("current_title"), "source_kind": "radio",
+                    "station_id": queue.get("station_id"), "position_seconds": None,
+                    "duration_seconds": None, "warning": warning, "error": queue.get("error")}
         tracks = {track["id"]: track for track in self.server.library.list_tracks()}
+        player_rows = self.server.session.handle({"op": "players.list"}).get("players", [])
+        by_id = {p.get("id"): p for p in player_rows}
+        online = {pid for pid, player in by_id.items() if player.get("connected")}
+        queue_session = next((row for row in self.server.session.handle({"op": "sessions.list"}).get("sessions", [])
+                              if row.get("session_id") == queue.get("session_id")), None)
         current_id = (queue["track_ids"][queue["index"]]
                       if queue.get("track_ids") and 0 <= queue.get("index", -1) < len(queue["track_ids"])
                       else None)
@@ -469,6 +524,17 @@ class Handler(BaseHTTPRequestHandler):
             position = duration
         if position is not None and duration is not None:
             position = min(position, duration)
+        warning = None
+        if queue.get("state") in ("playing", "paused") and not queue_session:
+            warning = "队列仍显示播放，但播放会话已丢失，正在尝试恢复"
+        elif queue_session and queue_session.get("state") not in ("playing", "paused"):
+            warning = queue_session.get("error") or f"播放会话状态异常：{queue_session.get('state', 'unknown')}"
+        elif queue_session and current_id and queue_session.get("track_id") != current_id:
+            warning = "播放会话曲目与队列当前曲目不一致，请停止后重试"
+        elif queue.get("state") in ("playing", "paused") and any(pid not in online for pid in queue.get("players", [])):
+            missing = [by_id.get(pid, {}).get("name") or pid
+                       for pid in queue.get("players", []) if pid not in online]
+            warning = "等待设备重连：" + "、".join(missing)
         return {"track_ids": list(queue["track_ids"]),
                 "tracks": [{"id": track_id,
                             "title": tracks.get(track_id, {}).get("title", "曲目已移除")}
@@ -478,7 +544,9 @@ class Handler(BaseHTTPRequestHandler):
                 "current_track_id": current_id,
                 "position_seconds": round(position, 2) if position is not None else None,
                 "duration_seconds": duration,
-                "error": queue["error"]}
+                "error": queue["error"], "source_kind": "tracks",
+                "current_title": current.get("title"),
+                "warning": warning}
 
     def _start_queue_index(self, index, old_track=None):
         queue = self.server.music_queue
@@ -555,16 +623,58 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, content_type, body, headers)
         if self.path == "/health":
             return self._send(200, "application/json", b'{"ok":true}')
-        if self.path == "/api/library":
+        if request_path == "/api/library":
             try:
                 tracks = self.server.library.list_tracks()
+                upload_usage = self.server.library.upload_usage()
             except MusicLibraryError as exc:
                 return self._send(503, "application/json; charset=utf-8",
                                   json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
-            public = [{key: track[key] for key in ("id", "title", "size_bytes", "duration_seconds")}
-                      for track in tracks]
+            public = []
+            favorite_ids = set(self.server.collections.list().get("favorites", []))
+            for track in tracks:
+                item = {key: track.get(key) for key in
+                        ("id", "title", "size_bytes", "duration_seconds")}
+                item.update({"title": track.get("title") or "", "artist": track.get("artist") or "",
+                             "album": track.get("album") or "", "folder": track.get("folder") or ""})
+                item["uploaded"] = track["relative_path"].startswith("uploads/")
+                item["favorite"] = item["id"] in favorite_ids
+                public.append(item)
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            search = query.get("q", [""])[0].strip().casefold()
+            folder = query.get("folder", [""])[0]
+            sort = query.get("sort", ["name"])[0]
+            only_favorites = query.get("favorites", ["0"])[0] == "1"
+            if only_favorites:
+                favorites = set(self.server.collections.list().get("favorites", []))
+                public = [row for row in public if row["id"] in favorites]
+            if folder == "__root__":
+                public = [row for row in public if not row.get("folder")]
+            elif folder:
+                public = [row for row in public if row.get("folder") == folder]
+            if search:
+                public = [row for row in public if search in " ".join(
+                    (row.get("title", ""), row.get("artist", ""), row.get("album", ""), row.get("folder", ""))).casefold()]
+            sort_keys = {"name": lambda x: x["title"].casefold(), "artist": lambda x: (x["artist"].casefold(), x["title"].casefold()),
+                         "album": lambda x: (x["album"].casefold(), x["title"].casefold()), "folder": lambda x: (x["folder"].casefold(), x["title"].casefold())}
+            public.sort(key=sort_keys.get(sort, sort_keys["name"]))
+            try:
+                page = max(0, int(query.get("page", ["0"])[0]))
+                page_size = min(100, max(1, int(query.get("page_size", ["20"])[0])))
+            except ValueError:
+                page, page_size = 0, 20
+            total = len(public)
+            folders = sorted({row.get("folder") or "" for row in tracks}, key=str.casefold)
+            public = public[page * page_size:(page + 1) * page_size]
             return self._send(200, "application/json; charset=utf-8",
-                              json.dumps({"ok": True, "tracks": public}, ensure_ascii=False))
+                              json.dumps({"ok": True, "tracks": public,
+                                          "total": total, "page": page, "page_size": page_size,
+                                          "folders": folders, "upload_usage": upload_usage},
+                                         ensure_ascii=False))
+        if request_path == "/api/collections":
+            collections = self.server.collections.list()
+            return self._send(200, "application/json; charset=utf-8",
+                              json.dumps({"ok": True, **collections}, ensure_ascii=False))
         if self.path != "/api/state":
             return self._send(404, "application/json", b'{"ok":false,"error":"not found"}')
         # Recreate realtime PCM writers after a controller restart, and remove
@@ -633,6 +743,9 @@ class Handler(BaseHTTPRequestHandler):
             _sync_pairing_display(self.server)
             return self._send(200, "application/json; charset=utf-8",
                               json.dumps({"ok": True, "code": code}))
+        if urllib.parse.urlsplit(self.path).path == "/api/upload":
+            self._upload_audio()
+            return
         if self.path != "/api":
             return self._send(404, "application/json", b'{"ok":false,"error":"not found"}')
         request = self._read_json_request()
@@ -640,6 +753,173 @@ class Handler(BaseHTTPRequestHandler):
             return request[0]
         if not isinstance(request, dict):
             result = {"ok": False, "error": "请求必须是 JSON 对象"}
+        elif request.get("op") == "favorite.toggle":
+            try:
+                self.server.library.get_track(request.get("track_id"))
+                value = self.server.collections.toggle_favorite(request.get("track_id"))
+                result = {"ok": True, "favorite": value, "track_id": request["track_id"]}
+            except (MusicLibraryError, CollectionError) as exc:
+                result = {"ok": False, "error": str(exc)}
+        elif request.get("op") in ("playlist.create", "playlist.rename", "playlist.delete",
+                                    "playlist.reorder", "playlist.reorder_tracks", "playlist.play"):
+            op = request["op"]
+            try:
+                if op == "playlist.create":
+                    ids = request.get("track_ids", [])
+                    if (not isinstance(ids, list) or len(ids) > 2000
+                            or any(not isinstance(track_id, str)
+                                   or not re.fullmatch(r"[a-f0-9]{20}", track_id)
+                                   for track_id in ids)):
+                        raise CollectionError("播放列表曲目无效")
+                    for track_id in ids:
+                        self.server.library.get_track(track_id)
+                    row = self.server.collections.playlist_create(request.get("name"), ids)
+                    result = {"ok": True, "playlist": row}
+                elif op == "playlist.rename":
+                    row = self.server.collections.playlist_update(request.get("id"), name=request.get("name"))
+                    result = {"ok": True, "playlist": row}
+                elif op == "playlist.delete":
+                    result = {"ok": self.server.collections.delete("playlists", request.get("id"))}
+                elif op == "playlist.reorder":
+                    rows = self.server.collections.reorder("playlists", request.get("ids"))
+                    result = {"ok": True, "playlists": rows}
+                elif op == "playlist.reorder_tracks":
+                    playlist = next((row for row in self.server.collections.list()["playlists"]
+                                     if row.get("id") == request.get("id")), None)
+                    if not playlist:
+                        raise CollectionError("播放列表不存在")
+                    result = {"ok": True, "playlist": self.server.collections.playlist_update(
+                        playlist["id"], track_ids=request.get("track_ids"))}
+                else:
+                    playlist = next((row for row in self.server.collections.list()["playlists"]
+                                     if row.get("id") == request.get("id")), None)
+                    if not playlist:
+                        raise CollectionError("播放列表不存在")
+                    ids, players = playlist.get("track_ids", []), request.get("players")
+                    if not ids or len(ids) > 20:
+                        raise CollectionError("一键播放需要播放列表包含 1~20 首曲目")
+                    for track_id in ids:
+                        self.server.library.get_track(track_id)
+                    with self.server.music_queue_lock:
+                        self._authorize_music_players(players, request.get("startup_volume"))
+                        old = self.server.music_queue
+                        if old.get("session_id"):
+                            self.server.session.handle({"op": "session.stop", "session_id": old["session_id"]})
+                        for old_track in old.get("track_ids", []):
+                            self.server.library.stop(old_track)
+                        self.server.music_queue = {"track_ids": list(ids), "players": list(dict.fromkeys(players)),
+                                                   "index": 0, "session_id": None, "state": "starting",
+                                                   "error": None, "source_kind": "tracks", "current_title": None,
+                                                   "station_id": None}
+                        result = self._start_queued_track()
+                        self._save_queue()
+                        if result.get("ok"):
+                            result["queue"] = self._queue_snapshot()
+            except MusicVolumeError as exc:
+                result = {"ok": False, "code": "volume_too_high", "error": str(exc),
+                          "players": exc.players, "max_start_volume": exc.maximum}
+            except (MusicLibraryError, CollectionError) as exc:
+                result = {"ok": False, "error": str(exc)}
+        elif request.get("op") in ("device_group.create", "device_group.rename", "device_group.delete",
+                                    "device_group.reorder", "device_group.use"):
+            op = request["op"]
+            try:
+                if op == "device_group.create":
+                    row = self.server.collections.device_group_create(request.get("name"), request.get("player_ids"))
+                    result = {"ok": True, "group": row}
+                elif op == "device_group.rename":
+                    row = self.server.collections.rename("device_groups", request.get("id"), request.get("name"))
+                    result = {"ok": True, "group": row}
+                elif op == "device_group.delete":
+                    result = {"ok": self.server.collections.delete("device_groups", request.get("id"))}
+                elif op == "device_group.reorder":
+                    result = {"ok": True, "groups": self.server.collections.reorder("device_groups", request.get("ids"))}
+                else:
+                    row = next((row for row in self.server.collections.list()["device_groups"]
+                                if row.get("id") == request.get("id")), None)
+                    if not row:
+                        raise CollectionError("设备组不存在")
+                    current_players = self.server.session.handle({"op": "players.list"}).get("players", [])
+                    by_id = {player["id"]: player for player in current_players}
+                    online = {pid for pid, player in by_id.items() if player.get("connected")}
+                    result = {"ok": True, "player_ids": [pid for pid in row["player_ids"] if pid in online],
+                              "offline": [pid for pid in row["player_ids"] if pid not in online]}
+            except CollectionError as exc:
+                result = {"ok": False, "error": str(exc)}
+        elif request.get("op") in ("radio.add", "radio.update", "radio.delete", "radio.play"):
+            op = request["op"]
+            try:
+                if op in ("radio.add", "radio.update"):
+                    station = self.server.collections.station_create(request.get("name"), request.get("url"),
+                                                                     request.get("id") if op == "radio.update" else None)
+                    result = {"ok": True, "station": station}
+                elif op == "radio.delete":
+                    result = {"ok": self.server.collections.delete("stations", request.get("id"))}
+                else:
+                    station = next((row for row in self.server.collections.list()["stations"]
+                                    if row.get("id") == request.get("id")), None)
+                    if not station:
+                        raise CollectionError("电台不存在")
+                    players = request.get("players")
+                    with self.server.music_queue_lock:
+                        self._authorize_music_players(players, request.get("startup_volume"))
+                        old = self.server.music_queue
+                        if old.get("session_id"):
+                            self.server.session.handle({"op": "session.stop", "session_id": old["session_id"]})
+                        for old_track in old.get("track_ids", []):
+                            self.server.library.stop(old_track)
+                        marker = "radio:" + station["id"]
+                        parsed_url = urllib.parse.urlsplit(station["url"])
+                        stream_query = [(key, value) for key, value in
+                                        urllib.parse.parse_qsl(parsed_url.query, keep_blank_values=True)
+                                        if key.casefold() != "name"]
+                        stream_query.append(("name", "radio-" + station["id"][:20]))
+                        source = urllib.parse.urlunsplit((parsed_url.scheme, parsed_url.netloc,
+                                                          parsed_url.path, urllib.parse.urlencode(stream_query), ""))
+                        play = self.server.session.handle({"op": "session.play", "source": source,
+                                                           "players": players, "track_id": marker,
+                                                           "track_title": station["name"]})
+                        if play.get("ok"):
+                            self.server.music_queue = {"track_ids": [], "players": list(dict.fromkeys(players)),
+                                                       "index": 0, "session_id": play["session_id"],
+                                                       "state": "playing", "error": None,
+                                                       "source_kind": "radio", "current_title": station["name"],
+                                                       "station_id": station["id"]}
+                            self._save_queue()
+                            play["queue"] = self._queue_snapshot()
+                        else:
+                            self.server.music_queue = {"track_ids": [], "players": list(players), "index": 0,
+                                                       "session_id": None, "state": "error",
+                                                       "error": play.get("error", "电台流启动失败"),
+                                                       "source_kind": "radio", "current_title": station["name"],
+                                                       "station_id": station["id"]}
+                            self._save_queue()
+                        result = play
+            except MusicVolumeError as exc:
+                result = {"ok": False, "code": "volume_too_high", "error": str(exc),
+                          "players": exc.players, "max_start_volume": exc.maximum}
+            except CollectionError as exc:
+                result = {"ok": False, "error": str(exc)}
+        elif request.get("op") == "library.delete_upload":
+            track_id = request.get("track_id")
+            with self.server.music_queue_lock:
+                queue = self.server.music_queue
+                queued = track_id in queue.get("track_ids", [])
+                if queued and queue.get("state") not in ("completed", "stopped"):
+                    result = {"ok": False, "error": "曲目仍在播放或队列中，请先移出队列"}
+                else:
+                    sessions = self.server.session.handle({"op": "sessions.list"}).get("sessions", [])
+                    active = any(row.get("track_id") == track_id
+                                 and row.get("state") in ("playing", "paused", "starting")
+                                 for row in sessions)
+                    if active:
+                        result = {"ok": False, "error": "曲目仍有活动播放会话，请停止后再删除"}
+                    else:
+                        try:
+                            self.server.library.delete_upload(track_id)
+                            result = {"ok": True, "track_id": track_id}
+                        except MusicLibraryError as exc:
+                            result = {"ok": False, "error": str(exc)}
         elif request.get("op") == "library.play":
             try:
                 with self.server.music_queue_lock:
@@ -656,7 +936,8 @@ class Handler(BaseHTTPRequestHandler):
                     if result.get("ok"):
                         self.server.music_queue = {
                             "track_ids": [track_id], "players": list(players), "index": 0,
-                            "session_id": result["session_id"], "state": "playing", "error": None}
+                            "session_id": result["session_id"], "state": "playing", "error": None,
+                            "source_kind": "tracks", "current_title": track["title"], "station_id": None}
                         self._save_queue()
                     else:
                         self.server.library.stop(track_id)
@@ -685,7 +966,9 @@ class Handler(BaseHTTPRequestHandler):
                     self.server.music_queue = {"track_ids": list(track_ids),
                                                "players": list(dict.fromkeys(players)),
                                                "index": 0, "session_id": None,
-                                               "state": "starting", "error": None}
+                                               "state": "starting", "error": None,
+                                               "source_kind": "tracks", "current_title": None,
+                                               "station_id": None}
                     result = self._start_queued_track()
                     self._save_queue()
                     if result.get("ok"):
@@ -809,7 +1092,8 @@ class Handler(BaseHTTPRequestHandler):
             session_id = request.get("session_id")
             sessions = self.server.session.handle({"op": "sessions.list"}).get("sessions", [])
             session = next((row for row in sessions if row.get("session_id") == session_id), None)
-            if session and session.get("track_id"):
+            if (session and session.get("track_id")
+                    and not session.get("track_id", "").startswith("radio:")):
                 try:
                     action = "pause" if request["op"] == "session.pause" else "resume"
                     getattr(self.server.library, action)(session["track_id"])
@@ -845,6 +1129,49 @@ class Handler(BaseHTTPRequestHandler):
                           "application/json; charset=utf-8",
                           json.dumps(result, ensure_ascii=False))
 
+    def _upload_audio(self):
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if content_type != "application/octet-stream" and not content_type.startswith("audio/"):
+            self.close_connection = True
+            return self._send(415, "application/json; charset=utf-8",
+                              json.dumps({"ok": False, "error": "请以音频文件方式上传"}, ensure_ascii=False))
+        try:
+            size = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            size = 0
+        if size <= 0:
+            self.close_connection = True
+            return self._send(400, "application/json; charset=utf-8",
+                              '{"ok":false,"error":"上传文件为空或长度无效"}')
+        if size > MAX_UPLOAD_BYTES:
+            self.close_connection = True
+            return self._send(413, "application/json; charset=utf-8",
+                              '{"ok":false,"error":"单个音频文件不能超过 256 MB"}')
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query,
+                                      keep_blank_values=True)
+        filename = query.get("filename", [""])[0]
+
+        def chunks():
+            remaining = size
+            while remaining:
+                block = self.rfile.read(min(1024 * 1024, remaining))
+                if not block:
+                    raise MusicLibraryError("上传连接中断，请重新选择文件")
+                remaining -= len(block)
+                yield block
+
+        try:
+            track = self.server.library.import_upload(filename, chunks(), size)
+        except MusicLibraryError as exc:
+            self.close_connection = True
+            return self._send(400, "application/json; charset=utf-8",
+                              json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+        return self._send(201, "application/json; charset=utf-8",
+                          json.dumps({"ok": True,
+                                      "track": {key: track[key] for key in
+                                                ("id", "title", "size_bytes", "duration_seconds")}},
+                                     ensure_ascii=False))
+
     def _read_json_request(self):
         try:
             size = int(self.headers.get("Content-Length", "0"))
@@ -873,6 +1200,8 @@ def main():
                         help="队列状态文件；默认与 --state-file 同目录的 queue.json")
     parser.add_argument("--music-root", default=os.environ.get(
         "XR_MUSIC_LIBRARY", str(pathlib.Path.home() / "musics")))
+    parser.add_argument("--music-upload-root", default=os.environ.get("XR_MUSIC_UPLOAD_ROOT"),
+                        help="手机上传音频保存目录；默认是 --music-root 下的 uploads/ 子目录")
     parser.add_argument("--music-fifo-root", default=os.environ.get(
         "XR_MUSIC_FIFO_ROOT", "/tmp/xiaorui-music-pipes"))
     parser.add_argument("--music-active-file", default=os.environ.get(
@@ -1002,7 +1331,8 @@ def main():
             parser.error("TLS 私钥文件权限过宽；请设置为 chmod 600")
     client = SnapcastClient(args.snapcast_host, args.snapcast_port)
     session = MusicSession(control=client, state_file=args.state_file)
-    library = MusicLibrary(args.music_root, args.music_fifo_root, args.ffmpeg)
+    library = MusicLibrary(args.music_root, args.music_fifo_root, args.ffmpeg,
+                           upload_root=args.music_upload_root)
     Handler.protocol_version = "HTTP/1.1"
     server = ThreadingHTTPServer((args.bind, args.port), Handler)
     server.music_access_password = password
@@ -1031,6 +1361,7 @@ def main():
                                if args.queue_state_file else
                                pathlib.Path(args.state_file).expanduser().with_name("queue.json"))
     server.music_queue = Handler._load_queue(server.queue_state_file, library, session)
+    server.collections = MusicCollections(server.queue_state_file.with_name("collections.json"))
     server.music_active_file = pathlib.Path(args.music_active_file).expanduser()
     # Handler owns the exact same maintenance method used by HTTP requests; a
     # tiny private instance lets the supervisor run it without fake HTTP calls.

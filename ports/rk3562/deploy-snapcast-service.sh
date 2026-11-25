@@ -18,6 +18,13 @@ SERVER_BIND=$4
 BUNDLE=${5:-}
 MUSIC_ROOT=${6:-}
 LOCAL_FFMPEG=${7:-}
+LOCAL_FFPROBE=${XR_FFPROBE_BIN:-}
+if [ -z "$LOCAL_FFPROBE" ]; then
+    case "$LOCAL_FFMPEG" in
+        */*) LOCAL_FFPROBE=${LOCAL_FFMPEG%/*}/ffprobe ;;
+        *) LOCAL_FFPROBE=ffprobe ;;
+    esac
+fi
 case "$ROLE" in client|server-client) ;; *) usage ;; esac
 case "$SERVER_HOST" in *[!A-Za-z0-9._-]*|'') echo "invalid server host: $SERVER_HOST" >&2; exit 2;; esac
 case "$SERVER_BIND" in -) ;; *[!0-9.]*|'') echo "invalid bind IPv4: $SERVER_BIND" >&2; exit 2;; esac
@@ -115,7 +122,7 @@ if [ "$ROLE" = server-client ]; then
         adb -s "$SERIAL" shell "chmod 755 '$REMOTE/.install/server-v0.35.0/snapserver' && mv '$REMOTE/.install/server-v0.35.0' '$REMOTE/server-v0.35.0'"
     fi
     adb -s "$SERIAL" shell "mkdir -p '$REMOTE/music-app' '$REMOTE/ffmpeg-local' '$REMOTE/music-state' /data/xiaorui/music-library"
-    for file in server.py music_library.py music_session.py snapcast_control.py pairing_auth.py music_ui.html music_manifest.webmanifest music_service_worker.js music_icon.svg music_icon_192.png music_icon_512.png; do
+    for file in server.py music_library.py music_collections.py music_session.py snapcast_control.py pairing_auth.py music_ui.html music_manifest.webmanifest music_service_worker.js music_icon.svg music_icon_192.png music_icon_512.png; do
         adb -s "$SERIAL" push "$DIR/../../tools/snapcast_center/$file" "$REMOTE/.install/$file.new" >/dev/null
         adb -s "$SERIAL" shell "chmod 644 '$REMOTE/.install/$file.new' && mv '$REMOTE/.install/$file.new' '$REMOTE/music-app/$file'"
     done
@@ -126,6 +133,12 @@ if [ "$ROLE" = server-client ]; then
     done
     adb -s "$SERIAL" push "$LOCAL_FFMPEG" "$REMOTE/.install/ffmpeg.new" >/dev/null
     adb -s "$SERIAL" shell "chmod 755 '$REMOTE/.install/ffmpeg.new' && mv '$REMOTE/.install/ffmpeg.new' '$REMOTE/ffmpeg-local/ffmpeg'"
+    if [ -x "$LOCAL_FFPROBE" ]; then
+        adb -s "$SERIAL" push "$LOCAL_FFPROBE" "$REMOTE/.install/ffprobe.new" >/dev/null
+        adb -s "$SERIAL" shell "chmod 755 '$REMOTE/.install/ffprobe.new' && mv '$REMOTE/.install/ffprobe.new' '$REMOTE/ffmpeg-local/ffprobe'"
+    else
+        echo "warning: ffprobe not found at $LOCAL_FFPROBE; artist/album tags, duration metadata, and embedded covers may be unavailable"
+    fi
     if ! adb -s "$SERIAL" shell "test -f /data/xiaorui/music-library/.xr-library-installed"; then
         tar -C "$MUSIC_ROOT" -cf - . | adb -s "$SERIAL" shell "tar -xf - -C /data/xiaorui/music-library"
         adb -s "$SERIAL" shell "touch /data/xiaorui/music-library/.xr-library-installed"

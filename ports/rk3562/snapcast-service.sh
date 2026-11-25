@@ -32,6 +32,7 @@ SERVER_CONFIG=${XR_SNAPSERVER_CONFIG:-$BASE/server.conf}
 MUSIC_UI=${XR_MUSIC_UI:-0}
 MUSIC_APP=${XR_MUSIC_APP:-$BASE/music-app}
 MUSIC_ROOT=${XR_MUSIC_LIBRARY:-/data/xiaorui/music-library}
+MUSIC_UPLOAD_ROOT=${XR_MUSIC_UPLOAD_ROOT:-/userdata/xiaorui/music-uploads}
 MUSIC_FIFO_ROOT=${XR_MUSIC_FIFO_ROOT:-$BASE/music-pipes}
 MUSIC_FFMPEG=${XR_MUSIC_FFMPEG:-$BASE/ffmpeg-local/ffmpeg}
 MUSIC_UI_PORT=${XR_MUSIC_UI_PORT:-8765}
@@ -197,6 +198,16 @@ start_music_ui() {
     }
     [ -d "$MUSIC_ROOT" ] || { log "music library missing: $MUSIC_ROOT"; return 1; }
     [ -x "$MUSIC_FFMPEG" ] || { log "local music ffmpeg missing: $MUSIC_FFMPEG"; return 1; }
+    case "$MUSIC_UPLOAD_ROOT" in
+        /userdata/*)
+            if ! awk '$2 == "/userdata" { found=1 } END { exit !found }' /proc/mounts; then
+                log "upload storage is not mounted at /userdata; refusing to start music UI"
+                return 1
+            fi
+            ;;
+    esac
+    mkdir -p "$MUSIC_UPLOAD_ROOT" || { log "cannot create upload directory: $MUSIC_UPLOAD_ROOT"; return 1; }
+    chmod 700 "$MUSIC_UPLOAD_ROOT" || { log "cannot secure upload directory: $MUSIC_UPLOAD_ROOT"; return 1; }
     if pid=$(find_pid "$MUSIC_APP/server.py --bind $MUSIC_UI_BIND --port $MUSIC_UI_PORT"); then
         echo "$pid" > "$UI_PID_FILE"
         log "music UI already running PID $pid"
@@ -207,6 +218,7 @@ start_music_ui() {
         --state-file "$BASE/music-state/sessions.json" \
         --queue-state-file "$BASE/music-state/queue.json" \
         --music-root "$MUSIC_ROOT" --music-fifo-root "$MUSIC_FIFO_ROOT" \
+        --music-upload-root "$MUSIC_UPLOAD_ROOT" \
         --music-active-file "$BASE/music.active" --ffmpeg "$MUSIC_FFMPEG"
     [ -z "$MUSIC_UI_TLS_CERT" ] || set -- "$@" --tls-cert "$MUSIC_UI_TLS_CERT"
     [ -z "$MUSIC_UI_TLS_KEY" ] || set -- "$@" --tls-key "$MUSIC_UI_TLS_KEY"
