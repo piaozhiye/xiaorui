@@ -4,6 +4,7 @@ import hashlib
 import fcntl
 import os
 import pathlib
+import re
 import shutil
 import signal
 import stat
@@ -25,7 +26,7 @@ class MusicLibrary:
     """Expose opaque track IDs, never caller-provided paths, to the HTTP API."""
 
     def __init__(self, root, fifo_root="/tmp/xiaorui-music-pipes", ffmpeg=None,
-                 popen=subprocess.Popen):
+                 popen=subprocess.Popen, monotonic=time.monotonic):
         self.root = pathlib.Path(root).expanduser().resolve()
         if not self.root.is_dir():
             raise MusicLibraryError(f"音乐目录不存在或不是目录: {self.root}")
@@ -35,8 +36,15 @@ class MusicLibrary:
             raise MusicLibraryError("找不到 ffmpeg；请安装 ffmpeg 或使用 --ffmpeg 指定路径")
         self.fifo_root = self._prepare_runtime_dir(self.fifo_root)
         self._popen = popen
+        self._monotonic = monotonic
         self._processes = {}
         self._paused = set()
+        self._position_base = {}
+        self._position_started = {}
+        self._duration_cache = {}
+        ffmpeg_path = pathlib.Path(self.ffmpeg)
+        sibling_ffprobe = ffmpeg_path.with_name("ffprobe")
+        self.ffprobe = str(sibling_ffprobe) if sibling_ffprobe.is_file() else shutil.which("ffprobe")
         self._lock = threading.RLock()
         self._lock_file = open(self.fifo_root / ".controller.lock", "a+")
         os.chmod(self.fifo_root / ".controller.lock", 0o600)
@@ -119,13 +127,67 @@ class MusicLibrary:
                 raise MusicLibraryError(f"无法启动 ffmpeg: {exc}") from exc
             log.close()
             self._processes[track_id] = process
+            self._position_base[track_id] = 0.0
+            self._position_started[track_id] = self._monotonic()
             return track
+
+    def position(self, track_id):
+        """Return estimated media seconds written by ffmpeg, excluding pause time."""
+        with self._lock:
+            if track_id not in self._position_base:
+                return None
+            position = self._position_base[track_id]
+            if track_id not in self._paused:
+                position += max(0.0, self._monotonic() - self._position_started.get(track_id, self._monotonic()))
+        return round(position, 2)
+
+    def duration(self, track_id):
+        track, path = self.get_track(track_id)
+        if track.get("duration_seconds") is not None:
+            return track["duration_seconds"]
+        try:
+            info = path.stat()
+        except OSError:
+            return None
+        key = (track_id, info.st_mtime_ns, info.st_size)
+        with self._lock:
+            if key in self._duration_cache:
+                return self._duration_cache[key]
+        value = self._probe_duration(path)
+        with self._lock:
+            self._duration_cache[key] = value
+        return value
+
+    def _probe_duration(self, path):
+        try:
+            if self.ffprobe:
+                result = subprocess.run(
+                    [self.ffprobe, "-v", "error", "-show_entries", "format=duration",
+                     "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    timeout=2, check=False, close_fds=True)
+                value = float(result.stdout.decode("ascii", errors="ignore").strip())
+                return round(value, 1) if value > 0 else None
+            result = subprocess.run([self.ffmpeg, "-hide_banner", "-i", str(path)],
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE, timeout=2, check=False,
+                                    close_fds=True)
+            output = result.stderr.decode("utf-8", errors="replace")
+            match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", output)
+            if not match:
+                return None
+            hours, minutes, seconds = int(match.group(1)), int(match.group(2)), float(match.group(3))
+            return round(hours * 3600 + minutes * 60 + seconds, 1)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return None
 
     def stop(self, track_id):
         with self._lock:
             process = self._processes.pop(track_id, None)
             was_paused = track_id in self._paused
             self._paused.discard(track_id)
+            self._position_base.pop(track_id, None)
+            self._position_started.pop(track_id, None)
         if process is None or process.poll() is not None:
             return
         if was_paused:
@@ -169,10 +231,13 @@ class MusicLibrary:
                 raise MusicLibraryError("播放音源已退出，无法暂停")
             if track_id in self._paused:
                 return
+            current = self._position_base.get(track_id, 0.0)
+            current += max(0.0, self._monotonic() - self._position_started.get(track_id, self._monotonic()))
             try:
                 os.killpg(process.pid, signal.SIGSTOP)
             except OSError as exc:
                 raise MusicLibraryError(f"暂停音源失败: {exc}") from exc
+            self._position_base[track_id] = current
             self._paused.add(track_id)
 
     def resume(self, track_id):
@@ -186,6 +251,7 @@ class MusicLibrary:
                 os.killpg(process.pid, signal.SIGCONT)
             except OSError as exc:
                 raise MusicLibraryError(f"继续音源失败: {exc}") from exc
+            self._position_started[track_id] = self._monotonic()
             self._paused.discard(track_id)
 
     def sync_sessions(self, sessions):
@@ -203,6 +269,8 @@ class MusicLibrary:
                 if process is not None and process.poll() is not None:
                     self._processes.pop(track_id, None)
                     self._paused.discard(track_id)
+                    self._position_base.pop(track_id, None)
+                    self._position_started.pop(track_id, None)
                     if session.get("session_id"):
                         ended.append(session["session_id"])
                     continue

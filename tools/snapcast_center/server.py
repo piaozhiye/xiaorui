@@ -268,7 +268,9 @@ class Handler(BaseHTTPRequestHandler):
                             queue["index"] += 1
                             self._start_queued_track(enforce_start_limit=False)
                         else:
-                            self.server.music_queue = self._empty_queue()
+                            queue["session_id"] = None
+                            queue["state"] = "completed"
+                            queue["error"] = None
                         self._save_queue()
 
     @staticmethod
@@ -347,6 +349,9 @@ class Handler(BaseHTTPRequestHandler):
                            and row.get("state") in ("playing", "paused")
                            and row.get("track_id") == track_ids[index]), None)
             if not active:
+                if payload.get("state") == "completed":
+                    return {"track_ids": track_ids, "players": players, "index": index,
+                            "session_id": None, "state": "completed", "error": None}
                 # A failed queue has no active Snapcast session, but retaining
                 # it lets the UI offer an explicit retry after restart.
                 if payload.get("state") == "error":
@@ -448,13 +453,53 @@ class Handler(BaseHTTPRequestHandler):
     def _queue_snapshot(self):
         queue = self.server.music_queue
         tracks = {track["id"]: track for track in self.server.library.list_tracks()}
+        current_id = (queue["track_ids"][queue["index"]]
+                      if queue.get("track_ids") and 0 <= queue.get("index", -1) < len(queue["track_ids"])
+                      else None)
+        current = tracks.get(current_id, {}) if current_id else {}
+        try:
+            duration = self.server.library.duration(current_id) if current_id else None
+        except MusicLibraryError:
+            duration = None
+        try:
+            position = self.server.library.position(current_id) if current_id else None
+        except MusicLibraryError:
+            position = None
+        if queue.get("state") == "completed" and duration is not None:
+            position = duration
+        if position is not None and duration is not None:
+            position = min(position, duration)
         return {"track_ids": list(queue["track_ids"]),
                 "tracks": [{"id": track_id,
                             "title": tracks.get(track_id, {}).get("title", "曲目已移除")}
                            for track_id in queue["track_ids"]],
                 "players": list(queue["players"]), "index": queue["index"],
                 "session_id": queue["session_id"], "state": queue["state"],
+                "current_track_id": current_id,
+                "position_seconds": round(position, 2) if position is not None else None,
+                "duration_seconds": duration,
                 "error": queue["error"]}
+
+    def _start_queue_index(self, index, old_track=None):
+        queue = self.server.music_queue
+        old_session = queue.get("session_id")
+        if old_track is None:
+            old_track = (queue["track_ids"][queue["index"]]
+                         if queue.get("track_ids") and 0 <= queue.get("index", -1) < len(queue["track_ids"])
+                         else None)
+        if old_session:
+            self.server.session.handle({"op": "session.stop", "session_id": old_session})
+        if old_track:
+            self.server.library.stop(old_track)
+        queue["index"] = index
+        queue["session_id"] = None
+        queue["state"] = "starting"
+        queue["error"] = None
+        result = self._start_queued_track(enforce_start_limit=False)
+        self._save_queue()
+        if result.get("ok"):
+            result["queue"] = self._queue_snapshot()
+        return result
 
     def do_GET(self):
         if self._reject_nonlocal_request():
@@ -538,7 +583,8 @@ class Handler(BaseHTTPRequestHandler):
         self._sync_music_activity()
         result = {"ok": True, "players": players["players"],
                   "sessions": sessions["sessions"], "reconcile": reconciled["sessions"],
-                  "queue": self._queue_snapshot()}
+                  "queue": self._queue_snapshot(),
+                  "music_max_start_volume": self.server.music_max_start_volume}
         return self._send(200, "application/json; charset=utf-8",
                           json.dumps(result, ensure_ascii=False))
 
@@ -655,16 +701,54 @@ class Handler(BaseHTTPRequestHandler):
                 if not queue["track_ids"] or queue["index"] + 1 >= len(queue["track_ids"]):
                     result = {"ok": False, "error": "队列已到末尾"}
                 else:
-                    old_track = queue["track_ids"][queue["index"]]
-                    if queue.get("session_id"):
-                        self.server.session.handle({"op": "session.stop",
-                                                    "session_id": queue["session_id"]})
-                    self.server.library.stop(old_track)
-                    queue["index"] += 1
-                    result = self._start_queued_track(enforce_start_limit=False)
+                    result = self._start_queue_index(queue["index"] + 1)
+        elif request.get("op") in ("queue.previous", "queue.jump"):
+            with self.server.music_queue_lock:
+                queue = self.server.music_queue
+                target = queue.get("index", 0) - 1 if request.get("op") == "queue.previous" else request.get("index")
+                if not queue["track_ids"]:
+                    result = {"ok": False, "error": "队列为空"}
+                elif (not isinstance(target, int) or isinstance(target, bool)
+                      or target < 0 or target >= len(queue["track_ids"])
+                      or (request.get("op") == "queue.previous" and target >= queue["index"])):
+                    result = {"ok": False, "error": "队列位置无效或没有上一首"}
+                elif (target == queue["index"] and queue.get("state") in ("playing", "paused")
+                      and queue.get("session_id")):
+                    result = {"ok": True, "queue": self._queue_snapshot()}
+                else:
+                    result = self._start_queue_index(target)
+        elif request.get("op") == "queue.remove":
+            with self.server.music_queue_lock:
+                queue = self.server.music_queue
+                index = request.get("index")
+                if (not isinstance(index, int) or isinstance(index, bool)
+                        or index < 0 or index >= len(queue["track_ids"])):
+                    result = {"ok": False, "error": "队列位置无效"}
+                elif index < queue["index"]:
+                    queue["track_ids"].pop(index)
+                    queue["index"] -= 1
                     self._save_queue()
-                    if result.get("ok"):
-                        result["queue"] = self._queue_snapshot()
+                    result = {"ok": True, "queue": self._queue_snapshot()}
+                elif index > queue["index"]:
+                    queue["track_ids"].pop(index)
+                    self._save_queue()
+                    result = {"ok": True, "queue": self._queue_snapshot()}
+                else:
+                    old_track = queue["track_ids"][queue["index"]]
+                    remaining = list(queue["track_ids"])
+                    remaining.pop(index)
+                    if not remaining:
+                        if queue.get("session_id"):
+                            self.server.session.handle({"op": "session.stop",
+                                                        "session_id": queue["session_id"]})
+                        self.server.library.stop(old_track)
+                        self.server.music_queue = self._empty_queue()
+                        self._save_queue()
+                        result = {"ok": True, "queue": self._queue_snapshot()}
+                    else:
+                        queue["track_ids"] = remaining
+                        queue["index"] = min(index, len(remaining) - 1)
+                        result = self._start_queue_index(queue["index"], old_track=old_track)
         elif request.get("op") == "queue.retry":
             with self.server.music_queue_lock:
                 queue = self.server.music_queue
@@ -692,6 +776,35 @@ class Handler(BaseHTTPRequestHandler):
                 self.server.music_queue = self._empty_queue()
                 self._save_queue()
                 result = {"ok": True, "queue": self._queue_snapshot()}
+        elif request.get("op") == "players.volume":
+            player_ids = request.get("player_ids")
+            volume = request.get("volume")
+            if (not isinstance(player_ids, list) or not player_ids
+                    or any(not isinstance(player_id, str) for player_id in player_ids)):
+                result = {"ok": False, "error": "先选择至少一台设备"}
+            elif (not isinstance(volume, int) or isinstance(volume, bool) or not 0 <= volume <= 100):
+                result = {"ok": False, "error": "音量必须是 0~100 的整数"}
+            else:
+                player_ids = list(dict.fromkeys(player_ids))
+                current = self.server.session.handle({"op": "players.list"}).get("players", [])
+                by_id = {player["id"]: player for player in current}
+                missing = [player_id for player_id in player_ids if player_id not in by_id]
+                offline = [player_id for player_id in player_ids
+                           if player_id in by_id and not by_id[player_id]["connected"]]
+                if missing or offline:
+                    result = {"ok": False, "error": "所选设备已离线或不存在，未更改音量",
+                              "missing": missing, "offline": offline, "applied": []}
+                else:
+                    applied, failed = [], []
+                    for player_id in player_ids:
+                        changed = self.server.session.handle({"op": "player.volume",
+                                                              "player_id": player_id,
+                                                              "volume": volume})
+                        (applied if changed.get("ok") else failed).append(
+                            {"player_id": player_id, "error": changed.get("error")})
+                    result = {"ok": True, "volume": volume,
+                              "applied": [row["player_id"] for row in applied],
+                              "failed": failed}
         elif request.get("op") in ("session.pause", "session.resume"):
             session_id = request.get("session_id")
             sessions = self.server.session.handle({"op": "sessions.list"}).get("sessions", [])

@@ -332,6 +332,18 @@ class MusicSession:
         self.control.set_volume(player_id, percent, muted=muted)
         return {"ok": True, "player_id": player_id, "volume": percent, "muted": muted}
 
+    def _op_group_mute(self, request):
+        group_id = request.get("group_id")
+        muted = request.get("muted")
+        if not isinstance(group_id, str) or not group_id:
+            return {"ok": False, "error": "缺少 group_id"}
+        if not isinstance(muted, bool):
+            return {"ok": False, "error": "muted 必须是布尔值"}
+        if not any(player.get("group_id") == group_id for player in self.control.players()):
+            return {"ok": False, "error": "播放组不存在"}
+        self.control.group_set_mute(group_id, muted)
+        return {"ok": True, "group_id": group_id, "muted": muted}
+
     def _op_player_name(self, request):
         player_id = request.get("player_id")
         name = request.get("name")
