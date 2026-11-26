@@ -17,6 +17,7 @@ _SER = os.environ.get("XZ_BOARD_SERIAL")
 # 未设序列号时回退裸 adb(单设备); 维护机多设备需 export XZ_BOARD_SERIAL
 ADB = ["adb", "-s", _SER, "shell"] if _SER else ["adb", "shell"]
 LOG = "/tmp/xr_live.log"
+GWLOG = "/data/xiaorui-gateway/data/gateway.log"
 
 
 def board(command, timeout=15):
@@ -28,6 +29,10 @@ def offset():
     return int(board(f"wc -c <{LOG}"))
 
 
+def gateway_offset():
+    return int(board(f"wc -c <{GWLOG}"))
+
+
 def segment(start):
     if offset() < start:
         raise RuntimeError("frontend log truncated during test")
@@ -35,6 +40,12 @@ def segment(start):
     # Cloud event logs may retain JSON \uXXXX escapes. Decode only those,
     # preserving already UTF-8 Chinese rather than using unicode_escape.
     return re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m[1], 16)), text)
+
+
+def gateway_segment(start):
+    if gateway_offset() < start:
+        raise RuntimeError("gateway log truncated during test")
+    return board(f"tail -c +{start + 1} {GWLOG}")
 
 
 def wait(start, pattern, timeout):
@@ -47,9 +58,18 @@ def wait(start, pattern, timeout):
     raise TimeoutError(f"missing {pattern!r}; recent log:\n{segment(start)[-2500:]}")
 
 
-def play(device, name):
-    subprocess.run(["aplay", "-D", device, "-q", str(ROOT / "tests/audio" / name)],
-                   check=True, timeout=90)
+def play(device, name, backend="alsa", target=None):
+    audio = str(ROOT / "tests/audio" / name)
+    if backend == "pipewire":
+        command = ["pw-play"]
+        if target:
+            command += ["--target", target]
+        command.append(audio)
+    elif backend == "alsa":
+        command = ["aplay", "-D", device, "-q", audio]
+    else:
+        raise ValueError(f"unknown playback backend: {backend}")
+    subprocess.run(command, check=True, timeout=90)
 
 
 def wait_local_connection(front, timeout=45):
@@ -65,9 +85,9 @@ def wait_local_connection(front, timeout=45):
     raise TimeoutError("frontend has no ESTABLISHED connection to 8002")
 
 
-def command(device, name, expected, timeout=90):
+def command(device, name, expected, timeout=90, backend="alsa", target=None):
     start = offset()
-    play(device, name)
+    play(device, name, backend=backend, target=target)
     # Correlate to recognized command, not merely the wake confirmation.
     pattern = r"(?:ASR 回执:|\(?(?:唤醒|跟说中)\)? 指令:).*?(?:" + expected + ")"
     text = wait(start, pattern, timeout)
@@ -84,13 +104,37 @@ def command(device, name, expected, timeout=90):
     return start, text
 
 
+def acoustic_wake_evidence(text, gateway_text):
+    kws_hits = re.findall(r"KWS 命中[^:：]*: ([^\s]+)", text)
+    asr_text = re.findall(r"ASR 回执: ([^\r\n]*)", text)
+    gateway_asr = re.findall(r"识别文本: ([^\r\n]+)", gateway_text)
+    tts = re.findall(r"语音生成成功: ([^\r\n]+)", gateway_text)
+    if not kws_hits or not asr_text or not gateway_asr or not tts:
+        raise RuntimeError("missing local KWS, command ASR, or gateway TTS evidence")
+    return {"kws_hit": kws_hits[-1], "recognized_command": asr_text[-1],
+            "gateway_asr": gateway_asr[-1], "tts": tts[-1]}
+
+
 def main():
+    global ADB, LOG
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("case", choices=["local-fault", "story", "timer", "radio-controls"])
+    parser.add_argument("case", choices=["local-fault", "story", "timer", "radio-controls",
+                                         "acoustic-wake"])
+    parser.add_argument("--serial", default=_SER,
+                        help="ADB serial; required for acoustic-wake to avoid choosing the wrong board")
+    parser.add_argument("--frontend-log", default=LOG,
+                        help="board frontend log path (for example /data/xiaorui/frontend.log)")
     parser.add_argument("--play-dev", default="plughw:1,0")
+    parser.add_argument("--play-backend", choices=["alsa", "pipewire"], default="alsa")
+    parser.add_argument("--play-target", help="optional PipeWire sink ID or name")
     args = parser.parse_args()
+    if args.case == "acoustic-wake" and not args.serial:
+        parser.error("acoustic-wake requires --serial (use the 4G board serial explicitly)")
+    ADB = ["adb", "-s", args.serial, "shell"] if args.serial else ["adb", "shell"]
+    LOG = args.frontend_log
     report = {"case": args.case, "ok": False}
     started = offset()
+    gateway_started = None
     front = board("pgrep -x xiaorui_live")
     if not front.isdigit():
         raise RuntimeError("expected exactly one frontend")
@@ -98,8 +142,16 @@ def main():
     cron = None
     faulted = False
     try:
-        time.sleep(12)  # finish/echo cooldown must not consume the next wake
-        if args.case == "local-fault":
+        time.sleep(32 if args.case == "acoustic-wake" else 12)
+        if args.case == "acoustic-wake":
+            music = board("if test -e /data/xiaorui/snapcast/music.active; then echo active; else echo idle; fi")
+            if music != "idle":
+                raise RuntimeError("music is active; refusing to interrupt playback for an acoustic test")
+            gateway_started = gateway_offset()
+            _, text = command(args.play_dev, "wake2_time.wav", "几点|时间|报时", 75,
+                              backend=args.play_backend, target=args.play_target)
+            report.update(acoustic_wake_evidence(text, gateway_segment(gateway_started)))
+        elif args.case == "local-fault":
             wait_local_connection(front)
             pid = board("cat /data/xiaorui-gateway/instances/8002/run/server.pid")
             if not pid.isdigit() or "app.py" not in board(f"tr '\\0' ' ' </proc/{pid}/cmdline"):
@@ -179,6 +231,8 @@ def main():
             except Exception as error:
                 report.update(ok=False, cron_error=str(error))
         report["frontend_log"] = segment(started)
+        if gateway_started is not None:
+            report["gateway_log"] = gateway_segment(gateway_started)
         output = Path(f"/tmp/live-smoke-{args.case}-{time.time_ns()}.json")
         output.write_text(json.dumps(report, ensure_ascii=False, indent=2).encode('utf-8', 'replace').decode('utf-8'))
         print(json.dumps({**{k: v for k, v in report.items() if k != "frontend_log"},

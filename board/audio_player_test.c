@@ -40,6 +40,8 @@ static atomic_int hold_write;
 static atomic_int write_blocked;
 static atomic_int capture_next_music_block;
 static atomic_int next_music_block_first;
+static atomic_int capture_mixer_write_at;
+static atomic_int captured_mixer_first;
 
 static int open_fake(snd_pcm_t **p, const char *name, int stream, int flags) {
     (void)stream; (void)flags; assert(!strcmp(name,"xr_spk"));
@@ -67,6 +69,8 @@ static int write_fake(snd_pcm_t *p, const void *data, unsigned long count) {
     if (inject_underrun) { inject_underrun = 0; return -EPIPE; }
     if (atomic_load(&capture_next_music_block) && writes == 22)
         atomic_store(&next_music_block_first, ((const int16_t *)data)[0]);
+    if (writes == atomic_load(&capture_mixer_write_at) && count > 500)
+        atomic_store(&captured_mixer_first, ((const int16_t *)data)[500]);
     ++writes;
     if (!first_write_count) first_write_count = count;
     if ((int)count < min_write_seen) min_write_seen = (int)count;
@@ -239,11 +243,16 @@ static void test_release_device_closes_handle(void) {
     written = 0; checksum = 0; prepared = 0; inject_underrun = 0;
     int c0 = closed;
     int16_t buf[2880] = {0};
+    xr_player_set_music(1);
     assert(xr_player_start() == 0);
+    xr_player_push_music_pcm(buf, 1000);
+    assert(xr_player_music_queued_samples() == 1000);
     xr_player_push_pcm(buf, 2880);
     sleep_ms(200);
     xr_player_release_device();
     assert(closed > c0);                       /* 真的 close 了 */
+    assert(!xr_player_music_active());
+    assert(xr_player_music_queued_samples() == 0); /* 不把旧会话残留带到下一次接管 */
     /* 再次 start 会自动重新 open */
     int o0 = opened;
     assert(xr_player_start() == 0);
@@ -261,7 +270,7 @@ static void test_music_hold_keeps_playing(void) {
     xr_player_set_music(1);
     assert(xr_player_music_active());
     assert(xr_player_start() == 0);
-    for (int i = 0; i < 4; ++i) xr_player_push_pcm(buf, 2880);   /* 音乐 */
+    for (int i = 0; i < 4; ++i) xr_player_push_music_pcm(buf, 2880);   /* 音乐 */
     sleep_ms(300);
     size_t before = written;
 
@@ -270,7 +279,7 @@ static void test_music_hold_keeps_playing(void) {
     assert(xr_player_music_active());
     sleep_ms(100);
     /* 线程还活着: 继续推音乐, 还在写卡 */
-    for (int i = 0; i < 4; ++i) xr_player_push_pcm(buf, 2880);
+    for (int i = 0; i < 4; ++i) xr_player_push_music_pcm(buf, 2880);
     sleep_ms(300);
     assert(written > before);
 
@@ -280,7 +289,7 @@ static void test_music_hold_keeps_playing(void) {
     xr_player_drop();
     assert(dropped == drops_before);          /* 音乐占卡时不能 ALSA drop 到 SETUP */
     sleep_ms(100);
-    for (int i = 0; i < 4; ++i) xr_player_push_pcm(buf, 2880);
+    for (int i = 0; i < 4; ++i) xr_player_push_music_pcm(buf, 2880);
     sleep_ms(300);
     assert(written > before_drop);
 
@@ -289,10 +298,10 @@ static void test_music_hold_keeps_playing(void) {
     int prep_before_gap = prepared;
     sleep_ms(450);
     assert(prepared > prep_before_gap);
-    xr_player_push_pcm(buf, 2880);
+    xr_player_push_music_pcm(buf, 2880);
     sleep_ms(100);
     assert(written == before_gap);            /* 一周期不足 3-period 预滚量 */
-    xr_player_push_pcm(buf, 2 * 2880);
+    xr_player_push_music_pcm(buf, 2 * 2880);
     sleep_ms(300);
     assert(written > before_gap);             /* 攒够后重连恢复播放 */
 
@@ -301,6 +310,39 @@ static void test_music_hold_keeps_playing(void) {
     assert(!xr_player_music_active());
     xr_player_finish();
     assert(xr_player_queued_samples() == 0);
+}
+
+/* TTS and Snapcast must be summed in the actual player output, not serialized. */
+static void test_music_voice_duck_mix_on_same_output(void) {
+    written = 0; checksum = 0; writes = 0; min_write_seen = 1 << 30;
+    atomic_store(&hold_write, 1);
+    atomic_store(&write_blocked, 0);
+    atomic_store(&captured_mixer_first, INT16_MIN);
+    atomic_store(&capture_mixer_write_at, -1);
+    int16_t music[2 * 2880], voice[2880];
+    for (size_t i = 0; i < 2 * 2880; ++i) music[i] = 1000;
+    for (size_t i = 0; i < 2880; ++i) voice[i] = 2000;
+
+    xr_player_set_music(1);
+    assert(xr_player_start() == 0);
+    xr_player_push_music_pcm(music, 2 * 2880); /* 达到 240ms 音乐预滚 */
+    for (int i = 0; i < 100 && !atomic_load(&write_blocked); ++i) sleep_ms(10);
+    assert(atomic_load(&write_blocked));
+
+    xr_player_voice_begin();
+    xr_player_push_music_pcm(music, 2880);
+    xr_player_push_pcm(voice, 2880);
+    xr_player_set_voice_gain(50);
+    atomic_store(&capture_mixer_write_at, writes + 22); /* 下一批 PCM 的首帧 */
+    atomic_store(&hold_write, 0);
+    for (int i = 0; i < 100 && atomic_load(&captured_mixer_first) == INT16_MIN; ++i)
+        sleep_ms(10);
+    assert(atomic_load(&captured_mixer_first) == 1250); /* 2000*50% + 1000*25% */
+
+    xr_player_drop();
+    xr_player_set_music(0);
+    xr_player_set_voice_gain(100);
+    xr_player_finish();
 }
 
 /* 重联时 Snapclient 可能把缓存 PCM 突发写入 FIFO。总待播量超过 250ms 时，
@@ -325,7 +367,7 @@ static void test_music_reconnect_drops_stale_ring_backlog(void) {
     static int16_t backlog[20000];
     for (size_t i = 0; i < 20000; ++i) backlog[i] = (int16_t)(1000 + i);
     xr_player_push_music_pcm(backlog, 20000);
-    assert(xr_player_queued_samples() >= 20000);
+    assert(xr_player_music_queued_samples() >= 20000);
     atomic_store(&capture_next_music_block, 1);
     atomic_store(&hold_write, 0);
     for (int i = 0; i < 200 && atomic_load(&next_music_block_first) < 0; ++i) sleep_ms(10);
@@ -379,6 +421,7 @@ int main(void) {
 
     /* 新增: 音乐会话在位时, 语音 finish/drop 不能把音乐收掉 */
     test_music_hold_keeps_playing();
+    test_music_voice_duck_mix_on_same_output();
     test_music_reconnect_drops_stale_ring_backlog();
 
     /* 新增: release_device 真的 close 句柄, 再次 start 重新 open */

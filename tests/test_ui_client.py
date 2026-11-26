@@ -82,19 +82,28 @@ def test_live_status_timeout_and_controls(client, tmp_path):
         client.xr_ui_client_tick(1000)
         query, peer = server.recvfrom(8192)
         assert Message.from_buffer_copy(query).type == 1
+        tts_query, _ = server.recvfrom(8192)
+        assert Message.from_buffer_copy(tts_query).type == 7
         message = status()
         server.sendto(bytes(message), peer)
+        server.sendto(bytes(Message(magic=0x58525549, version=1, type=8,
+                                    state=1, volume=40)), peer)
         client.xr_ui_client_tick(1001)
         assert client.xr_ui_client_connected(1001)
         assert client.xr_ui_client_status().contents.question.decode() == "你叫什么名字？"
         assert client.xr_ui_client_status().contents.volume == 60
+        assert client.xr_ui_client_tts_gain() == 40
         assert client.xr_ui_client_command(3, 70) == 0
         command, _ = server.recvfrom(8192)
         assert Message.from_buffer_copy(command).volume == 70
+        assert client.xr_ui_client_command(6, 30) == 0
+        command, _ = server.recvfrom(8192)
+        assert Message.from_buffer_copy(command).volume == 30
         assert client.xr_ui_client_command(4, 0) == 0
         command, _ = server.recvfrom(8192)
         assert Message.from_buffer_copy(command).type == 4
         assert client.xr_ui_client_command(3, 101) == -1
+        assert client.xr_ui_client_command(6, 0) == -1
         assert client.xr_ui_client_command(99, 0) == -1
         assert not client.xr_ui_client_connected(3501)
 

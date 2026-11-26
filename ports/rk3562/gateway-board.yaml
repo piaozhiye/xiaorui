@@ -115,6 +115,11 @@ VAD:
 # 绝对路径让两者同层(server/music 与 server/music-online/playlist.json)。
 # 在线直链靠板端 2MB 交叉编译 ffmpeg 解流, 装法见 ports/rk3562/deploy-music.sh。
 plugins:
+  snapcast_music:
+    enabled: true
+    # The voice gateway runs beside the Snapcast music controller on the
+    # server board. The controller accepts this endpoint only over loopback.
+    base_url: "http://127.0.0.1:8766"
   play_music:
     music_dir: "/data/xiaorui-gateway/server/music"
     music_ext:
@@ -131,3 +136,4 @@ Intent:
   function_call:
     functions:
       - play_music
+      - control_music

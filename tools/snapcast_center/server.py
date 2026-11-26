@@ -8,6 +8,7 @@ import io
 import json
 import os
 import pathlib
+import random
 import re
 import ssl
 import stat
@@ -24,6 +25,7 @@ from music_session import MusicSession
 from pairing_auth import PairingAuth
 from music_collections import CollectionError, MusicCollections
 from snapcast_control import SnapcastClient, SnapcastError
+from voice_volume import VoiceVolumeError, get_gain as get_voice_gain, set_gain as set_voice_gain
 
 _PAIRING_DISPLAY_LOCK = threading.Lock()
 
@@ -126,6 +128,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(name, value)
         self.end_headers()
         self.wfile.write(raw)
+
 
     def _unauthorized(self):
         message = ("需要先用一次性配对码绑定此浏览器"
@@ -577,6 +580,14 @@ class Handler(BaseHTTPRequestHandler):
         if not (pairing and self._pairing_public_route()):
             if not self._authorized():
                 return
+        if request_path == "/api/voice-volume":
+            try:
+                gain = get_voice_gain(self.server.voice_ui_socket)
+                return self._send(200, "application/json; charset=utf-8",
+                                  json.dumps({"ok": True, "gain": gain}))
+            except VoiceVolumeError as exc:
+                return self._send(503, "application/json; charset=utf-8",
+                                  json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
         if request_path == "/api/pairing/status":
             is_local = self.client_address[0] in ("127.0.0.1", "::1")
             code = pairing.code if pairing is not None and is_local else None
@@ -702,6 +713,9 @@ class Handler(BaseHTTPRequestHandler):
         if self._reject_nonlocal_request():
             return
         pairing = getattr(self.server, "pairing_auth", None)
+        request_path = urllib.parse.urlsplit(self.path).path
+        local_voice_control = (request_path == "/api/voice"
+                               and self.client_address[0] in ("127.0.0.1", "::1"))
         local_pairing_rotate = bool(
             pairing and self.path == "/api/pairing/rotate"
             and self.client_address[0] in ("127.0.0.1", "::1"))
@@ -723,8 +737,33 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True, "device_id": result["device_id"]
             }), {"Set-Cookie": (f"XiaoruiSession={result['token']}; Path=/; HttpOnly; "
                                 f"SameSite=Strict; Max-Age=31536000{secure}")})
-        if not local_pairing_rotate and not self._authorized():
+        if not local_pairing_rotate and not local_voice_control and not self._authorized():
             return
+        if request_path == "/api/voice-volume":
+            request = self._read_json_request()
+            if isinstance(request, tuple):
+                return
+            try:
+                gain = request.get("gain") if isinstance(request, dict) else None
+                actual = set_voice_gain(self.server.voice_ui_socket, gain)
+                return self._send(200, "application/json; charset=utf-8",
+                                  json.dumps({"ok": True, "gain": actual}))
+            except VoiceVolumeError as exc:
+                return self._send(400, "application/json; charset=utf-8",
+                                  json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+        if request_path == "/api/voice":
+            if not local_voice_control:
+                return self._send(403, "application/json; charset=utf-8",
+                                  '{"ok":false,"error":"语音控制只允许本机调用"}')
+            request = self._read_json_request()
+            if isinstance(request, tuple):
+                return
+            result = self._voice_control(request)
+            status = 200 if result.get("ok") else 400
+            if result.get("code") == "volume_too_high":
+                status = 409
+            return self._send(status, "application/json; charset=utf-8",
+                              json.dumps(result, ensure_ascii=False))
         if pairing and self.path == "/api/pairing/revoke":
             request = self._read_json_request()
             device_id = request.get("device_id") if isinstance(request, dict) else None
@@ -1129,6 +1168,212 @@ class Handler(BaseHTTPRequestHandler):
                           "application/json; charset=utf-8",
                           json.dumps(result, ensure_ascii=False))
 
+    def _voice_control(self, request):
+        """Small loopback-only voice API; it never accepts arbitrary music ops."""
+        if not isinstance(request, dict):
+            return {"ok": False, "error": "请求必须是 JSON 对象"}
+        action = request.get("action")
+        if not isinstance(action, str) or action not in {"play", "pause", "resume", "stop", "next", "previous",
+                          "volume_set", "volume_up", "volume_down", "status"}:
+            return {"ok": False, "error": "不支持的音乐操作"}
+
+        try:
+            with self.server.music_queue_lock:
+                queue = self.server.music_queue
+                players = self.server.session.handle({"op": "players.list"}).get("players", [])
+                by_id = {row.get("id"): row for row in players}
+                connected = [row for row in players if row.get("connected")]
+                preferred = (queue.get("players", [])
+                             if queue.get("state") != "stopped" else [])
+                targets = list(preferred) if preferred else [row["id"] for row in connected]
+
+                if action == "status":
+                    if queue.get("state") in ("playing", "paused", "starting"):
+                        title = queue.get("current_title") or "音乐"
+                        state_text = {"playing": "正在播放", "paused": "已暂停",
+                                      "starting": "正在启动"}.get(queue.get("state"), "")
+                        return {"ok": True, "response": f"{title}，{state_text}"}
+                    return {"ok": True, "response": "当前没有正在播放的音乐"}
+
+                if action in ("volume_set", "volume_up", "volume_down"):
+                    if not targets:
+                        return {"ok": False, "error": "没有在线音箱"}
+                    offline = [by_id.get(pid, {}).get("name", pid) for pid in targets
+                               if pid not in by_id or not by_id[pid].get("connected")]
+                    if offline:
+                        return {"ok": False, "error": "播放组有设备离线：" + "、".join(offline)}
+                    if action == "volume_set":
+                        volume = request.get("volume")
+                        if not isinstance(volume, int) or isinstance(volume, bool) or not 0 <= volume <= 100:
+                            return {"ok": False, "error": "音量需要是 0 到 100 的整数"}
+                        result = self.server.session.handle({"op": "players.volume",
+                                                             "player_ids": targets, "volume": volume})
+                        return ({"ok": True, "volume": volume,
+                                 "response": f"已将所选音箱音量调到 {volume}%"}
+                                if result.get("ok") and not result.get("failed") else
+                                {"ok": False, "error": result.get("error") or "设置音量失败"})
+                    delta = 5 if action == "volume_up" else -5
+                    failed = []
+                    for player_id in targets:
+                        current = by_id[player_id].get("volume", 0)
+                        changed = self.server.session.handle({"op": "player.volume",
+                            "player_id": player_id, "volume": max(0, min(100, current + delta))})
+                        if not changed.get("ok"):
+                            failed.append(by_id[player_id].get("name", player_id))
+                    if failed:
+                        return {"ok": False, "error": "部分音箱调节失败：" + "、".join(failed)}
+                    return {"ok": True, "response": "已调高音乐音量" if delta > 0 else "已调低音乐音量"}
+
+                if action == "play":
+                    query = request.get("query", "")
+                    if not isinstance(query, str) or len(query) > 120:
+                        return {"ok": False, "error": "歌曲名称无效"}
+                    query = query.strip()
+                    if not targets:
+                        return {"ok": False, "error": "没有在线音箱"}
+
+                    stations = self.server.collections.list().get("stations", [])
+                    station_matches = ([row for row in stations
+                                        if query.casefold() in row.get("name", "").casefold()]
+                                       if query and query.casefold() != "random" else [])
+                    if len(station_matches) == 1:
+                        station = station_matches[0]
+                        self._authorize_music_players(targets)
+                        stopped = self._voice_stop_current()
+                        if not stopped.get("ok"):
+                            return stopped
+                        url = urllib.parse.urlsplit(station["url"])
+                        args = [(k, v) for k, v in urllib.parse.parse_qsl(url.query, keep_blank_values=True)
+                                if k.casefold() != "name"]
+                        args.append(("name", "radio-" + station["id"][:20]))
+                        source = urllib.parse.urlunsplit((url.scheme, url.netloc, url.path,
+                                                         urllib.parse.urlencode(args), ""))
+                        marker = "radio:" + station["id"]
+                        result = self.server.session.handle({"op": "session.play", "source": source,
+                                                            "players": targets, "track_id": marker,
+                                                            "track_title": station["name"]})
+                        if result.get("ok"):
+                            self.server.music_queue = {"track_ids": [], "players": targets,
+                                "index": 0, "session_id": result["session_id"], "state": "playing",
+                                "error": None, "source_kind": "radio", "current_title": station["name"],
+                                "station_id": station["id"]}
+                            self._save_queue()
+                            self._sync_music_activity()
+                            return {"ok": True, "response": f"正在同步播放电台：{station['name']}"}
+                        return {"ok": False, "error": result.get("error", "电台启动失败")}
+                    if len(station_matches) > 1:
+                        names = "、".join(row["name"] for row in station_matches[:3])
+                        return {"ok": False, "error": f"找到多个电台：{names}，请说完整名称"}
+
+                    tracks = self.server.library.list_tracks()
+                    if not query or query.casefold() == "random":
+                        current_track_id = (queue.get("track_ids", [])[queue.get("index", 0)]
+                                            if queue.get("track_ids")
+                                            and 0 <= queue.get("index", 0) < len(queue["track_ids"])
+                                            else None)
+                        candidates = [row for row in tracks
+                                      if row.get("id") != current_track_id]
+                        if not candidates and current_track_id is None:
+                            candidates = tracks
+                        track = random.choice(candidates) if candidates else None
+                    else:
+                        exact = [row for row in tracks
+                                 if query.casefold() == row.get("title", "").casefold()]
+                        candidates = exact or [row for row in tracks
+                            if query.casefold() in " ".join((row.get("title", ""),
+                                row.get("artist", ""), row.get("album", ""))).casefold()]
+                        if len(candidates) > 1:
+                            names = "、".join(row["title"] for row in candidates[:3])
+                            return {"ok": False, "error": f"找到多首相近曲目：{names}，请说完整歌名"}
+                        track = candidates[0] if candidates else None
+                    if track is None:
+                        return {"ok": False, "error": "本地曲库和电台列表里没有找到这首音乐"}
+
+                    # Check the existing safe-start rule before interrupting a
+                    # healthy current session. Voice never silently lowers volume.
+                    self._authorize_music_players(targets)
+                    stopped = self._voice_stop_current()
+                    if not stopped.get("ok"):
+                        return stopped
+                    self.server.music_queue = {"track_ids": [track["id"]], "players": targets,
+                        "index": 0, "session_id": None, "state": "starting", "error": None,
+                        "source_kind": "tracks", "current_title": track["title"], "station_id": None}
+                    try:
+                        result = self._start_queued_track()
+                    except MusicVolumeError as exc:
+                        self.server.music_queue = self._empty_queue()
+                        return {"ok": False, "code": "volume_too_high", "error": str(exc)}
+                    if result.get("ok"):
+                        self._sync_music_activity()
+                        return {"ok": True, "response": f"正在为 {len(targets)} 台音箱同步播放：{track['title']}"}
+                    return {"ok": False, "error": result.get("error", "播放启动失败")}
+
+                session_id = queue.get("session_id")
+                if not session_id or queue.get("state") not in ("playing", "paused"):
+                    return {"ok": False, "error": "当前没有可控制的音乐会话"}
+                if action in ("pause", "resume"):
+                    if queue.get("source_kind") != "radio" and queue.get("track_ids"):
+                        track_id = queue["track_ids"][queue["index"]]
+                        getattr(self.server.library, action)(track_id)
+                    result = self.server.session.handle({
+                        "op": "session.pause" if action == "pause" else "session.resume",
+                        "session_id": session_id})
+                    if result.get("ok"):
+                        queue["state"] = "paused" if action == "pause" else "playing"
+                        self._save_queue()
+                        self._sync_music_activity()
+                        return {"ok": True, "response": "音乐已暂停" if action == "pause" else "音乐继续播放"}
+                    return {"ok": False, "error": result.get("error", "操作失败")}
+                if action == "stop":
+                    stopped = self._voice_stop_current()
+                    if not stopped.get("ok"):
+                        return stopped
+                    self.server.music_queue = self._empty_queue()
+                    self._save_queue()
+                    self._sync_music_activity()
+                    return {"ok": True, "response": "音乐已停止"}
+                if action == "next":
+                    if queue.get("source_kind") == "radio":
+                        station_rows = self.server.collections.list().get("stations", [])
+                        current = queue.get("station_id")
+                        names = [row.get("id") for row in station_rows]
+                        if not names:
+                            return {"ok": False, "error": "没有可切换的电台"}
+                        idx = (names.index(current) + 1) % len(names) if current in names else 0
+                        return self._voice_control({"action": "play", "query": station_rows[idx]["name"]})
+                    if not queue.get("track_ids") or queue["index"] + 1 >= len(queue["track_ids"]):
+                        if (queue.get("source_kind") == "tracks"
+                                and len(queue.get("track_ids", [])) == 1):
+                            return self._voice_control({"action": "play", "query": "random"})
+                        return {"ok": False, "error": "队列里没有下一首"}
+                    result = self._start_queue_index(queue["index"] + 1)
+                    return {"ok": bool(result.get("ok")),
+                            "response": "已切到下一首" if result.get("ok") else None,
+                            "error": result.get("error")}
+                if action == "previous":
+                    if not queue.get("track_ids") or queue["index"] <= 0:
+                        return {"ok": False, "error": "队列里没有上一首"}
+                    result = self._start_queue_index(queue["index"] - 1)
+                    return {"ok": bool(result.get("ok")),
+                            "response": "已切到上一首" if result.get("ok") else None,
+                            "error": result.get("error")}
+        except MusicVolumeError as exc:
+            return {"ok": False, "code": "volume_too_high", "error": str(exc)}
+        except (MusicLibraryError, CollectionError, SnapcastError, KeyError, IndexError,
+                TypeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": False, "error": "操作未完成"}
+
+    def _voice_stop_current(self):
+        queue = self.server.music_queue
+        if queue.get("session_id"):
+            result = self.server.session.handle({"op": "session.stop", "session_id": queue["session_id"]})
+            if not result.get("ok"):
+                return {"ok": False, "error": result.get("error", "停止当前音乐失败")}
+        for track_id in queue.get("track_ids", []):
+            self.server.library.stop(track_id)
+        return {"ok": True}
+
     def _upload_audio(self):
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         if content_type != "application/octet-stream" and not content_type.startswith("audio/"):
@@ -1187,11 +1432,37 @@ class Handler(BaseHTTPRequestHandler):
         print("[music-ui] " + fmt % args)
 
 
+class LoopbackVoiceHandler(Handler):
+    """Serve the narrow voice API over plain HTTP on loopback only."""
+
+    def __init__(self, request, client_address, voice_server):
+        super().__init__(request, client_address, voice_server.music_server)
+
+    def do_GET(self):
+        if self.path == "/health":
+            return self._send(200, "application/json", '{"ok":true}')
+        return self._send(404, "application/json", '{"ok":false,"error":"not found"}')
+
+    def do_POST(self):
+        if urllib.parse.urlsplit(self.path).path != "/api/voice":
+            return self._send(404, "application/json", '{"ok":false,"error":"not found"}')
+        return super().do_POST()
+
+
+def create_loopback_voice_server(music_server, port=8766):
+    voice_server = ThreadingHTTPServer(("127.0.0.1", port), LoopbackVoiceHandler)
+    voice_server.music_server = music_server
+    return voice_server
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bind", default=os.environ.get("XR_MUSIC_UI_BIND", "127.0.0.1"),
                         help="默认只监听本机；公开到 LAN 前请先加认证/防火墙")
     parser.add_argument("--port", type=int, default=int(os.environ.get("XR_MUSIC_UI_PORT", "8765")))
+    parser.add_argument("--voice-control-port", type=int, default=int(
+        os.environ.get("XR_MUSIC_VOICE_CONTROL_PORT", "8766")),
+        help="本机语音控制 HTTP 端口；监听地址固定为 127.0.0.1，设为 0 可关闭")
     parser.add_argument("--snapcast-host", default=os.environ.get("XR_SNAPCAST_CONTROL_HOST", "127.0.0.1"))
     parser.add_argument("--snapcast-port", type=int, default=int(os.environ.get("XR_SNAPCAST_CONTROL_PORT", "1780")))
     default_state = pathlib.Path(os.environ.get("XDG_STATE_HOME", pathlib.Path.home() / ".local/state")) / "xiaorui-music/sessions.json"
@@ -1210,6 +1481,9 @@ def main():
     parser.add_argument("--music-max-start-volume", type=int,
                         default=int(os.environ.get("XR_MUSIC_MAX_START_VOLUME", "35")),
                         help="音乐启动前允许的最高 Snapcast 软件音量百分比")
+    parser.add_argument("--voice-ui-socket", default=os.environ.get(
+        "XR_UI_SOCKET", "/run/xiaorui/frontend.sock"),
+        help="本机语音前端 Unix socket，用于单独调节语音/TTS 音量")
     parser.add_argument("--tls-cert", default=os.environ.get("XR_MUSIC_UI_TLS_CERT"),
                         help="启用 HTTPS 所需的 PEM 证书")
     parser.add_argument("--tls-key", default=os.environ.get("XR_MUSIC_UI_TLS_KEY"),
@@ -1231,6 +1505,8 @@ def main():
     parser.add_argument("--public-url", default=os.environ.get("XR_MUSIC_UI_PUBLIC_URL", ""),
                         help="手机打开控制页使用的固定 HTTPS 地址，例如 https://xiaorui-music.local:8765")
     args = parser.parse_args()
+    if not 0 <= args.voice_control_port <= 65535:
+        parser.error("--voice-control-port 必须在 0~65535")
     remote_bind = not is_loopback_bind(args.bind)
     if bool(args.tls_cert) != bool(args.tls_key):
         parser.error("--tls-cert 和 --tls-key 必须同时设置")
@@ -1356,6 +1632,7 @@ def main():
     server.session = session
     server.library = library
     server.music_max_start_volume = args.music_max_start_volume
+    server.voice_ui_socket = args.voice_ui_socket
     server.music_queue_lock = threading.RLock()
     server.queue_state_file = (pathlib.Path(args.queue_state_file).expanduser()
                                if args.queue_state_file else
@@ -1390,10 +1667,19 @@ def main():
 
     maintenance = threading.Thread(target=maintain_sessions,
                                    name="music-session-maintenance", daemon=True)
+    voice_server = None
+    voice_thread = None
     scheme = "https" if args.tls_cert else "http"
     print(f"小瑞音乐 UI: {scheme}://{args.bind}:{args.port}/; Snapserver={args.snapcast_host}:{args.snapcast_port}")
     try:
         maintenance.start()
+        if args.voice_control_port:
+            voice_server = create_loopback_voice_server(server, args.voice_control_port)
+            voice_thread = threading.Thread(target=voice_server.serve_forever,
+                                            kwargs={"poll_interval": 0.5},
+                                            name="music-voice-control", daemon=True)
+            voice_thread.start()
+            print(f"本机语音音乐控制: http://127.0.0.1:{args.voice_control_port}/api/voice")
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
         pass
@@ -1401,6 +1687,11 @@ def main():
         server.maintenance_stop.set()
         if maintenance.is_alive():
             maintenance.join(timeout=2)
+        if voice_server is not None:
+            voice_server.shutdown()
+            voice_server.server_close()
+        if voice_thread is not None and voice_thread.is_alive():
+            voice_thread.join(timeout=2)
         library.close()
         server.server_close()
 

@@ -14,7 +14,8 @@ void xr_ui_server_close(xr_ui_server_t *server);
 void xr_ui_server_turn_begin(xr_ui_server_t *server);
 /* 麦克风电平 0..100 */
 void xr_ui_server_level(xr_ui_server_t *server, unsigned int level);
-void xr_ui_server_state(xr_ui_server_t *server, enum xr_ui_state state, unsigned int volume);
+void xr_ui_server_state(xr_ui_server_t *server, enum xr_ui_state state,
+                        unsigned int volume, unsigned int tts_gain);
 /* text 为已解码的 UTF-8 明文(问句/回答分句), 不再传 JSON */
 void xr_ui_server_text(xr_ui_server_t *server, bool question, const char *text);
 int xr_ui_server_poll(xr_ui_server_t *server, unsigned int *volume);

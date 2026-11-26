@@ -34,6 +34,8 @@ static lv_obj_t *answer_label;
 static lv_obj_t *clock_label;
 static lv_obj_t *volume_slider;
 static lv_obj_t *volume_label;
+static lv_obj_t *tts_volume_slider;
+static lv_obj_t *tts_volume_label;
 static lv_obj_t *stop_button;
 static lv_obj_t *answer_card;
 static lv_obj_t *greeting_label;
@@ -69,6 +71,7 @@ static uint64_t started_ms;
 static uint64_t last_memory_ms;
 static uint64_t last_pairing_refresh_ms;
 static int displayed_volume = -1;
+static int displayed_tts_gain = -1;
 static int displayed_speaking = -1;
 static char displayed_question[256];
 static char displayed_answer[XR_UI_ANSWER_CAPACITY];
@@ -197,6 +200,14 @@ static void volume_changed(lv_event_t *event) {
     unsigned int value = (unsigned int)lv_slider_get_value(volume_slider);
     if (connected && !demo && xr_ui_client_command(XR_UI_VOLUME, value) != 0)
         lv_label_set_text(connection_label, "音量请求未发送，请稍后重试");
+}
+
+static void tts_volume_changed(lv_event_t *event) {
+    (void)event;
+    if (!tts_volume_slider) return;
+    unsigned int value = (unsigned int)lv_slider_get_value(tts_volume_slider);
+    if (connected && !demo && xr_ui_client_command(XR_UI_TTS_GAIN, value) != 0)
+        lv_label_set_text(connection_label, "语音音量请求未发送，请稍后重试");
 }
 
 static bool pairing_qr_update(const char *payload) {
@@ -448,8 +459,8 @@ static void build_settings(lv_obj_t *screen) {
     label(settings_page, "把小瑞调到刚刚好", 74, 16, 950, large_font.font, 0xf2f0e8);
     label(settings_page, "触摸控制与语音主链路相互独立",
           76, 105, 920, body_font.font, 0x8ca5aa);
-    lv_obj_t *card = panel(settings_page, 64, 240, 952, 350, 0x122327, 28);
-    label(card, "播放音量", 40, 38, 700, title_font.font, 0xdce5e4);
+    lv_obj_t *card = panel(settings_page, 64, 240, 952, 560, 0x122327, 28);
+    label(card, "本机总音量（音乐 + 语音）", 40, 28, 850, title_font.font, 0xdce5e4);
     volume_label = label(card, "等待连接", 40, 110, 800, body_font.font, 0x82c6b0);
     volume_slider = lv_slider_create(card);
     lv_obj_set_pos(volume_slider, 55, 200);
@@ -465,7 +476,26 @@ static void build_settings(lv_obj_t *screen) {
     label(card, "10", 52, 240, 120, tag_font, 0x6a9499);
     label(card, "50", 450, 240, 120, tag_font, 0x6a9499);
     label(card, "100", 800, 240, 120, tag_font, 0x6a9499);
-    lv_obj_t *pairing = panel(settings_page, 64, 640, 952, 470, 0x122327, 28);
+    label(card, "小瑞语音 / TTS", 40, 292, 700, title_font.font, 0xdce5e4);
+    label(card, "只影响“我在”、回答和提示音，不改变音乐音量。", 40, 350,
+          850, body_font.font, 0x8ca5aa);
+    tts_volume_label = label(card, "读取语音音量…", 40, 395, 800,
+                             body_font.font, 0x82c6b0);
+    tts_volume_slider = lv_slider_create(card);
+    lv_obj_set_pos(tts_volume_slider, 55, 465);
+    lv_obj_set_size(tts_volume_slider, 835, 22);
+    lv_slider_set_range(tts_volume_slider, 10, 100);
+    lv_obj_set_style_bg_color(tts_volume_slider, lv_color_hex(0x274346), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(tts_volume_slider, lv_color_hex(0xf0d38a), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_grad_color(tts_volume_slider, lv_color_hex(0xf0d38a), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_grad_dir(tts_volume_slider, LV_GRAD_DIR_HOR, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(tts_volume_slider, lv_color_hex(0xffedbd), LV_PART_KNOB);
+    lv_obj_add_event_cb(tts_volume_slider, tts_volume_changed, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_state(tts_volume_slider, LV_STATE_DISABLED);
+    label(card, "10", 52, 500, 120, tag_font, 0x6a9499);
+    label(card, "55", 450, 500, 120, tag_font, 0x6a9499);
+    label(card, "100", 800, 500, 120, tag_font, 0x6a9499);
+    lv_obj_t *pairing = panel(settings_page, 64, 830, 952, 470, 0x122327, 28);
     label(pairing, "手机扫码连接音乐", 40, 24, 800, title_font.font, 0xdce5e4);
     pairing_qr_canvas = lv_canvas_create(pairing);
     lv_canvas_set_buffer(pairing_qr_canvas, pairing_qr_pixels, PAIRING_QR_SIZE,
@@ -481,7 +511,7 @@ static void build_settings(lv_obj_t *screen) {
                                      pairing_refresh, NULL);
     (void)pairing_refresh_button;
 
-    lv_obj_t *details = panel(settings_page, 64, 1140, 952, 470, 0x122327, 28);
+    lv_obj_t *details = panel(settings_page, 64, 1330, 952, 470, 0x122327, 28);
     label(details, "设备与连接", 40, 38, 800, title_font.font, 0xdce5e4);
     label(details, "语音服务", 40, 120, 280, body_font.font, 0x8ca5aa);
     service_label = label(details, "未连接", 320, 120, 560, body_font.font, 0x82c6b0);
@@ -495,11 +525,12 @@ static void build_settings(lv_obj_t *screen) {
           40, 390, 880, tag_font, 0x7f9ea0);
     label(settings_page, "连接中断时控制会自动禁用，"
           "不影响语音程序继续运行。",
-          76, 1640, 900, body_font.font, 0x8ca5aa);
-    lv_obj_t *exit = button(settings_page, "退出小瑞", 64, 1700, 952, exit_ui, NULL);
+          76, 1830, 900, body_font.font, 0x8ca5aa);
+    lv_obj_t *exit = button(settings_page, "退出小瑞", 64, 1890, 952, exit_ui, NULL);
     exit_caption = lv_obj_get_child(exit, 0);
     label(settings_page, "退出后回到系统界面，语音服务与 NPU 一并释放。",
-          76, 1810, 900, body_font.font, 0x8ca5aa);
+          76, 2000, 900, body_font.font, 0x8ca5aa);
+    lv_obj_set_height(settings_page, 2140);
     lv_obj_add_flag(settings_page, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -568,15 +599,20 @@ static void refresh(lv_timer_t *timer) {
              * 文本, 跟启动一样忽略一帧(2026-11-20 review)。 */
             first_status_seen = false;
             lv_obj_clear_state(volume_slider, LV_STATE_DISABLED);
+            lv_obj_add_state(tts_volume_slider, LV_STATE_DISABLED);
+            lv_label_set_text(tts_volume_label, "读取语音音量…");
         }
         else
         {
             lv_obj_add_state(volume_slider, LV_STATE_DISABLED);
+            lv_obj_add_state(tts_volume_slider, LV_STATE_DISABLED);
             lv_obj_add_state(stop_button, LV_STATE_DISABLED);
             lv_label_set_text(state_label, "等待语音服务连接");
             layout_state_chip("等待语音服务连接", state_palette[0]);
             lv_label_set_text(volume_label, "等待连接");
+            lv_label_set_text(tts_volume_label, "等待连接");
             displayed_volume = -1;
+            displayed_tts_gain = -1;
         }
     }
     const xr_ui_message_t *status = xr_ui_client_status();
@@ -659,6 +695,26 @@ static void refresh(lv_timer_t *timer) {
             snprintf(value, sizeof(value), "%d%%", displayed_volume);
             lv_label_set_text(volume_label, value);
             lv_slider_set_value(volume_slider, displayed_volume, LV_ANIM_OFF);
+        }
+        int gain = demo ? -1 : xr_ui_client_tts_gain();
+        if (gain >= 10 && gain <= 100)
+        {
+            if (((int)gain != displayed_tts_gain ||
+                 lv_slider_get_value(tts_volume_slider) != gain) &&
+                !lv_obj_has_state(tts_volume_slider, LV_STATE_PRESSED))
+            {
+                char value[48];
+                displayed_tts_gain = gain;
+                snprintf(value, sizeof(value), "当前语音音量 %d%%", gain);
+                lv_label_set_text(tts_volume_label, value);
+                lv_slider_set_value(tts_volume_slider, gain, LV_ANIM_OFF);
+            }
+            lv_obj_clear_state(tts_volume_slider, LV_STATE_DISABLED);
+        }
+        else
+        {
+            lv_obj_add_state(tts_volume_slider, LV_STATE_DISABLED);
+            if (!demo) lv_label_set_text(tts_volume_label, "前端不支持独立语音音量，请更新语音服务");
         }
     }
     /* 麦克风电平: 眼睛和光圈跟着人说话亮起来 */

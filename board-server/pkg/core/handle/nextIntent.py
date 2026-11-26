@@ -11,7 +11,7 @@ TAG = __name__
 _NEXT_QUERIES = {"下一首", "下一曲", "换一首", "切歌", "切一首",
                  "再来一首", "再来一首别的", "再来一个",
                  "换个电台", "换台", "换一个电台", "下一个电台", "换个频道",
-                 "换个台", "下一台"}
+                 "换个台", "下一台", "上一首", "上一曲", "前一首", "前一曲"}
 
 
 def match_next_query(text) -> bool:
@@ -22,6 +22,21 @@ def match_next_query(text) -> bool:
 
 
 async def handle_next_intent(conn, text) -> bool:
+    from core.utils.snapcast_music import control as snapcast_control, enabled as snapcast_enabled
+    if snapcast_enabled(conn):
+        from core.handle.sendAudioHandle import send_stt_message
+        from core.handle.intentHandler import speak_txt
+        import uuid
+
+        action = "previous" if text.strip().strip("，。！？；,.!?; \t") in {
+            "上一首", "上一曲", "前一首", "前一曲"} else "next"
+        await send_stt_message(conn, text)
+        conn.sentence_id = str(uuid.uuid4().hex)
+        result = snapcast_control(conn, action)
+        speak_txt(conn, result.get("response") if result.get("ok")
+                  else result.get("error", "音乐控制失败"))
+        return True
+
     from plugins_func.functions.play_music import (_LAST_MEDIA,
                                                     _load_online_playlist,
                                                     _queue_online_stream,

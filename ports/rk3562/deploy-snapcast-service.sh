@@ -122,7 +122,7 @@ if [ "$ROLE" = server-client ]; then
         adb -s "$SERIAL" shell "chmod 755 '$REMOTE/.install/server-v0.35.0/snapserver' && mv '$REMOTE/.install/server-v0.35.0' '$REMOTE/server-v0.35.0'"
     fi
     adb -s "$SERIAL" shell "mkdir -p '$REMOTE/music-app' '$REMOTE/ffmpeg-local' '$REMOTE/music-state' /data/xiaorui/music-library"
-    for file in server.py music_library.py music_collections.py music_session.py snapcast_control.py pairing_auth.py music_ui.html music_manifest.webmanifest music_service_worker.js music_icon.svg music_icon_192.png music_icon_512.png; do
+    for file in server.py music_library.py music_collections.py music_session.py snapcast_control.py pairing_auth.py voice_volume.py music_ui.html music_manifest.webmanifest music_service_worker.js music_icon.svg music_icon_192.png music_icon_512.png; do
         adb -s "$SERIAL" push "$DIR/../../tools/snapcast_center/$file" "$REMOTE/.install/$file.new" >/dev/null
         adb -s "$SERIAL" shell "chmod 644 '$REMOTE/.install/$file.new' && mv '$REMOTE/.install/$file.new' '$REMOTE/music-app/$file'"
     done

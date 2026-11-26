@@ -36,6 +36,7 @@ MUSIC_UPLOAD_ROOT=${XR_MUSIC_UPLOAD_ROOT:-/userdata/xiaorui/music-uploads}
 MUSIC_FIFO_ROOT=${XR_MUSIC_FIFO_ROOT:-$BASE/music-pipes}
 MUSIC_FFMPEG=${XR_MUSIC_FFMPEG:-$BASE/ffmpeg-local/ffmpeg}
 MUSIC_UI_PORT=${XR_MUSIC_UI_PORT:-8765}
+MUSIC_VOICE_CONTROL_PORT=${XR_MUSIC_VOICE_CONTROL_PORT:-8766}
 MUSIC_UI_BIND=${XR_MUSIC_UI_BIND:-127.0.0.1}
 MUSIC_UI_TLS_CERT=${XR_MUSIC_UI_TLS_CERT:-}
 MUSIC_UI_TLS_KEY=${XR_MUSIC_UI_TLS_KEY:-}
@@ -88,6 +89,26 @@ stop_pidfile() {
     rm -f "$file"
 }
 
+stop_music_ui() {
+    stop_pidfile "$UI_PID_FILE" "$MUSIC_APP/server.py" "music UI"
+    # The PID file can be stale after an unclean restart. Match the complete
+    # controller command line before stopping a live process; never signal a
+    # PID just because an old file contains its number.
+    if pid=$(find_pid "$MUSIC_APP/server.py --bind $MUSIC_UI_BIND --port $MUSIC_UI_PORT"); then
+        log "stopping music UI found by command line PID $pid"
+        kill -TERM "$pid" 2>/dev/null || true
+        i=0
+        while [ "$i" -lt 40 ] && kill -0 "$pid" 2>/dev/null; do
+            sleep 0.1
+            i=$((i + 1))
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            log "music UI PID $pid did not stop; sending KILL"
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+    fi
+}
+
 find_pid() {
     expected=$1
     for d in /proc/[0-9]*; do
@@ -97,6 +118,11 @@ find_pid() {
         case "$cmd" in *"$expected"*) echo "$pid"; return 0;; esac
     done
     return 1
+}
+
+voice_control_ready() {
+    "$PYTHON" -c 'import json,sys,urllib.request; r=urllib.request.Request("http://127.0.0.1:"+sys.argv[1]+"/api/voice", data=json.dumps({"action":"status"}).encode(), headers={"Content-Type":"application/json"}); result=json.load(urllib.request.urlopen(r,timeout=1)); sys.exit(0 if result.get("ok") else 1)' \
+        "$MUSIC_VOICE_CONTROL_PORT" >/dev/null 2>&1
 }
 
 frontend_has_fifo() {
@@ -210,10 +236,15 @@ start_music_ui() {
     chmod 700 "$MUSIC_UPLOAD_ROOT" || { log "cannot secure upload directory: $MUSIC_UPLOAD_ROOT"; return 1; }
     if pid=$(find_pid "$MUSIC_APP/server.py --bind $MUSIC_UI_BIND --port $MUSIC_UI_PORT"); then
         echo "$pid" > "$UI_PID_FILE"
-        log "music UI already running PID $pid"
-        return 0
+        if voice_control_ready; then
+            log "music UI already running PID $pid (voice control ready)"
+            return 0
+        fi
+        log "existing music UI PID $pid lacks voice control; restarting it"
+        stop_music_ui
     fi
     set -- --bind "$MUSIC_UI_BIND" --port "$MUSIC_UI_PORT" \
+        --voice-control-port "$MUSIC_VOICE_CONTROL_PORT" \
         --snapcast-host 127.0.0.1 --snapcast-port 1780 \
         --state-file "$BASE/music-state/sessions.json" \
         --queue-state-file "$BASE/music-state/queue.json" \
@@ -238,6 +269,17 @@ start_music_ui() {
             UI_SCHEME=http
             [ -z "$MUSIC_UI_TLS_CERT" ] || UI_SCHEME=https
             log "music UI ready PID $pid at $UI_SCHEME://$MUSIC_UI_BIND:$MUSIC_UI_PORT"
+            tries=0
+            until voice_control_ready || [ "$tries" -ge 10 ]; do
+                sleep 0.1
+                tries=$((tries + 1))
+            done
+            if ! voice_control_ready; then
+                log "loopback voice-control endpoint did not respond on 127.0.0.1:$MUSIC_VOICE_CONTROL_PORT"
+                stop_music_ui
+                return 1
+            fi
+            log "loopback voice-control ready at 127.0.0.1:$MUSIC_VOICE_CONTROL_PORT"
             return 0
         fi
         kill -0 "$pid" 2>/dev/null || break
@@ -245,7 +287,7 @@ start_music_ui() {
         i=$((i + 1))
     done
     log "music UI failed to start; see $LOG_DIR/music-ui.log"
-    stop_pidfile "$UI_PID_FILE" "$MUSIC_APP/server.py" "music UI"
+    stop_music_ui
     return 1
 }
 
@@ -425,7 +467,7 @@ start_all() {
             ;;
     esac
     if ! start_music_ui; then
-        stop_pidfile "$UI_PID_FILE" "$MUSIC_APP/server.py" "music UI"
+        stop_music_ui
         stop_pidfile "$CLIENT_PID_FILE" "$CLIENT" Snapclient
         stop_pidfile "$BRIDGE_PID_FILE" "$BRIDGE" bridge
         case "$ROLE" in server|server-client) stop_pidfile "$SERVER_PID_FILE" "$SERVER" Snapserver ;; esac
@@ -437,7 +479,7 @@ start_all() {
 
 stop_all() {
     stop_pidfile "$WATCHDOG_PID_FILE" "$0 supervise" watchdog
-    stop_pidfile "$UI_PID_FILE" "$MUSIC_APP/server.py" "music UI"
+    stop_music_ui
     stop_pidfile "$CLIENT_PID_FILE" "$CLIENT" Snapclient
     stop_pidfile "$BRIDGE_PID_FILE" "$BRIDGE" bridge
     case "$ROLE" in server|server-client) stop_pidfile "$SERVER_PID_FILE" "$SERVER" Snapserver ;; esac

@@ -21,6 +21,7 @@ struct xr_ui_server {
     bool client_seen;
 
     bool truncated;        /* 字幕缓冲曾溢出: 界面要标出"已截断" */
+    unsigned int tts_gain;
     uint64_t last_client_ms;
     xr_ui_message_t status;
 };
@@ -100,6 +101,7 @@ xr_ui_server_t *xr_ui_server_open(const char *path) {
     if (chmod(path, 0600) != 0) goto error;
     server->status = (xr_ui_message_t){.magic = XR_UI_MAGIC, .version = XR_UI_VERSION,
                                       .type = XR_UI_STATUS, .volume = 100};
+    server->tts_gain = 100;
     return server;
 error:
     xr_ui_server_close(server);
@@ -123,10 +125,13 @@ void xr_ui_server_turn_begin(xr_ui_server_t *server) {
     server->truncated = 0;   /* 新一轮: 截断标记复位 */
 }
 
-void xr_ui_server_state(xr_ui_server_t *server, enum xr_ui_state state, unsigned int volume) {
-    if (!server || state > XR_UI_VOICE_ERROR || volume < 10 || volume > 100) return;
+void xr_ui_server_state(xr_ui_server_t *server, enum xr_ui_state state,
+                        unsigned int volume, unsigned int tts_gain) {
+    if (!server || state > XR_UI_VOICE_ERROR || volume < 10 || volume > 100 ||
+        tts_gain < 1 || tts_gain > 100) return;
     server->status.state = (uint32_t)state;
     server->status.volume = volume;
+    server->tts_gain = tts_gain;
 }
 
 void xr_ui_server_level(xr_ui_server_t *server, unsigned int level) {
@@ -250,6 +255,21 @@ int xr_ui_server_poll(xr_ui_server_t *server, unsigned int *volume) {
         {
             *volume = request.volume;
             return XR_UI_VOLUME;
+        }
+        else if (request.type == XR_UI_TTS_GAIN && request.volume >= 1 && request.volume <= 100)
+        {
+            *volume = request.volume;
+            return XR_UI_TTS_GAIN;
+        }
+        else if (request.type == XR_UI_TTS_QUERY)
+        {
+            xr_ui_message_t response = server->status;
+            response.type = XR_UI_TTS_STATUS;
+            response.volume = server->tts_gain;
+            ssize_t sent = sendto(server->descriptor, &response, sizeof(response),
+                                  MSG_DONTWAIT | MSG_NOSIGNAL, (struct sockaddr *)&peer,
+                                  message.msg_namelen);
+            if (sent < 0) continue;
         }
     }
     return 0;

@@ -42,8 +42,8 @@ void xr_vad_calibrate_finish(xr_vad_t *v) {
 
 double xr_vad_noise_db(const xr_vad_t *v) { return v->noise_db; }
 void xr_vad_clear_preroll(xr_vad_t *v) { v->pre_n = 0; v->pre_i = 0; }
-int xr_vad_should_gate_music(int music_active, int music_paused, int kws_available) {
-    return music_active && !music_paused && kws_available;
+int xr_vad_should_gate_music(int music_active, int voice_ducked, int kws_available) {
+    return music_active && !voice_ducked && kws_available;
 }
 void xr_vad_discard_utterance(xr_vad_t *v) {
     if (!v) return;
