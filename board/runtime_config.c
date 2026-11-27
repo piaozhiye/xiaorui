@@ -29,8 +29,10 @@ const xr_runtime_config_t *xr_runtime_config(void) {
             config.local_asr == 1 ? "rknn" : config.local_asr == 0 ? "off" : "INVALID");
     config.music_controls = env_integer("XR_MUSIC_CONTROLS", 0, 0, 1);
     config.music_command_ms = env_integer("XR_MUSIC_COMMAND_MS", 2500, 1000, 5000);
+    config.tts_gain_percent = env_integer("XR_TTS_GAIN_PERCENT", 100, 10, 100);
     fprintf(stderr, "[config] music_controls=%d music_command_ms=%d\n",
             config.music_controls, config.music_command_ms);
+    fprintf(stderr, "[config] tts_gain=%d%%\n", config.tts_gain_percent);
     config.kws_trust_acoustic = env_integer("XR_KWS_TRUST_ACOUSTIC", 0, 0, 1);
     fprintf(stderr, "[config] cloud_asr=%d kws_trust_acoustic=%d\n",
             config.cloud_asr, config.kws_trust_acoustic);

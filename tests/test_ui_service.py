@@ -88,12 +88,21 @@ def test_voice_error_state_replaces_ready_when_voice_never_becomes_ready():
     """
     protocol = (ROOT / "board/ui_protocol.h").read_text(encoding="utf-8")
     assert "XR_UI_VOICE_ERROR" in protocol
+    assert "XR_UI_TTS_GAIN" in protocol and "XR_UI_TTS_QUERY" in protocol
     source = (ROOT / "board/xiaorui_live.c").read_text(encoding="utf-8")
     # 没就绪且超过兜底 -> 异常态(而不是 READY)
     assert "XR_UI_VOICE_ERROR" in source
     assert "preparing_seconds()" in source
     ui = (ROOT / "ui/main.c").read_text(encoding="utf-8")
     assert "语音服务异常" in ui or "语音服务不可用" in ui
+
+
+def test_touchscreen_exposes_independent_music_and_voice_volume_controls():
+    source = (ROOT / "ui/main.c").read_text(encoding="utf-8")
+    assert '"本机总音量（音乐 + 语音）"' in source
+    assert '"小瑞语音 / TTS"' in source
+    assert "XR_UI_TTS_GAIN" in source
+    assert "xr_ui_client_tts_gain()" in source
 
 
 def test_voice_preparing_restarts_clock_on_ws_reconnect():

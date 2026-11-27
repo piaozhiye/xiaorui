@@ -84,3 +84,5 @@ ui/build/
 
 # superpowers 流程的过程文档(spec/plan), 不进产品提交
 docs/superpowers/
+# Per-install local music TLS artifacts (public root CA plus device cert/key).
+.local-provisioning/

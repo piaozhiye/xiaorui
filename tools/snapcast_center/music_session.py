@@ -266,6 +266,9 @@ class MusicSession:
                 value = request.get(key)
                 if isinstance(value, str) and value:
                     self._sessions[session_id][key] = value
+            source_url = request.get("source_url")
+            if isinstance(source_url, str) and source_url:
+                self._sessions[session_id]["source_url"] = source_url
             self._save_state()
         return {
             "ok": True,

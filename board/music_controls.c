@@ -118,6 +118,36 @@ int xr_music_command_parse(const char *text, xr_music_command_t *command) {
     /* KWS 是必需的声学门。其唤醒音节可能掉出 ASR 预滚(实机"音量小一点"
        整句无唤醒词), 所以一个唤醒单元都剥不到时, 全文按严格控制句再判。 */
     if (!wake_tail(text, tail, sizeof(tail))) return 0;  /* 纯唤醒, 无指令 */
+    /* ASR may keep a comma between wake word and command. */
+    for (;;) {
+        static const char *const beginnings[] = {"，", ",", "、", "：", ":", " ", "\t"};
+        int removed = 0;
+        for (size_t i = 0; i < sizeof(beginnings) / sizeof(beginnings[0]); ++i) {
+            size_t n = strlen(beginnings[i]);
+            if (!strncmp(tail, beginnings[i], n)) {
+                memmove(tail, tail + n, strlen(tail + n) + 1);
+                removed = 1;
+                break;
+            }
+        }
+        if (!removed) break;
+    }
+    /* Cloud ASR commonly appends sentence punctuation. Strip only terminal
+     * punctuation/space so the command vocabulary remains deliberately strict. */
+    size_t tail_len = strlen(tail);
+    while (tail_len) {
+        static const char *const endings[] = {"。", "！", "？", "，", ".", "!", "?", ",", " ", "\t"};
+        int removed = 0;
+        for (size_t i = 0; i < sizeof(endings) / sizeof(endings[0]); ++i) {
+            size_t n = strlen(endings[i]);
+            if (tail_len >= n && !memcmp(tail + tail_len - n, endings[i], n)) {
+                tail[tail_len -= n] = 0;
+                removed = 1;
+                break;
+            }
+        }
+        if (!removed) break;
+    }
     if (xr_volume_parse(tail, &command->volume_op, &command->value)) {
         command->action = XR_MUSIC_VOLUME;
         return 1;
@@ -128,6 +158,28 @@ int xr_music_command_parse(const char *text, xr_music_command_t *command) {
         !strcmp(tail, "闭嘴")) {
         command->action = XR_MUSIC_STOP;
         return 1;
+    }
+    /* Only stop and volume are executed locally. Transport and play commands
+     * must reach the gateway intent handler, which owns Snapcast state. */
+    if (!strncmp(tail, "播放", strlen("播放"))) {
+        command->action = XR_MUSIC_FORWARD;
+        snprintf(command->text, sizeof(command->text), "%.*s",
+                 (int)sizeof(command->text) - 1, tail);
+        return 1;
+    }
+    static const char *const forwarded_controls[] = {
+        "暂停", "暂停播放", "暂停一下", "停一下", "音乐暂停",
+        "继续", "继续播放", "继续音乐", "恢复播放",
+        "下一首", "下一曲", "换一首", "切歌", "切到下一首",
+        "上一首", "上一曲", "前一首", "前一曲", "切到上一首",
+    };
+    for (size_t i = 0; i < sizeof(forwarded_controls) / sizeof(forwarded_controls[0]); ++i) {
+        if (!strcmp(tail, forwarded_controls[i])) {
+            command->action = XR_MUSIC_FORWARD;
+            snprintf(command->text, sizeof(command->text), "%.*s",
+                     (int)sizeof(command->text) - 1, tail);
+            return 1;
+        }
     }
     return 0;
 }

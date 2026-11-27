@@ -40,6 +40,16 @@ play_music_function_desc = {
 @register_function("play_music", play_music_function_desc, ToolType.SYSTEM_CTL)
 async def play_music(conn: "ConnectionHandler", song_name: str):
     try:
+        from core.utils.snapcast_music import control as snapcast_control, enabled as snapcast_enabled
+        if snapcast_enabled(conn):
+            result = snapcast_control(conn, "play", query=song_name)
+            if result.get("ok"):
+                return ActionResponse(action=Action.RESPONSE,
+                                      result=result.get("response", "指令已接收"),
+                                      response=result.get("response", "好的"))
+            return ActionResponse(action=Action.RESPONSE,
+                                  result=result.get("error", "音乐控制失败"),
+                                  response=result.get("error", "音乐控制失败"))
         # 掉字修复(2026-11-02): "播放轻音乐电台"被 ASR/LLM 掉成"播放轻音乐"时
         # song_name=轻音乐 是台类词不是歌名 —— 硬搜歌名会拿到 VIP 短预览
         # (实测: 酷我「カーテンコール」放 11s 即断, 还报"只能会员播放")。

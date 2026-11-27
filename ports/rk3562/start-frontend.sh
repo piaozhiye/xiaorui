@@ -13,6 +13,20 @@ ENV_FILE=/data/xiaorui/xiaorui.env
 # shellcheck disable=SC1090
 . "$ENV_FILE"
 
+# The FIFO path must exist as a named pipe before the frontend opens it. In
+# particular, never let the Snapcast bridge's writer create a regular file at
+# this path: the frontend would read to EOF and music would appear active but
+# remain silent.
+if [ -n "${XR_MUSIC_FIFO:-}" ]; then
+    mkdir -p "$(dirname "$XR_MUSIC_FIFO")"
+    if [ -e "$XR_MUSIC_FIFO" ] && [ ! -p "$XR_MUSIC_FIFO" ]; then
+        echo "refusing non-FIFO music output path: $XR_MUSIC_FIFO" >&2
+        exit 2
+    fi
+    [ -p "$XR_MUSIC_FIFO" ] || mkfifo "$XR_MUSIC_FIFO"
+    chmod 666 "$XR_MUSIC_FIFO"
+fi
+
 DEV="${1:-}"
 if [ -n "$DEV" ]; then
     export XR_MIC="$DEV"

@@ -29,6 +29,7 @@ typedef struct {
     int volume_control;       /* 语音音量控制(本地意图): 1=开, XR_VOLUME_CONTROL=0 关 */
     int music_controls;       /* 仅音乐播放期USB麦KWS+本地音量/停止控制 */
     int music_command_ms;     /* KWS命中后收集控制语音的时长 */
+    int tts_gain_percent;     /* 语音/提示音通道增益; 独立于音乐与总音量 */
 } xr_runtime_config_t;
 /* Load once on the frontend thread; environment changes require restart. */
 const xr_runtime_config_t *xr_runtime_config(void);

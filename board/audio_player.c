@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "audio_player.h"
+#include "audio_mix.h"
 #include "xr_volume.h"
 #include <dlfcn.h>
 #include <errno.h>
@@ -58,19 +59,23 @@ static OpusDecoder *decoder;
  *   溢出覆盖最旧数据 -> 整段话被无声冲掉。30s 环 + 3x 下发可安全
  *   吃下 ~48s 连续音频(0.5B LLM 的回答远达不到)。 */
 #define RING_SAMPLES (24000 * 30)
+#define MUSIC_RING_SAMPLES (24000 * 2)
 static snd_pcm_t *spk;
 static int16_t ring[RING_SAMPLES];
-static size_t ring_w, ring_r;            /* 写/读指针 (样本) */
+static int16_t music_ring[MUSIC_RING_SAMPLES];
+static size_t ring_w, ring_r;            /* 语音写/读指针 (样本) */
+static size_t music_w, music_r;
 static atomic_int ring_eof;              /* 主线程置 1: 数据发完了, 播完即收尾 */
 static atomic_int music_active;           /* 音乐会话在位(FIFO -> 播放环); 见 xr_player_set_music */
-static atomic_int music_paused;            /* 语音发声期间音乐让位(FIFO 路径): 丢弃音乐、让语音独占环 */
+static atomic_int music_ducked;            /* KWS/语音期间压低音乐, 仍继续播放并混音 */
 static int music_prerolled;                /* 本轮音乐是否已完成预滚 */
 static int music_yielded;                  /* 本轮语音是否已让音乐让出过声卡 */
 static atomic_int player_running;
-/* 软件音量(百分比, -1=未设置直通): 回答/ack/全部提示音共用这一个旋钮,
-   换值在下一批 writei 生效(≤120ms)。板上喇叭节点无稳定 mixer 控制, 数字
-   增益与声卡无关、可持久化、主机可测。 */
+/* 主音量(百分比, -1=未设置直通): 同时作用于混音后的音乐与语音。
+   独立语音增益另见 voice_gain_pct。换值在下一批 writei 生效(≤120ms)。
+   板上喇叭节点无稳定 mixer 控制, 数字增益与声卡无关、可持久化、主机可测。 */
 static atomic_int volume_pct = -1;
+static atomic_int voice_gain_pct = 100;
 /* 诊断开关(默认关, 环境变量打开): XR_PLAY_DUMP=路径.pcm 转储写卡内容,
  * XR_PLAY_TRACE=路径.txt 记录每次 writei 耗时、环余量和音乐 ALSA delay。
  * 用途: 区分"下发的数据本身有断点"与"设备端写卡节奏有问题"。 */
@@ -146,6 +151,20 @@ size_t xr_player_queued_samples(void) {
     pthread_mutex_lock(&ring_mu); w = ring_w; r = ring_r; pthread_mutex_unlock(&ring_mu);
     return w >= r ? w - r : RING_SAMPLES - r + w;
 }
+size_t xr_player_music_queued_samples(void) {
+    size_t w, r;
+    pthread_mutex_lock(&ring_mu); w = music_w; r = music_r; pthread_mutex_unlock(&ring_mu);
+    return w >= r ? w - r : MUSIC_RING_SAMPLES - r + w;
+}
+
+int xr_player_music_duck_percent(void) {
+    const char *raw = getenv("XR_MUSIC_DUCK_GAIN_PERCENT");
+    if (!raw || !*raw) return 25;
+    char *end = NULL;
+    long value = strtol(raw, &end, 10);
+    if (end == raw || *end || value < 0 || value > 100) return 25;
+    return (int)value;
+}
 
 static void ring_push_locked(const int16_t *pcm, size_t n) {
     for (size_t i = 0; i < n; i++) {
@@ -163,40 +182,36 @@ void xr_player_push_pcm(const int16_t *pcm, size_t n) {
     pthread_cond_broadcast(&ring_cv);
     pthread_mutex_unlock(&ring_mu);
 }
-/* 音乐 PCM 入环(FIFO 线程专用)。语音期间直接丢弃: 既不和语音抢环,
- * 也不让 FIFO 在语音期间堆积(读端持续读走, 只是不写环), 恢复时不追播旧音频。 */
+/* 音乐 PCM 入独立环(FIFO 线程专用)。语音期间也持续消费 Snapcast 数据，
+ * 播放线程按同一 ALSA 时钟混音；环满时丢最旧帧，避免追播过期音乐。 */
 void xr_player_push_music_pcm(const int16_t *pcm, size_t n) {
-    if (atomic_load(&music_paused)) return;
+    if (!pcm || !n || !atomic_load(&music_active)) return;
     ring_cv_ensure();
     pthread_mutex_lock(&ring_mu);
-    /* 锁内二次确认: 否则刚好在 voice_begin 清环前通过检查的这一包会在清环后写入,
-       给语音开头带回最多 120ms 旧音乐。 */
-    if (atomic_load(&music_paused)) { pthread_mutex_unlock(&ring_mu); return; }
-    ring_push_locked(pcm, n);
+    if (n >= MUSIC_RING_SAMPLES) {
+        pcm += n - MUSIC_RING_SAMPLES;
+        n = MUSIC_RING_SAMPLES;
+        music_r = music_w = 0;
+    }
+    for (size_t i = 0; i < n; ++i) {
+        music_ring[music_w] = pcm[i];
+        music_w = (music_w + 1) % MUSIC_RING_SAMPLES;
+        if (music_w == music_r) music_r = (music_r + 1) % MUSIC_RING_SAMPLES;
+    }
     pthread_cond_broadcast(&ring_cv);
     pthread_mutex_unlock(&ring_mu);
 }
-/* 语音开始: 音乐整轮让位。幂等; 没有音乐会话时无动作。
- * music_prerolled 置 1: 语音不套用"音乐 2 period 预滚", 立即出声。 */
+/* KWS/语音开始时只 duck 本机音乐，不停 Snapclient、不清音乐队列。 */
 void xr_player_voice_begin(void) {
     if (!atomic_load(&music_active)) return;
-    ring_cv_ensure();
-    pthread_mutex_lock(&ring_mu);
-    if (atomic_load(&music_paused)) { pthread_mutex_unlock(&ring_mu); return; }
-    ring_w = ring_r = 0;
-    ring_eof = 0;
-    music_prerolled = 1;
-    atomic_store(&music_paused, 1);
-    pthread_cond_broadcast(&ring_cv);
-    pthread_mutex_unlock(&ring_mu);
-    fprintf(stderr, "[xr] yield: 音乐暂停(语音开始)\n");
+    if (atomic_exchange(&music_ducked, 1)) return;
+    fprintf(stderr, "[xr] mixer: 语音/KWS 开始，本机音乐 duck 到 %d%% 并继续混音\n",
+            xr_player_music_duck_percent());
 }
-/* 语音结束: 音乐恢复。先让环里剩余语音播完(最多 300ms)再清环, 避免硬切截尾;
- * 然后清掉残余、重新预滚(2 period)后再接回当前 Snapcast 时间线。
- * 实测 TTS_STOP 时剩余 0~0.18s(网关按实时供流), 300ms 足够; 中止时最多多播 300ms。 */
+/* 回合结束: 给尾部 TTS 最多 300ms 排空，再恢复音乐音量。 */
 void xr_player_voice_end(void) {
     if (!atomic_load(&music_active)) return;
-    if (!atomic_load(&music_paused)) return;   /* 没在让位: 直接返回(别白等) */
+    if (!atomic_load(&music_ducked)) return;
     for (int i = 0; i < 30; i++) {
         pthread_mutex_lock(&ring_mu);
         size_t q = ring_w >= ring_r ? ring_w - ring_r : RING_SAMPLES - ring_r + ring_w;
@@ -207,19 +222,17 @@ void xr_player_voice_end(void) {
     }
     ring_cv_ensure();
     pthread_mutex_lock(&ring_mu);
-    if (!atomic_load(&music_paused)) { pthread_mutex_unlock(&ring_mu); return; }
+    if (!atomic_load(&music_ducked)) { pthread_mutex_unlock(&ring_mu); return; }
     size_t leftover = ring_w >= ring_r ? ring_w - ring_r : RING_SAMPLES - ring_r + ring_w;
-    ring_w = ring_r = 0;
-    ring_eof = 0;
-    music_prerolled = 0;
-    atomic_store(&music_paused, 0);
+    if (leftover) ring_w = ring_r = 0;
+    atomic_store(&music_ducked, 0);
     pthread_cond_broadcast(&ring_cv);
     pthread_mutex_unlock(&ring_mu);
     if (leftover)
-        fprintf(stderr, "[xr] yield: 语音尾 %zu 样本未排空(已清)\n", leftover);
-    fprintf(stderr, "[xr] yield: 音乐恢复(语音结束)\n");
+        fprintf(stderr, "[xr] mixer: 未排空的语音尾 %zu 样本已清\n", leftover);
+    fprintf(stderr, "[xr] mixer: 语音结束，Snapcast 音乐恢复原音量\n");
 }
-int xr_player_music_paused(void) { return atomic_load(&music_paused); }
+int xr_player_music_ducked(void) { return atomic_load(&music_ducked); }
 
 static int spk_open(void) {
     /* ALSA period 大小(2880 样本 @24kHz = 120ms): 决定单次写卡落下的
@@ -305,177 +318,153 @@ static void *player_thread(void *arg) {
             }
         }
     }
+    int16_t music_tmp[SPK_PERIOD_SAMPLES], voice_tmp[SPK_PERIOD_SAMPLES];
+    xr_audio_gain_ramp_t music_gain;
+    xr_audio_gain_ramp_init(&music_gain, 100);
     while (player_running) {
         pthread_mutex_lock(&ring_mu);
-        while (ring_w == ring_r && !ring_eof && player_running) {
+        size_t voice_avail = ring_w >= ring_r ? ring_w - ring_r : RING_SAMPLES - ring_r + ring_w;
+        size_t music_avail = music_w >= music_r ? music_w - music_r : MUSIC_RING_SAMPLES - music_r + music_w;
+        int music_on = atomic_load(&music_active);
+        while (voice_avail == 0 && (!music_on || music_avail == 0) &&
+               !ring_eof && player_running) {
             if (pcm_active) {
-                /* ★ 瞬时空 ≠ 句间空(2026-11-19 板端听感事故):
-                 *   环瞬时见空就 drain, 等于把 ALSA 里 ~1.9s 的平滑垫亲手
-                 *   放掉再清零, 新数据来了重启声卡 —— 实时下发节奏下环
-                 *   常年贴空跑, 主循环每 100~300ms 拉一次包的抖动就触发
-                 *   一次"排空-重启", 用户听到句内字级顿挫。
-                 *   改法: 先限时等 300ms, 等到数据就不动声卡(ALSA 缓冲
-                 *   继续播, 无缝); 真空满 300ms 才是句间空, 那时再排空
-                 *   进 PREPARED 防 EPIPE(问候音与下一句可隔数秒)。 */
+                /* 短暂无包时保留 ALSA 队列 300ms；真正空闲才 drain/prepare。 */
                 struct timespec ts;
                 clock_gettime(CLOCK_MONOTONIC, &ts);
                 ts.tv_nsec += 300L * 1000000L;
-                if (ts.tv_nsec >= 1000000000L) {
-                    ts.tv_sec += 1;
-                    ts.tv_nsec -= 1000000000L;
-                }
+                if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
                 int rc = pthread_cond_timedwait(&ring_cv, &ring_mu, &ts);
-                if (rc != ETIMEDOUT) continue;   /* 等到数据/中断: 重查条件 */
-                if (ring_w != ring_r || ring_eof || !player_running) break;
+                voice_avail = ring_w >= ring_r ? ring_w - ring_r : RING_SAMPLES - ring_r + ring_w;
+                music_avail = music_w >= music_r ? music_w - music_r : MUSIC_RING_SAMPLES - music_r + music_w;
+                music_on = atomic_load(&music_active);
+                if (rc != ETIMEDOUT) continue;
+                if (voice_avail || (music_on && music_avail) || ring_eof || !player_running) continue;
                 pthread_mutex_unlock(&ring_mu);
                 int drc = output.a_drain(spk);
-                if (drc < 0)
-                    fprintf(stderr, "[xr] spk idle drain: %s\n",
-                            output.a_strerror(drc));
+                if (drc < 0) fprintf(stderr, "[xr] spk idle drain: %s\n", output.a_strerror(drc));
                 if (player_running && output.a_prepare(spk) < 0)
                     fprintf(stderr, "[xr] spk idle prepare failed\n");
                 pcm_active = 0;
                 pthread_mutex_lock(&ring_mu);
-                /* 音乐源可能断开后再连。流已 drain+prepare，旧预滚水位不再
-                   代表当前 ALSA 队列；重连后必须重新攒够预滚量再启动。
-                   语音让位期间不算"音乐在播", 否则语音句间空环会把
-                   music_prerolled 清 0, 下一包语音反被音乐预滚门挡住。 */
-                if (atomic_load(&music_active) && !atomic_load(&music_paused))
-                    music_prerolled = 0;
+                if (atomic_load(&music_active)) music_prerolled = 0;
+                voice_avail = ring_w >= ring_r ? ring_w - ring_r : RING_SAMPLES - ring_r + ring_w;
+                music_avail = music_w >= music_r ? music_w - music_r : MUSIC_RING_SAMPLES - music_r + music_w;
+                music_on = atomic_load(&music_active);
             }
-            if (ring_w != ring_r || ring_eof || !player_running) break;
+            if (voice_avail || (music_on && music_avail) || ring_eof || !player_running) break;
             pthread_cond_wait(&ring_cv, &ring_mu);
+            voice_avail = ring_w >= ring_r ? ring_w - ring_r : RING_SAMPLES - ring_r + ring_w;
+            music_avail = music_w >= music_r ? music_w - music_r : MUSIC_RING_SAMPLES - music_r + music_w;
+            music_on = atomic_load(&music_active);
         }
-        size_t avail = ring_w >= ring_r ? ring_w - ring_r : RING_SAMPLES - ring_r + ring_w;
-        if (!player_running || (avail == 0 && ring_eof)) {
+        if (!player_running || (voice_avail == 0 && !music_on && ring_eof)) {
             pthread_mutex_unlock(&ring_mu);
             break;
         }
-        /* ★ 2026-11-19 板端实机断音根因(2): 按 period 对齐写卡。
-         *   机制(2026-11-19 二次 review 对照内核源码核实): 历史上的
-         *   "半个 period 写入 -> EPIPE 循环" 并不是"流起不来"——ALSA
-         *   默认 sw 参数 start_threshold=1, 1440 样本的写也能启动流。
-         *   真正的病灶是**零垫子写节奏**: 每包 opus 只解出 1440(60ms),
-         *   写多少卡里就只剩多少, 供给一抖(句间合成空隙)卡立刻干转
-         *   XRUN -> prepare 丢余量 -> 又干转, writei 全部 ~0ms +
-         *   大量 -EPIPE。
-         *   按 period 凑整再写, 每次 writei 都给卡垫进整 120ms 余量,
-         *   供给抖动被垫子吸收。
-         *   收尾(eof)时按实际有的写, 不能因为凑不满而丢尾巴。 */
-        /* 音乐会话在位时不"凑整 period": 音乐是 snapclient 每 ~50ms 一股的细水,
-           凑满 120ms 才写会让 80ms 的 ALSA 缓冲中间干转(实测持续 underrun)。
-           有多少写多少, 由声卡缓冲吸收。语音路径仍保留凑整(那是 2026-11-19 的修复)。 */
-        if (avail < spk_period_samples && !ring_eof && !atomic_load(&music_active)) {
-            /* 继续等下一包, 直到凑够一个 period。 */
-            int tail_hold_ms = 0;
-            while (avail < spk_period_samples && !ring_eof && player_running
-                   && !atomic_load(&music_active)) {
+
+        /* 音乐预滚只等音乐数据；语音先到时立即播语音，不被音乐启动门槛挡住。 */
+        if (music_on && music_avail && !music_prerolled && voice_avail == 0) {
+            size_t target = spk_period_samples * 2;
+            if (music_avail < target) {
                 struct timespec ts;
                 clock_gettime(CLOCK_MONOTONIC, &ts);
                 ts.tv_nsec += 50L * 1000000L;
-                if (ts.tv_nsec >= 1000000000L) {
-                    ts.tv_sec += 1;
-                    ts.tv_nsec -= 1000000000L;
-                }
+                if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+                pthread_cond_timedwait(&ring_cv, &ring_mu, &ts);
+                pthread_mutex_unlock(&ring_mu);
+                continue;
+            }
+            music_prerolled = 1;
+            fprintf(stderr, "[xr] music preroll: %zu 样本 (~%.0f ms)\n",
+                    music_avail, (double)music_avail / 24.0);
+        }
+
+        /* TTS-only retains the existing period batching. It avoids feeding
+         * tiny network fragments directly to ALSA; a final short tail is
+         * released after 300ms or immediately at EOF. */
+        if (!music_on && voice_avail > 0 && voice_avail < spk_period_samples && !ring_eof) {
+            int tail_hold_ms = 0;
+            while (voice_avail < spk_period_samples && !ring_eof && player_running) {
+                struct timespec ts;
+                clock_gettime(CLOCK_MONOTONIC, &ts);
+                ts.tv_nsec += 50L * 1000000L;
+                if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
                 int rc = pthread_cond_timedwait(&ring_cv, &ring_mu, &ts);
-                avail = ring_w >= ring_r ? ring_w - ring_r : RING_SAMPLES - ring_r + ring_w;
-                if (rc == ETIMEDOUT && avail < spk_period_samples) {
+                voice_avail = ring_w >= ring_r ? ring_w - ring_r : RING_SAMPLES - ring_r + ring_w;
+                if (rc == ETIMEDOUT && voice_avail < spk_period_samples) {
                     tail_hold_ms += 50;
                     if (tail_hold_ms < 300) continue;
-                    /* ★ 尾巴滞留(2026-11-19 live10 实测): 上一轮余音不是
-                     * 整 period(问候音 0.45s=3.76period)会卡住尾巴, 环不空
-                     * -> 空环的 300ms 优雅排空不触发 -> 声卡在 RUNNING 态
-                     * 播干 -> 下一轮首包凑满 period 写入撞 XRUN(EPIPE)。
-                     * 真空满 300ms: 先 drain+prepare 复位流, 再把尾巴写出。
-                     * 实际行为(默认 start_threshold=1, 二次 review 核实):
-                     * 这个 partial 写入会**立即起播**并在 ~90ms 内播完,
-                     * 随后静默 XRUN; 紧接着的空环 grace(pcm_active=1)
-                     * 会 drain-from-XRUN + prepare, 给下一轮留下干净的
-                     * PREPARED 流。听感无缝: 尾巴在它的自然时刻播掉,
-                     * 下一轮数据到达时全新起播。
-                     * 两条 grace 路径看着重复, 实际各司其职 —— 即使将来
-                     * 显式设了更大的 start_threshold, 内核 drain-init 会
-                     * 起播 PREPARED 流里的滞留数据, 之后仍由空环 grace
-                     * 收尾。别按"冗余"删掉任何一条。 */
                     pthread_mutex_unlock(&ring_mu);
                     (void)output.a_drain(spk);
                     if (player_running && output.a_prepare(spk) < 0)
                         fprintf(stderr, "[xr] spk tail prepare failed\n");
                     pcm_active = 0;
                     pthread_mutex_lock(&ring_mu);
+                    voice_avail = ring_w >= ring_r ? ring_w - ring_r : RING_SAMPLES - ring_r + ring_w;
                     break;
                 }
             }
             if (!player_running) { pthread_mutex_unlock(&ring_mu); break; }
-            if (avail == 0 && ring_eof) { pthread_mutex_unlock(&ring_mu); break; }
         }
-        /* 音乐预滚: 开流前先攒够 3 个 period(~360ms)。
-         * 实测(FIFO 埋点): 不预滚时队列深度只有 ~38ms, 欠载->prepare 把缓冲清空
-         * -> 队列归零 -> 再欠载, 设备 29% 时间空转、有效吞吐只有实时的 68%。
-         * 设备缓冲本身有 2.4s, 预滚是安全的(FIFO 供给实测 1.00x 实时)。 */
-        if (atomic_load(&music_active) && !music_prerolled) {
-            /* 2 个 period(2880*2=5760 样本 @24k ≈ 240ms) 而不是 3 个: 实测 3 个
-               period 时 ALSA delay 稳态 335~412ms, 超出交接文档建议的 150~250ms.
-               预滚只要够打断"欠载->prepare->清零"的循环即可(无预滚时会周期欠载). */
-            size_t target = spk_period_samples * 2;
-            if (avail < target) {
-                struct timespec ts;
-                clock_gettime(CLOCK_MONOTONIC, &ts);
-                ts.tv_nsec += 50L * 1000000L;
-                if (ts.tv_nsec >= 1000000000L) { ts.tv_sec += 1; ts.tv_nsec -= 1000000000L; }
-                pthread_cond_timedwait(&ring_cv, &ring_mu, &ts);
-                pthread_mutex_unlock(&ring_mu);   /* cond_wait 返回后仍持锁 */
-                continue;
-            }
-            music_prerolled = 1;
-            fprintf(stderr, "[xr] music preroll: %zu 样本 (~%.0f ms)\n",
-                    avail, (double)avail / 24.0);
-        }
-        /* 音乐路径按“前端环 + ALSA delay”限制总待播量。
-         * 只限制 ALSA delay 会漏掉写入环里尚未送卡的 PCM：B 板重联实测
-         * ring≈500ms + ALSA≈390ms，A 稳态约 250ms，声学差异约 0.63s。
-         * 超出目标时丢弃环里最旧 PCM，让重联客户端追到实时边沿；已送入 ALSA
-         * 的帧继续自然播放。250ms 取 A 稳态实测总队列(约252ms)，目标是恢复
-         * 同一播放延迟，而不是仅限制某一层缓冲。 */
+
         long music_delay_frames = -1;
-        if (atomic_load(&music_active) && !atomic_load(&music_paused) && spk && output.a_delay) {
+        if (music_on && music_avail && spk && output.a_delay) {
             long q = 0;
             if (output.a_delay(spk, &q) == 0) {
                 music_delay_frames = q;
                 if (q < 0) q = 0;
-                /* snd_pcm_delay returns client-rate frames (24k mono here),
-                 * matching the ring sample unit. Each frame is counted once
-                 * across the ring and ALSA delay. */
-                long total_before = q + (long)avail;
+                long total_before = q + (long)music_avail;
                 long excess = total_before - MUSIC_QUEUE_TARGET_FRAMES;
-                if (excess > 0 && avail > 0) {
-                    size_t discard = (size_t)excess < avail ? (size_t)excess : avail;
-                    ring_r = (ring_r + discard) % RING_SAMPLES;
-                    avail -= discard;
+                if (excess > 0 && music_avail > 0) {
+                    size_t discard = (size_t)excess < music_avail ? (size_t)excess : music_avail;
+                    music_r = (music_r + discard) % MUSIC_RING_SAMPLES;
+                    music_avail -= discard;
                     if (getenv("XR_MUSIC_TRACE")) {
                         struct timespec ts;
                         clock_gettime(CLOCK_MONOTONIC, &ts);
                         fprintf(stderr,
-                                "[xr] music_catchup %ld.%06ld q=%ld drop=%zu ring=%zu total_before=%ld target=%ld\n",
+                                "[xr] music_catchup %ld.%06ld q=%ld drop=%zu music_ring=%zu total_before=%ld target=%ld\n",
                                 (long)ts.tv_sec, (long)(ts.tv_nsec / 1000), q,
-                                discard, avail, total_before,
+                                discard, music_avail, total_before,
                                 (long)MUSIC_QUEUE_TARGET_FRAMES);
                     }
                 }
-                if (q >= MUSIC_QUEUE_TARGET_FRAMES) {
-                    struct timespec d = {.tv_nsec = 20000000};
-                    nanosleep(&d, NULL);
-                    pthread_mutex_unlock(&ring_mu);
-                    continue;
-                }
             }
         }
-        size_t take = avail < spk_period_samples ? avail : spk_period_samples;
-        for (size_t i = 0; i < take; i++) {
-            tmp[i] = ring[ring_r];
+
+        /* Snapcast 是主时钟：有音乐帧时按音乐帧数推进；音乐短暂断流时
+         * 允许 TTS 独立推进。两个源各自出队后在同一批 ALSA 帧上求和。 */
+        size_t available = (music_on && music_avail) ? music_avail : voice_avail;
+        size_t take = available < spk_period_samples ? available : spk_period_samples;
+        if (take == 0) {
+            pthread_mutex_unlock(&ring_mu);
+            continue;
+        }
+        size_t voice_take = voice_avail < take ? voice_avail : take;
+        size_t music_take = (music_on && music_avail) ? take : 0;
+        for (size_t i = 0; i < take; ++i) {
+            voice_tmp[i] = 0;
+            music_tmp[i] = 0;
+        }
+        for (size_t i = 0; i < voice_take; ++i) {
+            voice_tmp[i] = ring[ring_r];
             ring_r = (ring_r + 1) % RING_SAMPLES;
         }
+        for (size_t i = 0; i < music_take; ++i) {
+            music_tmp[i] = music_ring[music_r];
+            music_r = (music_r + 1) % MUSIC_RING_SAMPLES;
+        }
         pthread_mutex_unlock(&ring_mu);
+
+        int voice_gain = atomic_load(&voice_gain_pct);
+        if (voice_gain < 100) xr_volume_apply(voice_tmp, voice_take, voice_gain);
+
+        int music_gain_percent = (music_on && atomic_load(&music_ducked))
+                                 ? xr_player_music_duck_percent() : 100;
+        xr_audio_mix_s16_ramped(tmp, music_tmp, voice_tmp, take,
+                                music_on ? music_gain_percent : 0,
+                                480 /* 20ms @ 24kHz */, &music_gain);
         int vpct = atomic_load(&volume_pct);
         if (vpct > 0 && vpct < 100) xr_volume_apply(tmp, take, vpct);
         if (play_dump) {   /* 诊断: 实际写卡前的内容(耳机里应当听到的就是它) */
@@ -496,7 +485,7 @@ static void *player_thread(void *arg) {
                             (t1.tv_nsec - t0.tv_nsec) / 1e6;
                 int n = fprintf(play_trace, "%.3f %ld %ld %.1f %zu %ld\n",
                         (t1.tv_sec % 100000) + t1.tv_nsec / 1e9,
-                        (long)written, (long)wn, ms, avail, music_delay_frames);
+                        (long)written, (long)wn, ms, available, music_delay_frames);
                 /* 必须 flush: 不 flush 时 trace 落后 stdio 缓冲几个 KB,
                  * 正在播的轮次在文件里看着像"只播了一半"(2026-11-19 误判)。 */
                 fflush(play_trace);
@@ -538,8 +527,9 @@ void xr_player_set_music(int on) {
     ring_cv_ensure();
     pthread_mutex_lock(&ring_mu);
     if (!on) {
-        music_prerolled = 0;              /* 结束一轮音乐: 下次开流重新预滚 */
-        atomic_store(&music_paused, 0);   /* 音乐会话结束: 清掉让位态 */
+        music_prerolled = 0;
+        music_w = music_r = 0;            /* 新会话不能追播旧 FIFO 队列 */
+        atomic_store(&music_ducked, 0);
     }
     pthread_cond_broadcast(&ring_cv);
     pthread_mutex_unlock(&ring_mu);
@@ -709,9 +699,14 @@ void xr_player_drop(void) {
 
 void xr_player_release_device(void) {
     /* 音乐会话也要一起复位: 释放后由对端(音乐)接管 */
+    ring_cv_ensure();
+    pthread_mutex_lock(&ring_mu);
     atomic_store(&music_active, 0);
-    atomic_store(&music_paused, 0);
+    atomic_store(&music_ducked, 0);
     music_prerolled = 0;
+    music_w = music_r = 0;
+    pthread_cond_broadcast(&ring_cv);
+    pthread_mutex_unlock(&ring_mu);
     if (player_active) {
         player_running = 0;
         ring_eof = 1;
@@ -738,6 +733,12 @@ void xr_player_set_volume(int pct) {
 }
 
 int xr_player_volume(void) { return atomic_load(&volume_pct); }
+
+void xr_player_set_voice_gain(int pct) {
+    if (pct < 1) pct = 1;
+    if (pct > 100) pct = 100;
+    atomic_store(&voice_gain_pct, pct);
+}
 
 
 int xr_player_init(const xr_audio_output_ops_t *ops) {

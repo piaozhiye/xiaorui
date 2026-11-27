@@ -1,5 +1,5 @@
 "use strict";
-const CACHE = "xiaorui-music-shell-v3";
+const CACHE = "xiaorui-music-shell-v11";
 const SHELL = ["/", "/manifest.webmanifest", "/icon.svg", "/icon-192.png", "/icon-512.png"];
 self.addEventListener("install", event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()));

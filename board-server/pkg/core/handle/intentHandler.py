@@ -46,7 +46,8 @@ async def _notify_silent_drop(conn: "ConnectionHandler", reason: str):
 #   match(t) 返回 None=不命中继续下一项; 其余值=命中并作为第三参传给 handle
 #   handle(conn, text, m) 返回 True=已处理(不再走 LLM), False=继续下一项
 # 顺序约束(动顺序前先读):
-#   reboot/volume 在最前(最高频零误伤面); ha-light 紧随(封闭短语零误伤)
+#   reboot 在最前; 显式音乐控制先于通用音量(“音乐音量”应调 Snapcast 播放器);
+#   通用音量仍只匹配没有音乐上下文的指令; ha-light 紧随(封闭短语零误伤)
 #   声纹注册在"我是谁"前(注册句含"我是X"会被 whoami 抢走)
 #   切歌在电台前(裸"换个电台"会被电台匹配器吃掉且总选第一个台)
 #   定时列表在时长制定时前; 时长制在时刻制前(互斥但保险)
@@ -314,6 +315,7 @@ async def _h_music(conn, text, m):
     这条路没有 LLM 的正文, 收尾的 FIRST/LAST 动作标记得自己发,
     否则客户端收不到 stop, 整轮挂住。
     """
+    from core.utils.snapcast_music import control as snapcast_control, enabled as snapcast_enabled
     from plugins_func.functions.play_music import (
         _genre_like, handle_music_command, try_radio_intent)
     from core.providers.tts.dto.dto import TTSMessageDTO, SentenceType, ContentType
@@ -321,6 +323,13 @@ async def _h_music(conn, text, m):
     import uuid
 
     song = (m or "").strip()
+    if snapcast_enabled(conn):
+        await send_stt_message(conn, text)
+        conn.sentence_id = str(uuid.uuid4().hex)
+        result = snapcast_control(conn, "play", query=song)
+        speak_txt(conn, result.get("response") if result.get("ok")
+                  else result.get("error", "音乐控制失败"))
+        return True
     # 风格词("轻音乐"/"爵士")当电台走: 硬搜歌名只会拿到几秒试听
     if song and _genre_like(song):
         if await try_radio_intent(conn, f"播放{song}电台"):
@@ -335,6 +344,28 @@ async def _h_music(conn, text, m):
         return False
     conn.tts.tts_text_queue.put(TTSMessageDTO(
         conn.sentence_id, SentenceType.LAST, ContentType.ACTION))
+    return True
+
+
+async def _h_music_control(conn, text, matched):
+    from core.handle.sendAudioHandle import send_stt_message
+    from core.handle.intentHandler import speak_txt
+    from core.utils.snapcast_music import control, enabled
+    import uuid
+
+    if not enabled(conn):
+        return False
+    await send_stt_message(conn, text)
+    conn.sentence_id = str(uuid.uuid4().hex)
+    if matched["action"] == "unavailable":
+        speak_txt(conn, "音乐控制服务暂时不可用，播放控制没有执行")
+        return True
+    if matched["action"] == "invalid_volume":
+        speak_txt(conn, "音乐音量请设置在0到100之间")
+        return True
+    result = control(conn, matched["action"], volume=matched.get("volume"))
+    reply = result.get("response") if result.get("ok") else result.get("error", "音乐控制失败")
+    speak_txt(conn, reply)
     return True
 
 
@@ -355,7 +386,7 @@ async def _h_clock(conn, text, m):
     return await handle_timer_intent(conn, text, m)
 
 
-def _local_intents():
+def _local_intents(conn=None):
     """惰性装配(避免模块级拉起重依赖链)。"""
     from core.handle.rebootIntent import match_reboot_query
     from core.handle.volumeIntent import match_volume_intent
@@ -365,10 +396,31 @@ def _local_intents():
     from core.handle.timeIntent import match_time_query
     from core.handle.nextIntent import match_next_query
     from core.handle.musicIntent import match_music
+    from core.handle.musicControlIntent import (match_music_control,
+                                                is_unqualified_music_control_candidate)
+    def music_control_match(text):
+        # Explicit music wording is always routed directly. Generic short
+        # transport/volume phrases are claimed only while the Snapcast queue
+        # is active, so ordinary speech remains untouched while idle.
+        matched = match_music_control(text)
+        if (matched is not None or conn is None
+                or not is_unqualified_music_control_candidate(text)):
+            return matched
+        from core.handle.musicControlIntent import match_music_control as match
+        from core.utils.snapcast_music import music_active
+        active = music_active(conn)
+        if active is True:
+            return match(text, music_active=True)
+        if active is None:
+            # If the controller is configured but unreachable, don't send a
+            # short transport command to the general LLM as ordinary chat.
+            return {"action": "unavailable"}
+        return None
     from core.handle.timerIntent import (match_timer_intent, match_clock_alarm,
                                          match_timer_list_query)
     return [
         ("reboot",   "filtered", _b(match_reboot_query),         _h_reboot),
+        ("music-control", "filtered", music_control_match,        _h_music_control),
         ("volume",   "filtered", match_volume_intent,            _h_volume),
         ("ha-light", "filtered", match_light_cmd,                _h_light),
         ("vp-enroll","filtered", match_voiceprint_enroll,        _h_voiceprint_enroll),
@@ -440,7 +492,7 @@ async def handle_user_intent(conn: "ConnectionHandler", text):
         text, filtered_text = rest, rest
 
     # 本地意图族(注册表顺序即优先级)
-    for name, mode, match_fn, handle_fn in _local_intents():
+    for name, mode, match_fn, handle_fn in _local_intents(conn):
         payload = text if mode == "raw" else filtered_text
         m = match_fn(payload)
         if m is None:

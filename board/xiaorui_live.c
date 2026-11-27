@@ -51,6 +51,7 @@ extern long syscall(long, ...);   /* -std=c11 下 glibc 不声明, reboot 子进
 #include "speech_pipeline.h"
 #include "voice_session.h"
 #include "xr_vad.h"
+#include "xr_fifo_pcm.h"
 
 #define WS_PORT 8000
 
@@ -72,6 +73,7 @@ static int16_t *fail_pcm; static size_t fail_n;
 static int16_t *vol_pcm;  static size_t vol_n;   /* 音量确认"好的" */
 /* 软件音量当前值(百分比): 解析命中时更新+落盘+下发播放线程 */
 static int g_vol_pct = 100;
+static int g_tts_gain_pct = 100;
 /* 停止播报(2026-10-16): 本地消化, 覆盖窗内本地文本路径喊停 -- 该路径
  * 原会把"停止播放"当指令发给 LLM(LLM 停不了播放, 实测窗内打断失效)。
  * 音频直传/音乐轮由控制线程硬断, 这里补第三条路。 */
@@ -127,6 +129,11 @@ static int is_reboot_command(const char *cmd) {
 static const char *volume_state_path(void) {
     const char *p = getenv("XR_VOLUME_FILE");
     return (p && *p) ? p : "/data/xiaorui-server/xiaorui_volume";
+}
+
+static const char *tts_gain_state_path(void) {
+    const char *path = getenv("XR_TTS_GAIN_STATE");
+    return (path && *path) ? path : "/data/xiaorui-server/xiaorui_tts_gain";
 }
 
 typedef struct {
@@ -190,7 +197,8 @@ static int service_ui(xr_ui_context_t *context) {
         else
             state = XR_UI_VOICE_ERROR;
     }
-    xr_ui_server_state(context->server, state, (unsigned int)g_vol_pct);
+    xr_ui_server_state(context->server, state, (unsigned int)g_vol_pct,
+                       (unsigned int)g_tts_gain_pct);
     unsigned int volume = 0;
     int command = xr_ui_server_poll(context->server, &volume);
     if (command == XR_UI_VOLUME && context->config->volume_control) {
@@ -198,6 +206,12 @@ static int service_ui(xr_ui_context_t *context) {
         xr_player_set_volume(g_vol_pct);
         xr_volume_save(volume_state_path(), g_vol_pct);
         fprintf(stderr, "[ui] volume=%d%%\n", g_vol_pct);
+    }
+    if (command == XR_UI_TTS_GAIN) {
+        g_tts_gain_pct = (int)volume;
+        xr_player_set_voice_gain(g_tts_gain_pct);
+        xr_volume_save(tts_gain_state_path(), g_tts_gain_pct);
+        fprintf(stderr, "[ui] tts_gain=%d%%\n", g_tts_gain_pct);
     }
     if (command == XR_UI_STOP && !responding)
         fprintf(stderr, "[ui] stop 忽略(当前不在回答)\n");
@@ -517,14 +531,14 @@ static void mic_apply_gain(int16_t *pcm, long frames)
 }
 static long mic_read_raw(snd_pcm_t *mic, int16_t *out16k, int frames16k) {
     if (g_fifo_fd >= 0) {
-        size_t want = (size_t)frames16k * 2, got = 0;
-        while (got < want) {
-            ssize_t r = read(g_fifo_fd, (char *)out16k + got, want - got);
-            if (r < 0) { perror("[xr] fifo read"); return -1; }
-            if (r == 0) { fprintf(stderr, "[xr] fifo EOF(供给进程退出)\n"); return -1; }
-            got += (size_t)r;
-        }
-        return frames16k;
+        static int fifo_eof_seen;
+        int was_eof = fifo_eof_seen;
+        long n = xr_fifo_read_s16(g_fifo_fd, out16k, (size_t)frames16k,
+                                  &fifo_eof_seen);
+        if (n < 0) { perror("[xr] fifo read"); return -1; }
+        if (!was_eof && fifo_eof_seen)
+            fprintf(stderr, "[xr] fifo EOF(供给进程退出)，静音等待写端恢复，不重启播放栈\n");
+        return n;
     }
     if (g_vqe_mic) {
         /* xr_vqe_16k = ALSA plug(48k→16k 由 plug 层完成), 前端 16k/1ch 直读。
@@ -771,6 +785,7 @@ static void *xr_music_fifo_thread(void *arg) {
     int announced = 0;
     int music_started = 0;
     int have_signal = 0;
+    int writer_waiting = 0;
     struct timespec last_signal = {0};
     /* XR_MUSIC_TRACE=1: 每次 read 打一行累计字节+本次字节, 用来量供流节奏。
        板内核没开 /proc/<pid>/io, 只能在这里埋。默认关闭不影响行为。 */
@@ -787,7 +802,7 @@ static void *xr_music_fifo_thread(void *arg) {
             clock_gettime(CLOCK_MONOTONIC, &event_ts); \
             fprintf(stderr, "[xr] music_fifo_event %ld.%06ld %s reconnect=%u bytes=%zu ring_samples=%zu\n", \
                     (long)event_ts.tv_sec, (long)(event_ts.tv_nsec / 1000), \
-                    (event_name), reconnects, (size_t)(nbytes), xr_player_queued_samples()); \
+                    (event_name), reconnects, (size_t)(nbytes), xr_player_music_queued_samples()); \
             fflush(stderr); \
         } \
     } while (0)
@@ -797,8 +812,16 @@ static void *xr_music_fifo_thread(void *arg) {
              * (snapclient 每 ~50ms 才来一股, 凑 120ms 会让 80ms 的 ALSA 缓冲干转,
              * 实测持续 underrun)。read() 是"有多少读多少"。
              * open(O_RDONLY) 在 FIFO 上会等写端, 与客户端的 fopen("wb") 对称。 */
-            fd = open(path, O_RDONLY);
-            if (fd < 0) { sleep(1); continue; }
+            /* Nonblocking open lets us observe the controller's active marker
+             * while Snapclient briefly closes/reopens its FIFO writer (stream
+             * handoff/reconnect). A blocking open plus a fixed sleep made that
+             * transient look like the end of a music session. */
+            fd = open(path, O_RDONLY | O_NONBLOCK);
+            if (fd < 0) {
+                struct timespec retry = {.tv_nsec = 50000000};
+                nanosleep(&retry, NULL);
+                continue;
+            }
             if (reconnects > 0) MUSIC_TRACE_EVENT("writer_reopened", trace_total);
             if (!announced) {
                 fprintf(stderr, "[xr] music fifo: %s\n", path);
@@ -807,19 +830,56 @@ static void *xr_music_fifo_thread(void *arg) {
         }
         ssize_t n = read(fd, buf, sizeof(buf));
         if (n <= 0) {
-            if (n == 0 || (errno != EINTR && errno != EAGAIN)) {
-                MUSIC_TRACE_EVENT(n == 0 ? "writer_eof" : "read_error", trace_total);
-                close(fd); fd = -1;
-                if (music_started) {
-                    /* 音源写端断开，释放音乐持仓。 */
-                    xr_player_set_music(0);
-                    music_started = 0;
+            if (n < 0 && errno == EINTR) continue;
+            if (n == 0) {
+                if (!writer_waiting) {
+                    MUSIC_TRACE_EVENT("writer_eof", trace_total);
+                    reconnects++;
+                    writer_waiting = 1;
                 }
+            } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                MUSIC_TRACE_EVENT("read_error", trace_total);
+                close(fd); fd = -1;
                 reconnects++;
-                sleep(1);                       /* 写端断开: 等下一路音频 */
             }
+            /* FIFO writer absent is a normal short gap. Keep the playback
+             * session alive while the activity marker (or recent nonzero
+             * samples) says music is still active; expire it only after the
+             * same quiet grace used for streams without a local marker. */
+            const char *active_path = getenv("XR_MUSIC_ACTIVE_FILE");
+            if (!active_path || !*active_path)
+                active_path = "/data/xiaorui/snapcast/music.active";
+            struct stat active_stat;
+            time_t wall_now = time(NULL);
+            int active = stat(active_path, &active_stat) == 0
+                         && active_stat.st_mtime >= wall_now - 2
+                         && active_stat.st_mtime <= wall_now + 2;
+            if (have_signal) {
+                struct timespec mono_now;
+                clock_gettime(CLOCK_MONOTONIC, &mono_now);
+                long quiet_ms = (long)(mono_now.tv_sec - last_signal.tv_sec) * 1000L
+                              + (mono_now.tv_nsec - last_signal.tv_nsec) / 1000000L;
+                if (quiet_ms >= 0 && quiet_ms <= 3000) active = 1;
+            }
+            if (active && !music_started) {
+                MUSIC_TRACE_EVENT("music_session_start", trace_total);
+                xr_player_set_music(1);
+                if (xr_player_start() == 0) music_started = 1;
+                else {
+                    fprintf(stderr, "[xr] music fifo: 播放环起不来\n");
+                    xr_player_set_music(0);
+                }
+            } else if (!active && music_started) {
+                MUSIC_TRACE_EVENT("music_session_idle", trace_total);
+                xr_player_set_music(0);
+                music_started = 0;
+                have_signal = 0;
+            }
+            struct timespec retry = {.tv_nsec = 20000000};
+            nanosleep(&retry, NULL);
             continue;
         }
+        writer_waiting = 0;
         /* Snapclient 的 file player 在空闲流期间也会持续输出静音 PCM，因此不能
          * 把 FIFO 收到字节当作“正在播放”。本机音乐控制器的短时 music.active 心跳
          * 优先；其他客户端没有这个本地文件时，用非零 PCM + 3s 静音宽限识别音频。
@@ -873,7 +933,7 @@ static void *xr_music_fifo_thread(void *arg) {
             clock_gettime(CLOCK_MONOTONIC, &tnow);
             fprintf(stderr, "[xr] fifo_read %ld.%06ld total=%zu bytes=%zd ring_samples=%zu\n",
                     (long)tnow.tv_sec, (long)(tnow.tv_nsec / 1000),
-                    trace_total, n, xr_player_queued_samples());
+                    trace_total, n, xr_player_music_queued_samples());
         }
         xr_player_push_music_pcm(buf, samples);
     }
@@ -983,6 +1043,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[xr] opus encoder 不可用(err=%d), 上行音频停用\n", oe);
     }
     if (xr_player_init(xr_audio_output_ops())) return 2;
+    g_tts_gain_pct = xr_volume_load(tts_gain_state_path(), config->tts_gain_percent);
+    xr_player_set_voice_gain(g_tts_gain_pct);
 
     static int16_t frame[FRAME_SAMPLES];
     static int16_t *utt_pcm;              /* 堆: 单句上限 15s */
@@ -1020,12 +1082,16 @@ int main(int argc, char **argv) {
     g_vol_pct = xr_volume_load(volume_state_path(), XR_VOLUME_DEFAULT);
     xr_player_set_volume(g_vol_pct);
     fprintf(stderr, "[xr] 音量=%d%% (软件增益, 状态=%s)\n", g_vol_pct, volume_state_path());
+    fprintf(stderr, "[xr] 语音/TTS独立增益=%d%% (状态=%s)\n",
+            g_tts_gain_pct, tts_gain_state_path());
     fprintf(stderr, "[xr] buffers ready\n");
 
     snd_pcm_t *mic = NULL;
     xr_playback_control_t playback_control = {0};
     int kws_wake_this_utt = 0;      /* 本句由 KWS 声学唤醒 */
     int music_vad_gated = 0;
+    int music_kws_utterance = 0;    /* KWS 命中时音乐正在播放, 不依赖后续状态 */
+    int music_kws_pending = 0;      /* 本地音乐 KWS 轮次, 等网关唤醒确认/静默回执 */
     double music_wake_hold_until = 0.0; /* 纯唤醒后留 8s 接收分句指令 */
     /* 轮次状态机: LISTEN/RESPOND、跟说窗、冷却、轮次计时、ping 节律 */
     xr_session_t ses;
@@ -1216,7 +1282,7 @@ restart:
         xr_vad_calibrate_feed(&vad, db);
     }
     xr_vad_calibrate_finish(&vad);
-    fprintf(stderr, "[xr] ambient=%.1f gate=%.1f\n",
+    fprintf(stderr, "[xr] VAD基线=%.1f dBFS VAD门限=%.1f dBFS (PCM数字电平, 非声压级)\n",
             xr_vad_noise_db(&vad), xr_vad_noise_db(&vad) + vad.margin);
 
     /* 相对采集/标定完成时计时，给受控实机用例留出启动 Snapclient/FIFO 的窗口。 */
@@ -1249,10 +1315,10 @@ inject_wait:
         xr_tick();   /* 每次迭代续命: 卡在 ALSA 读/RKNN 精修/poll 即停摆, 看门狗接管 */
         /* 回合级音乐恢复: 离开 RESPOND(说完/被打断/超时)就让音乐回来。
            FIFO 路径下音乐由 xr_player_push_music_pcm 持续供给, 这里只切让位态。 */
-        /* 音乐让位自愈: FIFO 路径下只要还处于暂停态、且已经不在 RESPOND
+        /* 音乐 duck 自愈: FIFO 路径下只要仍处于 duck 态、且已经不在 RESPOND
            (说完/被打断/超时/ws 断线 goto restart 后 ses.state=LISTEN),
            就恢复音乐。这样不依赖某一次状态边沿, 任何离开路径都能恢复。 */
-        if (xr_player_music_paused() && ses.state != XR_SESSION_RESPOND &&
+        if (xr_player_music_ducked() && ses.state != XR_SESSION_RESPOND &&
             !vad.in_utt && !kws_wake_this_utt && xr_player_queued_samples() == 0 &&
             now_s() >= music_wake_hold_until) {
             xr_player_voice_end();
@@ -1457,7 +1523,12 @@ inject_wait:
                    —— 紧随其后的指令段整段丢失(声学套件 A2/A3 首试的
                    missing-command 就是这个), 最后还会播一声弃轮提示音, 用户
                    观感是"喊了没反应/总是断开"。 */
-                int is_wake = !strcmp(ev_text, "wake");
+                int music_kws_fallback = music_kws_pending;
+                music_kws_pending = 0;
+                music_kws_utterance = 0;
+                int is_wake = !strcmp(ev_text, "wake") || music_kws_fallback;
+                if (music_kws_fallback && strcmp(ev_text, "wake"))
+                    fprintf(stderr, "[xr] music KWS 有效但云端未识别唤醒词: 本地确认并保留跟说窗\n");
                 if (!is_wake) music_wake_hold_until = 0.0;
                 xr_playback_control_stop(&playback_control, g_vol_pct);
                 xr_player_drop();
@@ -1492,6 +1563,8 @@ inject_wait:
                 continue;
             }
             if (ev == EV_TTS_STOP) {
+                int music_kws_empty = music_kws_pending && ses.pkt_n == 0;
+                music_kws_pending = 0;
                 music_wake_hold_until = 0.0;
                 /* 先量 TTS_STOP 时环里还剩多少语音: 决定 voice_end 硬清环是否会截尾。 */
                 fprintf(stderr, "[xr] tts stop: queued=%zu (%.2fs)\n",
@@ -1513,12 +1586,29 @@ inject_wait:
                 int answered = ses.pkt_n > 0 && !cancelled;
                 if (answered)
                     xr_session_end_turn(&ses, now_s(), config->finish_cool_ms / 1000.0);
+                else if (music_kws_empty) {
+                    /* Cloud ASR can map an isolated wake to an unrelated word
+                       (e.g. "Yeah"). KWS is the acoustic proof: acknowledge
+                       locally and retain the follow-up window. */
+                    xr_session_awake(&ses, now_s());
+                    if (xr_player_music_active() && !xr_player_music_ducked())
+                        xr_player_voice_begin();
+                    music_wake_hold_until = now_s() + 8.0;
+                    if (xr_player_start() == 0 && ack_pcm) {
+                        xr_player_push_pcm(ack_pcm, ack_n);
+                        xr_session_note_ack(&ses, now_s(), (double)ack_n / 24000.0,
+                                            config->ack_cool_ms / 1000.0);
+                    }
+                    fprintf(stderr, "[xr] music KWS 未获云端唤醒文本: 本地播确认音并保留跟说窗\n");
+                }
                 else
                     xr_session_end_turn_silent(&ses, now_s(), config->finish_cool_ms / 1000.0);
                 xr_session_set_echo_guard(&ses, now_s() + config->echo_guard_s);
                 xr_vad_reset_gate(&vad);   /* 喇叭刚响过, 重测底噪 */
                 if (answered)
                     fprintf(stderr, "[xr] 回答完毕, 30s 内免唤醒\n");
+                else if (music_kws_empty)
+                    fprintf(stderr, "[xr] 音乐唤醒确认完成, 30s 内免唤醒\n");
                 else
                     fprintf(stderr, "[xr] 空轮(零音频)收轮, 不开跟说窗\n");
             } else if (ev == EV_STT) {
@@ -1695,7 +1785,7 @@ inject_wait:
             if (db > diag_max_db) diag_max_db = db;
             double t = now_s();
             if (t - diag_at >= 1.0) {
-                fprintf(stderr, "[diag] mic n=%ld max_1s=%.1f noise=%.1f gate=%.1f in_utt=%d\n",
+                fprintf(stderr, "[diag] mic n=%ld peak_1s=%.1f dBFS vad_noise=%.1f dBFS vad_gate=%.1f dBFS in_utt=%d\n",
                         (long)n, diag_max_db, xr_vad_noise_db(&vad),
                         xr_vad_noise_db(&vad) + vad.margin, vad.in_utt);
                 diag_at = t;
@@ -1703,12 +1793,12 @@ inject_wait:
             }
         }
 
-        /* FIFO 音乐在所有播放期都会回灌麦克风。仅靠 VQE/AEC 配置不能保证
-           消除它(板端实测音乐触发过 VAD 并上传静音轮), 所以只喂 KWS、不喂
-           普通能量 VAD。KWS 命中即暂停音乐；纯唤醒后最多留 8s 接分句指令，
-           超时恢复音乐后仍只接受 KWS。进入 gate 时清掉已积累的回声句和预滚。 */
+        /* FIFO 音乐在播放时会回灌麦克风。音乐期间只喂 KWS、不喂普通能量 VAD；
+           KWS 命中即压低本机音乐，留出语音采集余量。纯唤醒后最多留 8s 接分句
+           指令，超时恢复音乐增益后仍只接受 KWS。进入 gate 时清理回声预滚。 */
         int music_gate = xr_vad_should_gate_music(
-            xr_player_music_active(), xr_player_music_paused(), wake_available());
+            xr_player_music_active(), xr_player_music_ducked(), wake_available(),
+            xr_session_in_window(&ses, now_s()));
         if (music_gate && !music_vad_gated) {
             xr_vad_discard_utterance(&vad);
             g_pending_n = 0;
@@ -1722,7 +1812,8 @@ inject_wait:
         if (wake_available()) {
             if (wake_poll(frame, (int)n)) {
                 kws_wake_this_utt = 1;      /* 声学证据: 后续文本判定兜底用 */
-                if (xr_player_music_active() && !xr_player_music_paused()) {
+                if (xr_player_music_active() && !xr_player_music_ducked()) {
+                    music_kws_utterance = 1;
                     xr_player_voice_begin(); /* 先停音乐, 再录用户指令 */
                     music_wake_hold_until = now_s() + 8.0;
                 }
@@ -1747,7 +1838,7 @@ inject_wait:
                     if (now_s() < ses.awake_until) xr_session_awake(&ses, now_s());  /* 说话即续窗 */
                     xr_vad_force_start(&vad, frame, (int)n, db, &started);
                     if (started)
-                        fprintf(stderr, "[xr] KWS 触发采集(电平 %.1f < 门 %.1f)\n",
+                        fprintf(stderr, "[xr] KWS 触发采集(回调当前帧 %.1f dBFS < VAD门 %.1f dBFS; 不代表环境底噪)\n",
                                 db, xr_vad_noise_db(&vad) + vad.margin);
                 }
             }
@@ -1773,8 +1864,23 @@ inject_wait:
         }
         vr = xr_vad_feed(&vad, frame, (int)n, db, &vad_started);
         if (vr == XR_VAD_TOO_SHORT) {
-            if (xr_player_music_paused() && ses.state != XR_SESSION_RESPOND) {
+            /* KWS 已经给出可靠的唤醒证据，但低电平唤醒词可能只有 1-2 个
+               VAD 有声帧，正常会被 min_voice_frames 当成 TOO_SHORT 丢弃。
+               之前这条路径同时清掉 KWS 标志，导致用户听不到“我在”，跟说窗
+               也没有确认。仅在没有形成可识别语句时补本地确认音；完整语句仍
+               走下方 ASR/文本门，因此“唤醒词+控制命令”不会被提前截断。 */
+            if (kws_wake_this_utt) {
+                fprintf(stderr, "[xr] KWS 唤醒但 VAD 语句过短: 本地补确认音并保留跟说窗\n");
+                xr_session_awake(&ses, now_s());
+                if (xr_player_start() == 0 && ack_pcm) {
+                    xr_player_push_pcm(ack_pcm, ack_n);
+                    xr_session_note_ack(&ses, now_s(), (double)ack_n / 24000.0,
+                                        config->ack_cool_ms / 1000.0);
+                }
                 kws_wake_this_utt = 0;
+                music_kws_utterance = 0;
+            }
+            if (xr_player_music_ducked() && ses.state != XR_SESSION_RESPOND) {
                 if (now_s() >= music_wake_hold_until) {
                     xr_player_voice_end();
                     music_wake_hold_until = 0.0;
@@ -1820,17 +1926,29 @@ utterance_ready:
             fprintf(stderr, "[xr] cloud-only utterance dropped: %s\n",
                     route == XR_SPEECH_NO_UPLINK ? "uplink unavailable" : "echo guard (no KWS)");
             kws_wake_this_utt = 0;
+            music_kws_utterance = 0;
             continue;
         }
         if (route == XR_SPEECH_UPLOAD) {
+            /* KWS wakes the local follow window, but the utterance may contain
+             * only the wake phrase. Keep the gateway wake check on this turn
+             * so a cloud ASR miss (e.g. "Right") cannot be sent to the LLM as
+             * a user command. If the gateway returns silent/no-wake for a
+             * music-KWS turn, EV_SILENT below supplies the local ack; a later
+             * command in the follow window is uploaded without wake_required. */
+            int music_kws_wake = music_kws_utterance && kws_wake_this_utt;
             backend_audio_request_t request = {
                 .pcm = utt, .samples = utt_n,
                 .transcribe = config->local_asr ? transcribe_followup : NULL,
                 .wake_required = !follow || kws_wake_this_utt,
             };
-            if (!config->local_asr && kws_wake_this_utt)
+            if (music_kws_wake)
+                fprintf(stderr, "[xr] music KWS wake turn: require server wake confirmation; later follow-up is command text\n");
+            else if (!config->local_asr && kws_wake_this_utt)
                 fprintf(stderr, "[xr] cloud-only KWS hit: server confirms wake\n");
             kws_wake_this_utt = 0;
+            music_kws_pending = music_kws_wake;
+            music_kws_utterance = 0;
             if (be_submit_audio(be, &request)) goto restart;
             g_mic_drained_by_control = 0;   /* 新的一轮: 上一轮的播放期标志作废 */
             if (follow)
