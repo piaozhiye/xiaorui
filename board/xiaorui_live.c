@@ -1090,6 +1090,8 @@ int main(int argc, char **argv) {
     xr_playback_control_t playback_control = {0};
     int kws_wake_this_utt = 0;      /* 本句由 KWS 声学唤醒 */
     int music_vad_gated = 0;
+    int music_kws_utterance = 0;    /* KWS 命中时音乐正在播放, 不依赖后续状态 */
+    int music_kws_pending = 0;      /* 本地音乐 KWS 轮次, 等网关唤醒确认/静默回执 */
     double music_wake_hold_until = 0.0; /* 纯唤醒后留 8s 接收分句指令 */
     /* 轮次状态机: LISTEN/RESPOND、跟说窗、冷却、轮次计时、ping 节律 */
     xr_session_t ses;
@@ -1521,7 +1523,12 @@ inject_wait:
                    —— 紧随其后的指令段整段丢失(声学套件 A2/A3 首试的
                    missing-command 就是这个), 最后还会播一声弃轮提示音, 用户
                    观感是"喊了没反应/总是断开"。 */
-                int is_wake = !strcmp(ev_text, "wake");
+                int music_kws_fallback = music_kws_pending;
+                music_kws_pending = 0;
+                music_kws_utterance = 0;
+                int is_wake = !strcmp(ev_text, "wake") || music_kws_fallback;
+                if (music_kws_fallback && strcmp(ev_text, "wake"))
+                    fprintf(stderr, "[xr] music KWS 有效但云端未识别唤醒词: 本地确认并保留跟说窗\n");
                 if (!is_wake) music_wake_hold_until = 0.0;
                 xr_playback_control_stop(&playback_control, g_vol_pct);
                 xr_player_drop();
@@ -1556,6 +1563,8 @@ inject_wait:
                 continue;
             }
             if (ev == EV_TTS_STOP) {
+                int music_kws_empty = music_kws_pending && ses.pkt_n == 0;
+                music_kws_pending = 0;
                 music_wake_hold_until = 0.0;
                 /* 先量 TTS_STOP 时环里还剩多少语音: 决定 voice_end 硬清环是否会截尾。 */
                 fprintf(stderr, "[xr] tts stop: queued=%zu (%.2fs)\n",
@@ -1577,12 +1586,29 @@ inject_wait:
                 int answered = ses.pkt_n > 0 && !cancelled;
                 if (answered)
                     xr_session_end_turn(&ses, now_s(), config->finish_cool_ms / 1000.0);
+                else if (music_kws_empty) {
+                    /* Cloud ASR can map an isolated wake to an unrelated word
+                       (e.g. "Yeah"). KWS is the acoustic proof: acknowledge
+                       locally and retain the follow-up window. */
+                    xr_session_awake(&ses, now_s());
+                    if (xr_player_music_active() && !xr_player_music_ducked())
+                        xr_player_voice_begin();
+                    music_wake_hold_until = now_s() + 8.0;
+                    if (xr_player_start() == 0 && ack_pcm) {
+                        xr_player_push_pcm(ack_pcm, ack_n);
+                        xr_session_note_ack(&ses, now_s(), (double)ack_n / 24000.0,
+                                            config->ack_cool_ms / 1000.0);
+                    }
+                    fprintf(stderr, "[xr] music KWS 未获云端唤醒文本: 本地播确认音并保留跟说窗\n");
+                }
                 else
                     xr_session_end_turn_silent(&ses, now_s(), config->finish_cool_ms / 1000.0);
                 xr_session_set_echo_guard(&ses, now_s() + config->echo_guard_s);
                 xr_vad_reset_gate(&vad);   /* 喇叭刚响过, 重测底噪 */
                 if (answered)
                     fprintf(stderr, "[xr] 回答完毕, 30s 内免唤醒\n");
+                else if (music_kws_empty)
+                    fprintf(stderr, "[xr] 音乐唤醒确认完成, 30s 内免唤醒\n");
                 else
                     fprintf(stderr, "[xr] 空轮(零音频)收轮, 不开跟说窗\n");
             } else if (ev == EV_STT) {
@@ -1771,7 +1797,8 @@ inject_wait:
            KWS 命中即压低本机音乐，留出语音采集余量。纯唤醒后最多留 8s 接分句
            指令，超时恢复音乐增益后仍只接受 KWS。进入 gate 时清理回声预滚。 */
         int music_gate = xr_vad_should_gate_music(
-            xr_player_music_active(), xr_player_music_ducked(), wake_available());
+            xr_player_music_active(), xr_player_music_ducked(), wake_available(),
+            xr_session_in_window(&ses, now_s()));
         if (music_gate && !music_vad_gated) {
             xr_vad_discard_utterance(&vad);
             g_pending_n = 0;
@@ -1786,6 +1813,7 @@ inject_wait:
             if (wake_poll(frame, (int)n)) {
                 kws_wake_this_utt = 1;      /* 声学证据: 后续文本判定兜底用 */
                 if (xr_player_music_active() && !xr_player_music_ducked()) {
+                    music_kws_utterance = 1;
                     xr_player_voice_begin(); /* 先停音乐, 再录用户指令 */
                     music_wake_hold_until = now_s() + 8.0;
                 }
@@ -1850,6 +1878,7 @@ inject_wait:
                                         config->ack_cool_ms / 1000.0);
                 }
                 kws_wake_this_utt = 0;
+                music_kws_utterance = 0;
             }
             if (xr_player_music_ducked() && ses.state != XR_SESSION_RESPOND) {
                 if (now_s() >= music_wake_hold_until) {
@@ -1897,25 +1926,29 @@ utterance_ready:
             fprintf(stderr, "[xr] cloud-only utterance dropped: %s\n",
                     route == XR_SPEECH_NO_UPLINK ? "uplink unavailable" : "echo guard (no KWS)");
             kws_wake_this_utt = 0;
+            music_kws_utterance = 0;
             continue;
         }
         if (route == XR_SPEECH_UPLOAD) {
-            /* During music, the local acoustic KWS is already the wake gate.
-             * Requiring the cloud ASR to hear the wake phrase a second time
-             * rejects short commands when ASR trims the prefix (observed on
-             * the 4G board: KWS hit, then server returned silent/no-wake).
-             * Keep the server wake check for cold-start/non-music turns. */
-            int music_kws_wake = xr_player_music_active() && kws_wake_this_utt;
+            /* KWS wakes the local follow window, but the utterance may contain
+             * only the wake phrase. Keep the gateway wake check on this turn
+             * so a cloud ASR miss (e.g. "Right") cannot be sent to the LLM as
+             * a user command. If the gateway returns silent/no-wake for a
+             * music-KWS turn, EV_SILENT below supplies the local ack; a later
+             * command in the follow window is uploaded without wake_required. */
+            int music_kws_wake = music_kws_utterance && kws_wake_this_utt;
             backend_audio_request_t request = {
                 .pcm = utt, .samples = utt_n,
                 .transcribe = config->local_asr ? transcribe_followup : NULL,
-                .wake_required = music_kws_wake ? 0 : (!follow || kws_wake_this_utt),
+                .wake_required = !follow || kws_wake_this_utt,
             };
             if (music_kws_wake)
-                fprintf(stderr, "[xr] music KWS acoustic gate accepted; cloud ASR supplies command text\n");
+                fprintf(stderr, "[xr] music KWS wake turn: require server wake confirmation; later follow-up is command text\n");
             else if (!config->local_asr && kws_wake_this_utt)
                 fprintf(stderr, "[xr] cloud-only KWS hit: server confirms wake\n");
             kws_wake_this_utt = 0;
+            music_kws_pending = music_kws_wake;
+            music_kws_utterance = 0;
             if (be_submit_audio(be, &request)) goto restart;
             g_mic_drained_by_control = 0;   /* 新的一轮: 上一轮的播放期标志作废 */
             if (follow)

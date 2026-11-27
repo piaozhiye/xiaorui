@@ -26,7 +26,10 @@ class CaptureCadenceTests(unittest.TestCase):
             self.assertNotIn("xr_session_end_turn(&ses", path)
         stop = source.split("if (ev == EV_TTS_STOP) {", 1)[1].split("else if (ev == EV_STT)", 1)[0]
         self.assertRegex(stop, r"int answered = ses\.pkt_n > 0 && !cancelled;")
-        self.assertRegex(stop, r"if \(answered\)\s+xr_session_end_turn\([^;]+;\s+else\s+xr_session_end_turn_silent\(")
+        self.assertRegex(stop, r"if \(answered\)\s+xr_session_end_turn\([^;]+;")
+        self.assertRegex(stop, re.compile(
+            r"else if \(music_kws_empty\)\s*\{.*?xr_session_awake\(&ses,.*?\)\s*;.*?\}\s*"
+            r"else\s+xr_session_end_turn_silent\(&ses,", re.S))
         self.assertIn("xr_session_awake(&ses", noise)  # pure wake still opens a window
 
     def test_short_vad_rejection_does_not_sleep(self):

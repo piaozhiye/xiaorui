@@ -38,7 +38,8 @@ double xr_vad_noise_db(const xr_vad_t *v);
 void   xr_vad_clear_preroll(xr_vad_t *v);
 /* FIFO music is not user speech. Gate ordinary VAD while music plays; a KWS
    hit opens the follow window and lets capture proceed. */
-int    xr_vad_should_gate_music(int music_active, int voice_ducked, int kws_available);
+int    xr_vad_should_gate_music(int music_active, int voice_ducked, int kws_available,
+                                int follow_window_active);
 void   xr_vad_discard_utterance(xr_vad_t *v);
 void   xr_vad_reset_gate(xr_vad_t *v);
 void   xr_vad_raise_gate(xr_vad_t *v);

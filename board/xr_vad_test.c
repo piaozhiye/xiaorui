@@ -32,10 +32,11 @@ int main(void) {
 
     /* 0. Music playback must not open ordinary VAD; KWS-follow capture and
        paused playback are deliberately allowed through. */
-    CHECK(xr_vad_should_gate_music(1, 0, 1), "音乐期间应屏蔽能量 VAD");
-    CHECK(!xr_vad_should_gate_music(0, 0, 1), "无音乐时保持原 VAD 行为");
-    CHECK(!xr_vad_should_gate_music(1, 1, 1), "音乐已让位时允许采集");
-    CHECK(!xr_vad_should_gate_music(1, 0, 0), "没有 KWS 时保留能量 VAD 兜底");
+    CHECK(xr_vad_should_gate_music(1, 0, 1, 0), "音乐期间应屏蔽能量 VAD");
+    CHECK(!xr_vad_should_gate_music(0, 0, 1, 0), "无音乐时保持原 VAD 行为");
+    CHECK(!xr_vad_should_gate_music(1, 1, 1, 0), "音乐已让位时允许采集");
+    CHECK(!xr_vad_should_gate_music(1, 0, 0, 0), "没有 KWS 时保留能量 VAD 兜底");
+    CHECK(!xr_vad_should_gate_music(1, 0, 1, 1), "跟说窗内即使音乐恢复也允许采集");
 
     /* 1. 标定: 中位数, 且 -75 下限 */
     xr_vad_init(&v, utt, sizeof utt / sizeof utt[0]);

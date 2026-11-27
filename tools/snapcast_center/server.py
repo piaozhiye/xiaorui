@@ -29,20 +29,19 @@ from voice_volume import VoiceVolumeError, get_gain as get_voice_gain, set_gain 
 
 _PAIRING_DISPLAY_LOCK = threading.Lock()
 
+# Small ASR truncations observed in spoken genre requests on RK3562.
+_VOICE_MUSIC_GENRE_ALIASES = {"轻音": "轻音乐"}
+_VOICE_MUSIC_GENRES = frozenset({
+    "轻音乐", "纯音乐", "流行", "流行音乐", "古典", "古典音乐", "摇滚",
+    "摇滚音乐", "爵士", "爵士乐", "民谣", "电子", "电子音乐", "儿歌",
+    "助眠", "白噪音", "白噪声", "相声", "新闻", "故事", "小说",
+    "脱口秀", "红歌", "老歌", "劲爆", "伤感",
+})
+
 # PyQRCode is vendored so the embedded controller can create a pairing QR
 # without reaching PyPI or a third-party QR service at runtime.
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import pyqrcode
-
-
-class MusicVolumeError(MusicLibraryError):
-    """A playback request needs an explicit safe-volume choice in the UI."""
-
-    def __init__(self, players, maximum):
-        self.players = players
-        self.maximum = maximum
-        details = "、".join(f"{row['name']} {row['volume']}%" for row in players)
-        super().__init__(f"播放音量超过安全上限 {maximum}%；当前：{details}")
 
 
 def _sync_pairing_display(server):
@@ -277,7 +276,7 @@ class Handler(BaseHTTPRequestHandler):
                             queue["error"] = error or "电台流已结束或解码失败"
                         elif queue["index"] + 1 < len(queue["track_ids"]):
                             queue["index"] += 1
-                            self._start_queued_track(enforce_start_limit=False)
+                            self._start_queued_track()
                         else:
                             queue["session_id"] = None
                             last_track = queue["track_ids"][queue["index"]]
@@ -410,7 +409,7 @@ class Handler(BaseHTTPRequestHandler):
         except (OSError, ValueError, TypeError, MusicLibraryError):
             return cls._empty_queue()
 
-    def _authorize_music_players(self, players, startup_volume=None, enforce_start_limit=True):
+    def _authorize_music_players(self, players):
         if (not isinstance(players, list) or not players
                 or any(not isinstance(player_id, str) for player_id in players)):
             raise MusicLibraryError("先选择至少一台在线设备")
@@ -422,46 +421,11 @@ class Handler(BaseHTTPRequestHandler):
         offline = [player_id for player_id in players if not by_id[player_id]["connected"]]
         if offline:
             raise MusicLibraryError("所选设备当前离线，请先恢复连接")
-        loud = ([(player_id, by_id[player_id]["name"], by_id[player_id]["volume"])
-                 for player_id in players
-                 if by_id[player_id]["volume"] > self.server.music_max_start_volume]
-                if enforce_start_limit else [])
-        if loud:
-            if startup_volume is None:
-                details = [{"id": player_id, "name": name, "volume": volume}
-                           for player_id, name, volume in loud]
-                raise MusicVolumeError(details, self.server.music_max_start_volume)
-            if (not isinstance(startup_volume, int) or isinstance(startup_volume, bool)
-                    or not 0 <= startup_volume <= self.server.music_max_start_volume):
-                raise MusicLibraryError(
-                    f"启动音量必须是 0~{self.server.music_max_start_volume}% 的整数")
-            # The user has explicitly confirmed a safe volume in the UI. Apply
-            # it only to selected players and retain each player's mute state.
-            for player_id, _name, _volume in loud:
-                result = self.server.session.handle({
-                    "op": "player.volume", "player_id": player_id,
-                    "volume": startup_volume,
-                    "muted": by_id[player_id].get("client_muted", False),
-                })
-                if not result.get("ok"):
-                    raise MusicLibraryError(
-                        f"{by_id[player_id]['name']} 调整音量失败，已取消播放："
-                        f"{result.get('error', 'Snapcast 音量设置失败')}")
-            # Re-read authoritative state before opening the stream.
-            updated = self.server.session.handle({"op": "players.list"})
-            after = {player["id"]: player for player in updated.get("players", [])}
-            still_loud = [after.get(player_id, {}).get("name", player_id)
-                          for player_id in players
-                          if player_id not in after
-                          or after[player_id]["volume"] > self.server.music_max_start_volume]
-            if still_loud:
-                raise MusicLibraryError("设备音量未能降到安全范围，已取消播放：" + "、".join(still_loud))
-    def _start_queued_track(self, startup_volume=None, enforce_start_limit=True):
+    def _start_queued_track(self):
         queue = self.server.music_queue
         track_id = queue["track_ids"][queue["index"]]
         try:
-            self._authorize_music_players(queue["players"], startup_volume,
-                                          enforce_start_limit=enforce_start_limit)
+            self._authorize_music_players(queue["players"])
             track = self.server.library.start(track_id)
             result = self.server.session.handle({
                 "op": "session.play", "source": self.server.library.source_uri(track_id),
@@ -479,14 +443,6 @@ class Handler(BaseHTTPRequestHandler):
             queue["error"] = None
             self._save_queue()
             return result
-        except MusicVolumeError:
-            # Preserve the typed error so the HTTP layer can return the same
-            # confirmation response used by direct playback.
-            self.server.library.stop(track_id)
-            queue["state"] = "error"
-            queue["error"] = "播放音量超过安全上限，需要确认安全音量后重试"
-            queue["session_id"] = None
-            raise
         except MusicLibraryError as exc:
             self.server.library.stop(track_id)
             queue["state"] = "error"
@@ -579,7 +535,7 @@ class Handler(BaseHTTPRequestHandler):
         queue["session_id"] = None
         queue["state"] = "starting"
         queue["error"] = None
-        result = self._start_queued_track(enforce_start_limit=False)
+        result = self._start_queued_track()
         self._save_queue()
         if result.get("ok"):
             result["queue"] = self._queue_snapshot()
@@ -718,7 +674,7 @@ class Handler(BaseHTTPRequestHandler):
         result = {"ok": True, "players": players["players"],
                   "sessions": sessions["sessions"], "reconcile": reconciled["sessions"],
                   "queue": self._queue_snapshot(),
-                  "music_max_start_volume": self.server.music_max_start_volume}
+                  "music_volume_policy": "use_current_device_volume"}
         return self._send(200, "application/json; charset=utf-8",
                           json.dumps(result, ensure_ascii=False))
 
@@ -773,8 +729,6 @@ class Handler(BaseHTTPRequestHandler):
                 return
             result = self._voice_control(request)
             status = 200 if result.get("ok") else 400
-            if result.get("code") == "volume_too_high":
-                status = 409
             return self._send(status, "application/json; charset=utf-8",
                               json.dumps(result, ensure_ascii=False))
         if pairing and self.path == "/api/pairing/revoke":
@@ -853,7 +807,7 @@ class Handler(BaseHTTPRequestHandler):
                     for track_id in ids:
                         self.server.library.get_track(track_id)
                     with self.server.music_queue_lock:
-                        self._authorize_music_players(players, request.get("startup_volume"))
+                        self._authorize_music_players(players)
                         old = self.server.music_queue
                         if old.get("session_id"):
                             self.server.session.handle({"op": "session.stop", "session_id": old["session_id"]})
@@ -868,9 +822,6 @@ class Handler(BaseHTTPRequestHandler):
                         self._save_queue()
                         if result.get("ok"):
                             result["queue"] = self._queue_snapshot()
-            except MusicVolumeError as exc:
-                result = {"ok": False, "code": "volume_too_high", "error": str(exc),
-                          "players": exc.players, "max_start_volume": exc.maximum}
             except (MusicLibraryError, CollectionError) as exc:
                 result = {"ok": False, "error": str(exc)}
         elif request.get("op") in ("device_group.create", "device_group.rename", "device_group.delete",
@@ -915,7 +866,7 @@ class Handler(BaseHTTPRequestHandler):
                         raise CollectionError("电台不存在")
                     players = request.get("players")
                     with self.server.music_queue_lock:
-                        self._authorize_music_players(players, request.get("startup_volume"))
+                        self._authorize_music_players(players)
                         old = self.server.music_queue
                         if old.get("session_id"):
                             self.server.session.handle({"op": "session.stop", "session_id": old["session_id"]})
@@ -945,9 +896,6 @@ class Handler(BaseHTTPRequestHandler):
                                                        "station_id": station["id"]}
                             self._save_queue()
                         result = play
-            except MusicVolumeError as exc:
-                result = {"ok": False, "code": "volume_too_high", "error": str(exc),
-                          "players": exc.players, "max_start_volume": exc.maximum}
             except MusicLibraryError as exc:
                 result = {"ok": False, "error": str(exc)}
             except CollectionError as exc:
@@ -977,7 +925,7 @@ class Handler(BaseHTTPRequestHandler):
                 with self.server.music_queue_lock:
                     track_id = request.get("track_id")
                     players = request.get("players")
-                    self._authorize_music_players(players, request.get("startup_volume"))
+                    self._authorize_music_players(players)
                     track = self.server.library.start(track_id)
                     source = self.server.library.source_uri(track_id)
                     result = self.server.session.handle({
@@ -993,9 +941,6 @@ class Handler(BaseHTTPRequestHandler):
                         self._save_queue()
                     else:
                         self.server.library.stop(track_id)
-            except MusicVolumeError as exc:
-                result = {"ok": False, "code": "volume_too_high", "error": str(exc),
-                          "players": exc.players, "max_start_volume": exc.maximum}
             except MusicLibraryError as exc:
                 result = {"ok": False, "error": str(exc)}
         elif request.get("op") == "queue.play":
@@ -1008,7 +953,7 @@ class Handler(BaseHTTPRequestHandler):
                 for track_id in track_ids:
                     self.server.library.get_track(track_id)
                 with self.server.music_queue_lock:
-                    self._authorize_music_players(players, request.get("startup_volume"))
+                    self._authorize_music_players(players)
                     old = self.server.music_queue
                     if old.get("session_id"):
                         self.server.session.handle({"op": "session.stop",
@@ -1026,9 +971,6 @@ class Handler(BaseHTTPRequestHandler):
                     self._save_queue()
                     if result.get("ok"):
                         result["queue"] = self._queue_snapshot()
-            except MusicVolumeError as exc:
-                result = {"ok": False, "code": "volume_too_high", "error": str(exc),
-                          "players": exc.players, "max_start_volume": exc.maximum}
             except MusicLibraryError as exc:
                 result = {"ok": False, "error": str(exc)}
         elif request.get("op") == "queue.next":
@@ -1092,10 +1034,7 @@ class Handler(BaseHTTPRequestHandler):
                     result = {"ok": False, "error": "当前没有可重试的失败曲目"}
                 else:
                     try:
-                        result = self._start_queued_track(request.get("startup_volume"))
-                    except MusicVolumeError as exc:
-                        result = {"ok": False, "code": "volume_too_high", "error": str(exc),
-                                  "players": exc.players, "max_start_volume": exc.maximum}
+                        result = self._start_queued_track()
                     except MusicLibraryError as exc:
                         result = {"ok": False, "error": str(exc)}
                     self._save_queue()
@@ -1178,7 +1117,7 @@ class Handler(BaseHTTPRequestHandler):
             if result.get("ok"):
                 result = {"ok": False, "error": f"播放状态同步失败: {exc}"}
         self._sync_music_activity()
-        status = 200 if result.get("ok") else (409 if result.get("code") == "volume_too_high" else 400)
+        status = 200 if result.get("ok") else 400
         return self._send(status,
                           "application/json; charset=utf-8",
                           json.dumps(result, ensure_ascii=False))
@@ -1221,12 +1160,16 @@ class Handler(BaseHTTPRequestHandler):
                         volume = request.get("volume")
                         if not isinstance(volume, int) or isinstance(volume, bool) or not 0 <= volume <= 100:
                             return {"ok": False, "error": "音量需要是 0 到 100 的整数"}
-                        result = self.server.session.handle({"op": "players.volume",
-                                                             "player_ids": targets, "volume": volume})
-                        return ({"ok": True, "volume": volume,
-                                 "response": f"已将所选音箱音量调到 {volume}%"}
-                                if result.get("ok") and not result.get("failed") else
-                                {"ok": False, "error": result.get("error") or "设置音量失败"})
+                        failed = []
+                        for player_id in targets:
+                            changed = self.server.session.handle({"op": "player.volume",
+                                "player_id": player_id, "volume": volume})
+                            if not changed.get("ok"):
+                                failed.append(by_id[player_id].get("name", player_id))
+                        if failed:
+                            return {"ok": False, "error": "部分音箱设置失败：" + "、".join(failed)}
+                        return {"ok": True, "volume": volume,
+                                "response": f"已将所选音箱音量调到 {volume}%"}
                     delta = 5 if action == "volume_up" else -5
                     failed = []
                     for player_id in targets:
@@ -1244,6 +1187,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not isinstance(query, str) or len(query) > 120:
                         return {"ok": False, "error": "歌曲名称无效"}
                     query = query.strip()
+                    query = _VOICE_MUSIC_GENRE_ALIASES.get(query, query)
                     if not targets:
                         return {"ok": False, "error": "没有在线音箱"}
 
@@ -1278,6 +1222,12 @@ class Handler(BaseHTTPRequestHandler):
                         return {"ok": False, "error": f"找到多个电台：{names}，请说完整名称"}
 
                     tracks = self.server.library.list_tracks()
+                    # If there is no matching station or genre-tagged library,
+                    # a genre request should still start local music. Do not
+                    # apply this fallback to unmatched song titles.
+                    genre_fallback = query in _VOICE_MUSIC_GENRES
+                    if genre_fallback:
+                        query = "random"
                     if not query or query.casefold() == "random":
                         current_track_id = (queue.get("track_ids", [])[queue.get("index", 0)]
                                             if queue.get("track_ids")
@@ -1301,8 +1251,6 @@ class Handler(BaseHTTPRequestHandler):
                     if track is None:
                         return {"ok": False, "error": "本地曲库和电台列表里没有找到这首音乐"}
 
-                    # Check the existing safe-start rule before interrupting a
-                    # healthy current session. Voice never silently lowers volume.
                     self._authorize_music_players(targets)
                     stopped = self._voice_stop_current()
                     if not stopped.get("ok"):
@@ -1310,13 +1258,12 @@ class Handler(BaseHTTPRequestHandler):
                     self.server.music_queue = {"track_ids": [track["id"]], "players": targets,
                         "index": 0, "session_id": None, "state": "starting", "error": None,
                         "source_kind": "tracks", "current_title": track["title"], "station_id": None}
-                    try:
-                        result = self._start_queued_track()
-                    except MusicVolumeError as exc:
-                        self.server.music_queue = self._empty_queue()
-                        return {"ok": False, "code": "volume_too_high", "error": str(exc)}
+                    result = self._start_queued_track()
                     if result.get("ok"):
                         self._sync_music_activity()
+                        if genre_fallback:
+                            return {"ok": True, "response":
+                                    f"没有找到对应曲风电台，先随机播放：{track['title']}"}
                         return {"ok": True, "response": f"正在为 {len(targets)} 台音箱同步播放：{track['title']}"}
                     return {"ok": False, "error": result.get("error", "播放启动失败")}
 
@@ -1372,8 +1319,6 @@ class Handler(BaseHTTPRequestHandler):
                     return {"ok": bool(result.get("ok")),
                             "response": "已切到上一首" if result.get("ok") else None,
                             "error": result.get("error")}
-        except MusicVolumeError as exc:
-            return {"ok": False, "code": "volume_too_high", "error": str(exc)}
         except (MusicLibraryError, CollectionError, SnapcastError, KeyError, IndexError,
                 TypeError, ValueError) as exc:
             return {"ok": False, "error": str(exc)}
@@ -1496,9 +1441,6 @@ def main():
     parser.add_argument("--ffmpeg", default=os.environ.get("XR_FFMPEG"))
     parser.add_argument("--radio-ffmpeg", default=os.environ.get("XR_RADIO_FFMPEG"),
                         help="支持 HTTPS 的 ffmpeg；未指定时使用 PATH 中的 ffmpeg")
-    parser.add_argument("--music-max-start-volume", type=int,
-                        default=int(os.environ.get("XR_MUSIC_MAX_START_VOLUME", "35")),
-                        help="音乐启动前允许的最高 Snapcast 软件音量百分比")
     parser.add_argument("--voice-ui-socket", default=os.environ.get(
         "XR_UI_SOCKET", "/run/xiaorui/frontend.sock"),
         help="本机语音前端 Unix socket，用于单独调节语音/TTS 音量")
@@ -1539,8 +1481,6 @@ def main():
         parser.error("局域网绑定必须配置 --allowed-hosts，防止 DNS rebinding")
     if remote_bind and args.public_url and not args.public_url.startswith("https://"):
         parser.error("局域网公开地址必须使用 HTTPS")
-    if not 0 <= args.music_max_start_volume <= 100:
-        parser.error("--music-max-start-volume 必须在 0~100")
     if args.public_url:
         try:
             public = urllib.parse.urlsplit(args.public_url)
@@ -1649,7 +1589,6 @@ def main():
         server.socket = context.wrap_socket(server.socket, server_side=True)
     server.session = session
     server.library = library
-    server.music_max_start_volume = args.music_max_start_volume
     server.voice_ui_socket = args.voice_ui_socket
     server.music_queue_lock = threading.RLock()
     server.queue_state_file = (pathlib.Path(args.queue_state_file).expanduser()
