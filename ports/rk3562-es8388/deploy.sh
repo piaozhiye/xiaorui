@@ -344,7 +344,8 @@ $ADB shell "printf '%s\n' '$STATE_TO_WRITE' > $PROFILE_STATE"
 if [ "$PROFILE_INSTALLED" != "1" ]; then
     echo "== Stage Python + RKLLM runtime (不安装网关/ASR/TTS、不起服务) =="
     XR_MINIFORGE="$MINIFORGE" XR_RKLLM_MODEL="$RKLLM_MODEL" XR_LIBGOMP="$LIBGOMP" \
-    XR_MINIFORGE_GLIBC_OVERRIDE=2.43 bash "$DIR/stage-runtime.sh" "$SERIAL" \
+    XR_MINIFORGE_GLIBC_OVERRIDE="${XR_MINIFORGE_GLIBC_OVERRIDE:-2.41}" \
+    bash "$DIR/stage-runtime.sh" "$SERIAL" \
         || die "runtime stage 失败；未安装完整网关/ASR/TTS/前端"
 else
     echo "== 已安装 profile：保留板内网关/模型，只验证现有运行时 =="
@@ -510,6 +511,9 @@ done
 
 # 日志行数标记取不到就当失败: 标记变成 0 会让"聆听中"的检查扫到整份历史日志,
 # 旧行也能满足检查, 等于没有检查。
+# A first install has no frontend.log yet. Create the empty log before taking
+# the line marker so the "new frontend started" check remains meaningful.
+$ADB shell 'mkdir -p /data/xiaorui; touch /data/xiaorui/frontend.log'
 LOG_MARK=$($ADB shell 'wc -l < /data/xiaorui/frontend.log 2>/dev/null' 2>/dev/null | tr -dc '0-9')
 [ -n "$LOG_MARK" ] || die "读不到前端日志行数(无法确认新前端是否启动)"
 # 记下旧前端 PID: 只看"有没有前端进程"不够, 旧前端反复重启也会满足检查。

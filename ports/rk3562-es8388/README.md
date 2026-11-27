@@ -187,7 +187,7 @@ bash test-voice.sh
 
 ## 已知限制 / 未完成验证
 
-- **AEC 已启用（VQE 链）**：采集经 rkaudio VQE 20261110，用 DLP 给出的播放参考做回声抵消；但只有 2ch（1 mic + 1 ref），没有阵列波束成形。AEC 自适应滤波器有 2–3s 收敛过程，短提示音头几个字仍可能带回声（前端回声护栏会挡这类轮次）。详见"rkaudio VQE 20261110"一节。
+- **VQE 采集链**：可选的 rkaudio 配置使用 2 路麦克风 + SAI1 SDI1 上的 2 路播放参考，AEC、BF、ANR 均启用。AEC 纯音对照显示约 2–3s 收敛；真人近端语音质量仍需单独声学验收，详见下文。
 - **KWS 冷唤醒已打通，但对拾音位置敏感**（2026-11-17 实测）：板载麦放在笔记本喇叭旁约 5–10cm 时，
   PC 播放 `tests/audio/wake2_time.wav`（转 48k/2ch）后前端打出 `[xr] KWS 命中: 小瑞`，
   随后本地 ASR → 本地 Qwen → 本地 TTS 全链走通（TTS 播出「没听清，请再说一遍」和「现在几点了」的本地回答）。
@@ -201,70 +201,31 @@ bash test-voice.sh
   devfreq 节点**——用户态和内核都没有任何可以改 DDR 频率的接口，DDR 就是以引导时固化的频率在跑，实测 DDR 时钟
   (`scmi_clk_ddr`) 恒为 **1332MHz**。所以"没有 DMC 节点"在这块板上的准确含义是"频率固定"，而不是"降频不受控"；
   启动脚本因此既不写也不能写 DDR 频率。
-- **VQE/AEC/波束成形**：AEC（rkaudio VQE 20261110，1 mic + 1 ref）已启用；波束成形需要 2 麦阵列，本板只有 1 个模拟麦 + DLP 参考，所以 BF 关掉。旧 RK809/PDM 板的多麦 VQE 路径仍独立保留，不受本 profile 影响。
+- **VQE/AEC/波束成形**：本 profile 的 VQE overlay 按 2 mic + 2 ref 配置；基础直采 profile 不加载 VQE。旧 RK809/PDM 板的采集路径仍独立保留。
 - **RTC/时区**：实测已有 RTC，`Asia/Shanghai`，启动时间脚本成功从 RTC 校时。
 
-## 设备树 / DLP 数字回环（已在这块板子上生效）
+## ES8388 SAI1 硬件回采与 VQE（2 mic + 2 ref）
 
-要拿到"**1 mic + 1 ref**"（麦克风 + 播放参考），需要 SoC 侧的 DLP（software digital loopback）：
-DAI 在设备树里带 `rockchip,digital-loopback` 时才注册 DLP PCM，采集才变成两路。参考路由由 mixer 控件
-`SAI1 Software Digital Loopback Mode`（numid=62）选模式，**必须在任何 PCM 打开之前设置**
-（驱动的 `dlp_mode_put` 在有流运行时会返回 −EPERM，提示 "Should set this mode before pcm open"）。
-`mixer-es8388.sh` 在开机自启里跑在前端之前，正好满足这个条件。
+4G 板使用 SAI1 的硬件回采：SDI0 保留 ES8388 两路麦克风，SDI1 选择 SDO0 并打开回采，形成两路播放参考。
+当前链路**不使用** `rockchip,digital-loopback` 软件 DLP、`SAI1 Software Digital Loopback Mode`（numid=62），
+也不启用 SDI0 loopback。混音控件必须在采集 PCM 打开前配置，`mixer-es8388.sh` 以控件名称设置并校验功放状态。
 
-**这块板不能运行时改设备树**：内核没开 `CONFIG_OF_FD`，`/sys/firmware/fdt` 是只读的（实测 `dd` 写入
-Permission denied）。只能改 flash 里的 DTB 再重启：
+VQE overlay 以 4ch/48kHz 采集输入（2 mic + 2 ref），输出 mono 48kHz，经 `samplerate_best` 降到前端需要的
+16kHz。AEC、BF、ANR 开启；VQE 自带的 wakeup/unkws/command/DOA 关闭，由 Sherpa KWS 负责唤醒。播放仍走 `xr_spk`。
 
-| boot 分区(p3) 布局 | 内容 |
-|---|---|
-| 0x0000 | U-Boot FIT 头(1536B)：`images { fdt / kernel / resource }` + `signature{ sha256,rsa2048 }`（**无 `required`** → 改哈希后只告警，不拒绝启动） |
-| 0x0800 | FIT `fdt` 条目的 DTB(147788B) |
-| 0x24A00 | kernel |
-| 0x258A400 | `resource` 映像；**0x258AC00 是同一份 DTB 的副本，U-Boot 实际用的是这份** |
-
-补丁只做三件事：给 `/sai@ff810000`（SAI1，声卡的 `rockchip,cpu`）加 `rockchip,digital-loopback;`；
-把 DTB 从 147788 改成 147826 字节（DTB 与 kernel 之间本来有 147968B 空隙，改 FIT 的 `data-size` 即可，
-kernel 不用挪）；重算 FIT 里 `fdt` 与 `resource` 两个 sha256。
-
-**实测（2026-11-17，板子已刷）**：板内播 1kHz、同时录 2ch ——
-
-```text
-ch0: rms −35.5dBFS  1kHz −36.8dBFS   ← 麦克风(含喇叭的声学泄漏)
-ch1: rms −18.2dBFS  1kHz −18.4dBFS   ← 我们播出去的那份数据
-ch1 与播放音: 归一化互相关 0.887, 延迟 0 ms   ← 纯数字回环, bit-exact
-```
-
-开 DLP 后前端 KWS 链路不受影响（只取 ch0，冷唤醒实测仍能命中）。**目前 ch1 的参考还没有被用上** ——
-前端 `XR_ES8388_MIC_CH=0` 只送 ch0；要用它做 AEC，还需要改 `board/xiaorui_live.c` 把 ch1 一起送进
-消回声算法。
-
-注：这块板子的 boot 分区现在是打过补丁的。若将来刷回官方 boot 镜像，DLP 会消失，`mixer-es8388.sh`
-会打印"DLP: 控件不可用(设备树未开 rockchip,digital-loopback?)，采集按纯麦克风"，链路仍然可用。
-
-## rkaudio VQE 20261110（1 mic + 1 ref，已启用）
-
-用 Rockchip `rkaudio_vqe_plugin-20261110` 插件做 AEC/ANR：DLP 给出的采集 2ch（ch0=板载麦，ch1=播放参考）
-直接送插件，配置用包里的 **`config/2mic_2ref/config_aivqe_new1mic1ref.json`**（官方 1mic1ref 配置：
-`aec.status=enable`、`bf.num_array_mic=1`），2mic 以下**不需要 license**。部署：
+部署需要 Rockchip 插件包与 AArch64 运行库（这些第三方文件不随仓库分发）：
 
 ```bash
 XR_VQE_PKG=/path/to/rkaudio_vqe_plugin-20261110 \
+XR_VQE_LIB_DIR=/path/to/Linux_8.3.0_aarch64 \
   bash ports/rk3562-es8388/deploy-vqe.sh <SERIAL>
 ```
 
-前置：boot 分区 DTB 已加 `rockchip,digital-loopback`（见上一节），DLP 模式设成 `2`（`mixer-es8388.sh`
-开机自动设）。脚本会推插件/依赖/配置/模型，把 `/etc/asound.conf` 换成 `asound-vqe.conf`，
-前端 env 换成 `frontend.env.vqe.example`（`XR_MIC=xr_vqe_16k`、`XR_MIC_MODE=usb`），然后重启栈。
-采集链：`hw:rockchipes8388,0`（2ch：mic+ref）→ VQE 插件（AEC+ANR）→ 1ch/48k → `samplerate_best`
-带限重采样 → 16k/1ch → 前端。播放仍走 `xr_spk`。
+部署脚本先确认型号、声卡与 SAI1 控件，再备份覆盖文件；停止前端后配置路由并做 2 秒 ALSA smoke capture，
+最后检查本次启动的新日志是否打开 `xr_vqe_16k`。基础 profile 未安装时只安装并 smoke-test overlay，不启动完整语音栈。
 
-**实测**：
-- 插件日志 `num_ref_channel=1`，官方 1mic1ref 配置生效；补齐 UNKWS 模型/keywords.txt/eqdrc bin 后
-  不再报 `Error get filestat`。
-- 回声抑制有**收敛过程**：1kHz 播放的头 2 秒回声基本还在，第 3 秒起压掉约 12dB —— 自适应滤波器需要
-  2–3 秒收敛，短提示音的头几个字仍可能带回声（前端的回声护栏会挡住这类轮次）。
-- 语音全链一次通过：PC 播 `wake2_time.wav` → 前端 `KWS 命中: 小瑞` → 网关 SenseVoice 听成
-  `小瑞小瑞。` / `现在几点了？`（比不上 VQE 时常听成「嗯现在几点了」）→ 本地 Qwen → TTS。
+**验证边界**：2026-11-26 的低电平 1kHz AEC 开/关对照显示，AEC 开启时约 2.5–3 秒后测试音显著衰减，关闭时没有相同衰减；
+这证明受控纯音下回采与 AEC 有效，不代表近端真人说话质量已经验收。自适应滤波器约需 2–3 秒收敛，短提示音开头仍可能残留回声。
 
 ## 与共享源码的最小改动
 
