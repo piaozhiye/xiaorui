@@ -12,7 +12,6 @@ case "$mode" in
         compiler="$toolchain/bin/aarch64-buildroot-linux-gnu-gcc"
         sysroot="$toolchain/aarch64-buildroot-linux-gnu/sysroot"
         lvgl_library="${XR_LVGL_LIBRARY:-$lvgl_root/lib/aarch64/liblvgl.so}"
-        protocol="${XR_XDG_SHELL_XML:-$sysroot/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml}"
         wayland_library="${XR_WAYLAND_LIBRARY:?Set XR_WAYLAND_LIBRARY to target libwayland-client.so.0}"
         # ★ XR_WAYLAND_LIBRARY 必须指向 **wayland >= 1.20** 的库: 1.20 引入
         #   wl_proxy_marshal_flags, 旧版链接会报 undefined reference。
@@ -28,12 +27,48 @@ case "$mode" in
     native)
         compiler="${CC:-gcc}"
         lvgl_library="${XR_LVGL_LIBRARY:-$lvgl_root/lib/x86/liblvgl.so}"
-        protocol="${XR_XDG_SHELL_XML:?Set XR_XDG_SHELL_XML to stable/xdg-shell/xdg-shell.xml}"
         wayland_library="${XR_HOST_WAYLAND_LIBRARY:--lwayland-client}"
         flags=()
         ;;
     *) echo "usage: $0 [aarch64|native]" >&2; exit 2 ;;
 esac
+
+find_xdg_shell_xml() {
+    if [[ -n "${XR_XDG_SHELL_XML:-}" ]]; then
+        if [[ -f "$XR_XDG_SHELL_XML" ]]; then
+            printf '%s\n' "$XR_XDG_SHELL_XML"
+            return 0
+        fi
+        echo "missing dependency: XR_XDG_SHELL_XML=$XR_XDG_SHELL_XML" >&2
+        return 1
+    fi
+
+    local candidate protocol_data
+    local candidates=()
+    # Keep native UI regression tests self-contained. This is the upstream
+    # wayland-protocols 1.19 stable xdg-shell XML (MIT; license is in the file).
+    candidates+=("$directory/protocols/xdg-shell.xml")
+    if [[ -n "${sysroot:-}" ]]; then
+        candidates+=("$sysroot/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml")
+    fi
+    if command -v pkg-config >/dev/null 2>&1; then
+        protocol_data="$(pkg-config --variable=pkgdatadir wayland-protocols 2>/dev/null || true)"
+        if [[ -n "$protocol_data" ]]; then
+            candidates+=("$protocol_data/stable/xdg-shell/xdg-shell.xml")
+        fi
+    fi
+    candidates+=(/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml)
+    for candidate in "${candidates[@]}"; do
+        if [[ -f "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    echo "missing dependency: xdg-shell.xml (install wayland-protocols or set XR_XDG_SHELL_XML)" >&2
+    return 1
+}
+
+protocol="$(find_xdg_shell_xml)" || exit 2
 
 for resource in "$lvgl_root/include/lvgl/lvgl.h" "$lvgl_library" "$protocol"; do
     [ -f "$resource" ] || { echo "missing dependency: $resource" >&2; exit 2; }

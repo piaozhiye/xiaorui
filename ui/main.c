@@ -530,7 +530,6 @@ static void build_settings(lv_obj_t *screen) {
     exit_caption = lv_obj_get_child(exit, 0);
     label(settings_page, "退出后回到系统界面，语音服务与 NPU 一并释放。",
           76, 2000, 900, body_font.font, 0x8ca5aa);
-    lv_obj_set_height(settings_page, 2140);
     lv_obj_add_flag(settings_page, LV_OBJ_FLAG_HIDDEN);
 }
 

@@ -17,6 +17,7 @@ test_dir="$(mktemp -d)"
 trap 'rm -rf "$test_dir"' EXIT
 export XR_UI_TEST_FONT="${XR_UI_TEST_FONT:-/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc}"
 "$build/runtime_test" scroll
+"$build/runtime_test" settings-scroll
 "$build/runtime_test" degraded-exit
 check_fallback() {
     XR_UI_FONT="$test_dir/missing.otf" "$build/xiaorui_ui" \
