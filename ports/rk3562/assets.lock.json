@@ -6,7 +6,7 @@
     "rknpu": "0.9.8",
     "python": "3.14.7",
     "gateway_sherpa_onnx": "1.13.8",
-    "frontend_sherpa_commit": "0bdca37ac0695a873bcb553f6b60f6d744d2bafd",
+    "frontend_sherpa_version": "1.13.8 (ARM64 sherpa_onnx_core wheel; the deployed C API and ONNX Runtime are pinned by SHA256 below)",
     "rkllm_toolkit": "1.3.1",
     "miniforge": "26.7.2-0",
     "hf_revision": "Original conversion revision was not recorded; converted model SHA256 is pinned"
@@ -19,7 +19,7 @@
     "matcha-baker": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/matcha-icefall-zh-baker.tar.bz2; Baker dataset is non-commercial",
     "silero-vad": "https://github.com/snakers4/silero-vad; exact original revision was not recorded; compare the pinned file SHA256",
     "kws-pkufool": "https://www.modelscope.cn/models/pkufool/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01; existing tools/download-models.sh has verified per-file URLs",
-    "sherpa-c-api": "https://github.com/k2-fsa/sherpa-onnx/tree/0bdca37ac0695a873bcb553f6b60f6d744d2bafd; CPU C API build, not RKNN runtime",
+    "sherpa-c-api": "sherpa_onnx_core==1.13.8 manylinux2014_aarch64 wheel in board-server/wheels314; CPU C API + pinned ONNX Runtime; C API initialized successfully on RK3562",
     "rockchip-vqe-package": "User-supplied Rockchip rkaudio_vqe_plugin-20261110 package; not redistributed",
     "rockchip-vqe-libs": "User-supplied Linux_8.3.0_aarch64 libraries; licensing and availability must be confirmed with Rockchip; not redistributed"
   },
@@ -260,8 +260,8 @@
       "group": "frontend",
       "root": "sherpa",
       "path": "libsherpa-onnx-c-api.so",
-      "bytes": 4347496,
-      "sha256": "2930cb96888f2e2599da90c68c30c8958d670377c85443947cc2f45c7d0107ce",
+      "bytes": 4613032,
+      "sha256": "1be01a1a5c0420e32a81011222e771fc35fa5e8d8cce951281d769d849296cab",
       "source": "sherpa-c-api"
     },
     {
