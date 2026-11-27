@@ -17,6 +17,9 @@ from core.utils.snapcast_music import control, enabled  # noqa: E402
 class MusicControlIntentTests(unittest.TestCase):
     def test_transport_controls_require_music_context(self):
         self.assertEqual(match_music_control("暂停音乐"), {"action": "pause"})
+        self.assertEqual(match_music_control("停一下音乐"), {"action": "pause"})
+        self.assertEqual(match_music_control("停下音乐"), {"action": "stop"})
+        self.assertEqual(match_music_control("停播这首歌"), {"action": "stop"})
         self.assertEqual(match_music_control("继续播放音乐"), {"action": "resume"})
         self.assertEqual(match_music_control("停止播放歌曲"), {"action": "stop"})
         self.assertEqual(match_music_control("播放上一首歌"), {"action": "previous"})
@@ -26,6 +29,9 @@ class MusicControlIntentTests(unittest.TestCase):
 
     def test_short_controls_are_scoped_to_an_active_music_session(self):
         self.assertEqual(match_music_control("暂停", music_active=True), {"action": "pause"})
+        self.assertEqual(match_music_control("停一下", music_active=True), {"action": "pause"})
+        self.assertEqual(match_music_control("暂停一下", music_active=True), {"action": "pause"})
+        self.assertEqual(match_music_control("停下", music_active=True), {"action": "stop"})
         self.assertEqual(match_music_control("继续播放", music_active=True), {"action": "resume"})
         self.assertEqual(match_music_control("停止播放", music_active=True), {"action": "stop"})
         self.assertEqual(match_music_control("下一首", music_active=True), {"action": "next"})
@@ -46,6 +52,8 @@ class MusicControlIntentTests(unittest.TestCase):
             active.assert_called_once_with(conn)
         with patch("core.utils.snapcast_music.music_active", return_value=False):
             self.assertIsNone(matcher("暂停"))
+        with patch("core.utils.snapcast_music.music_active", return_value=None):
+            self.assertEqual(matcher("停止播放"), {"action": "unavailable"})
         with patch("core.utils.snapcast_music.music_active") as active:
             self.assertEqual(matcher("暂停音乐"), {"action": "pause"})
             active.assert_not_called()
@@ -102,6 +110,14 @@ class MusicControlIntentTests(unittest.TestCase):
         with patch("core.utils.snapcast_music.control", return_value={
             "ok": True, "response": "当前没有正在播放的音乐"}):
             self.assertFalse(music_active(conn))
+
+    def test_music_active_is_unknown_when_controller_status_fails(self):
+        conn = SimpleNamespace(config={"plugins": {"snapcast_music": {
+            "enabled": True, "base_url": "http://127.0.0.1:8766"}}})
+        with patch("core.utils.snapcast_music.control", return_value={
+                "ok": False, "error": "音乐服务暂时不可用"}):
+            from core.utils.snapcast_music import music_active
+            self.assertIsNone(music_active(conn))
 
 
 if __name__ == "__main__":

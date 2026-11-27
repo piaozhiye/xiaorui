@@ -55,7 +55,8 @@ def match_music_control(text, *, music_active=False):
         return {"action": "pause"}
     if any(word in value for word in ("继续", "恢复", "接着播放", "继续播放")):
         return {"action": "resume"}
-    if any(word in value for word in ("停止", "别放", "不要放", "关掉", "关闭")):
+    if any(word in value for word in (
+            "停止", "停下", "停播", "别放", "别播", "不要放", "关掉", "关闭")):
         return {"action": "stop"}
     if any(word in value for word in ("现在放什么", "正在放什么", "播放状态", "什么歌")):
         return {"action": "status"}

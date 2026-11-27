@@ -56,10 +56,13 @@ def control(conn, action, *, query=None, volume=None):
 
 
 def music_active(conn):
-    """Return whether the shared music queue is actively playing or paused."""
+    """Return True/False for a known queue state, or None if status is unavailable."""
     if not enabled(conn):
         return False
     result = control(conn, "status")
+    if result.get("ok") is not True:
+        return None
     response = result.get("response")
-    return (result.get("ok") is True and isinstance(response, str)
-            and response != "当前没有正在播放的音乐")
+    if not isinstance(response, str):
+        return None
+    return response != "当前没有正在播放的音乐"

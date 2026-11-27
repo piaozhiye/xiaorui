@@ -4,7 +4,7 @@
 set -eu
 
 usage() {
-    echo "usage: $0 <adb-serial> <client|server-client> <server-host> <server-bind-or-dash> [snapserver-bundle-root] [music-root] [local-ffmpeg]" >&2
+    echo "usage: XR_SNAPCLIENT_BINARY=<aarch64-snapclient> $0 <adb-serial> <client|server-client> <server-host> <server-bind-or-dash> [snapserver-bundle-root] [music-root] [local-ffmpeg]" >&2
     echo "server bundle root must contain snapserver and lib/ (Snapcast v0.35.0 aarch64)" >&2
     echo "Use server-host=auto on clients for mDNS discovery of the unique LAN music server." >&2
     exit 2
@@ -19,6 +19,7 @@ BUNDLE=${5:-}
 MUSIC_ROOT=${6:-}
 LOCAL_FFMPEG=${7:-}
 LOCAL_FFPROBE=${XR_FFPROBE_BIN:-}
+LOCAL_SNAPCLIENT=${XR_SNAPCLIENT_BINARY:-}
 if [ -z "$LOCAL_FFPROBE" ]; then
     case "$LOCAL_FFMPEG" in
         */*) LOCAL_FFPROBE=${LOCAL_FFMPEG%/*}/ffprobe ;;
@@ -46,6 +47,15 @@ REMOTE=/data/xiaorui/snapcast
 DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+
+if [ -n "$LOCAL_SNAPCLIENT" ]; then
+    [ -x "$LOCAL_SNAPCLIENT" ] || { echo "Snapclient is not executable: $LOCAL_SNAPCLIENT" >&2; exit 2; }
+    MACHINE=$(readelf -h "$LOCAL_SNAPCLIENT" 2>/dev/null | sed -n 's/.*Machine:[[:space:]]*//p')
+    case "$MACHINE" in *AArch64*) ;; *) echo "Snapclient is not AArch64: $MACHINE" >&2; exit 2;; esac
+elif ! adb -s "$SERIAL" shell "test -x '$REMOTE/snapclient'"; then
+    echo "Snapclient binary is missing; set XR_SNAPCLIENT_BINARY to an AArch64 executable" >&2
+    exit 2
+fi
 
 cat >"$TMP/service.env" <<EOF_CFG
 XR_SNAPCAST_ROLE=$ROLE
@@ -97,6 +107,10 @@ echo "== staging Snapcast service on $SERIAL (role=$ROLE, server=$SERVER_HOST:17
 adb -s "$SERIAL" shell "mkdir -p '$REMOTE' '$REMOTE/.install' '$REMOTE/log' '$REMOTE/run'"
 adb -s "$SERIAL" push "$DIR/snapcast-service.sh" "$REMOTE/.install/service.sh.new" >/dev/null
 adb -s "$SERIAL" shell "chmod 755 '$REMOTE/.install/service.sh.new' && mv '$REMOTE/.install/service.sh.new' '$REMOTE/service.sh'"
+if [ -n "$LOCAL_SNAPCLIENT" ]; then
+    adb -s "$SERIAL" push "$LOCAL_SNAPCLIENT" "$REMOTE/.install/snapclient.new" >/dev/null
+    adb -s "$SERIAL" shell "chmod 755 '$REMOTE/.install/snapclient.new' && mv '$REMOTE/.install/snapclient.new' '$REMOTE/snapclient'"
+fi
 adb -s "$SERIAL" push "$DIR/init-S98zzxiaorui-snapcast" "$REMOTE/.install/init-S98zzxiaorui-snapcast.new" >/dev/null
 adb -s "$SERIAL" shell "chmod 755 '$REMOTE/.install/init-S98zzxiaorui-snapcast.new' && mv '$REMOTE/.install/init-S98zzxiaorui-snapcast.new' '$REMOTE/init-S98zzxiaorui-snapcast'"
 adb -s "$SERIAL" push "$DIR/../../tools/snapcast-fifo-channel.py" "$REMOTE/.install/snapcast-fifo-product.py.new" >/dev/null

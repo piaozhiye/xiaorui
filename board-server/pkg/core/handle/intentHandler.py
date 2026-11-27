@@ -357,6 +357,9 @@ async def _h_music_control(conn, text, matched):
         return False
     await send_stt_message(conn, text)
     conn.sentence_id = str(uuid.uuid4().hex)
+    if matched["action"] == "unavailable":
+        speak_txt(conn, "音乐控制服务暂时不可用，播放控制没有执行")
+        return True
     if matched["action"] == "invalid_volume":
         speak_txt(conn, "音乐音量请设置在0到100之间")
         return True
@@ -405,8 +408,13 @@ def _local_intents(conn=None):
             return matched
         from core.handle.musicControlIntent import match_music_control as match
         from core.utils.snapcast_music import music_active
-        if music_active(conn):
+        active = music_active(conn)
+        if active is True:
             return match(text, music_active=True)
+        if active is None:
+            # If the controller is configured but unreachable, don't send a
+            # short transport command to the general LLM as ordinary chat.
+            return {"action": "unavailable"}
         return None
     from core.handle.timerIntent import (match_timer_intent, match_clock_alarm,
                                          match_timer_list_query)

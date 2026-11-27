@@ -419,8 +419,14 @@ start_client() {
         log "refusing to replace non-FIFO path: $RAW_FIFO"
         return 1
     fi
+    if [ -e "$MUSIC_FIFO" ] && [ ! -p "$MUSIC_FIFO" ]; then
+        log "refusing to replace non-FIFO path: $MUSIC_FIFO"
+        return 1
+    fi
+    mkdir -p "$(dirname "$RAW_FIFO")" "$(dirname "$MUSIC_FIFO")"
     [ -p "$RAW_FIFO" ] || mkfifo "$RAW_FIFO"
-    chmod 666 "$RAW_FIFO"
+    [ -p "$MUSIC_FIFO" ] || mkfifo "$MUSIC_FIFO"
+    chmod 666 "$RAW_FIFO" "$MUSIC_FIFO"
     if pid=$(find_pid "$PYTHON $BRIDGE"); then
         echo "$pid" > "$BRIDGE_PID_FILE"
         log "bridge already running PID $pid"
@@ -438,7 +444,11 @@ start_client() {
         log "Snapclient already running PID $pid"
         return 0
     fi
-    setsid "$CLIENT" "tcp://$SERVER_HOST:$SERVER_PORT" \
+    # Snapcast's Debian ARM64 build uses libraries bundled beside Snapserver.
+    # Keep the client on the same private runtime path instead of installing
+    # those dependencies into the system root.
+    setsid env "LD_LIBRARY_PATH=$BASE/server-v0.35.0/lib:/usr/lib:/lib" \
+        "$CLIENT" "tcp://$SERVER_HOST:$SERVER_PORT" \
         --player="file:filename=$RAW_FIFO" --mixer software \
         --logsink stdout --logfilter '*:warn' >>"$LOG_DIR/snapclient.log" 2>&1 </dev/null &
     pid=$!
