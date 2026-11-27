@@ -31,7 +31,8 @@ class MusicLibrary:
     """Expose opaque track IDs, never caller-provided paths, to the HTTP API."""
 
     def __init__(self, root, fifo_root="/tmp/xiaorui-music-pipes", ffmpeg=None,
-                 popen=subprocess.Popen, monotonic=time.monotonic, upload_root=None):
+                 popen=subprocess.Popen, monotonic=time.monotonic, upload_root=None,
+                 radio_ffmpeg=None):
         self.root = pathlib.Path(root).expanduser().resolve()
         if not self.root.is_dir():
             raise MusicLibraryError(f"音乐目录不存在或不是目录: {self.root}")
@@ -45,6 +46,7 @@ class MusicLibrary:
         self.ffmpeg = ffmpeg or shutil.which("ffmpeg")
         if not self.ffmpeg:
             raise MusicLibraryError("找不到 ffmpeg；请安装 ffmpeg 或使用 --ffmpeg 指定路径")
+        self.radio_ffmpeg = radio_ffmpeg or shutil.which("ffmpeg") or self.ffmpeg
         self.fifo_root = self._prepare_runtime_dir(self.fifo_root)
         self._popen = popen
         self._monotonic = monotonic
@@ -338,6 +340,55 @@ class MusicLibrary:
                                         "sampleformat": "48000:16:2", "mode": "read"})
         return f"pipe://{urllib.parse.quote(str(fifo), safe='/')}?{query}"
 
+    def start_radio(self, track_id, url, source=None):
+        """Decode an HTTP(S) live station to PCM and feed Snapserver through a private FIFO."""
+        if not isinstance(track_id, str) or not re.fullmatch(r"radio:[a-f0-9]{32}", track_id):
+            raise MusicLibraryError("无效电台 ID")
+        try:
+            parsed = urllib.parse.urlsplit(url)
+            parsed.port
+        except (TypeError, ValueError) as exc:
+            raise MusicLibraryError("电台地址无效") from exc
+        if (parsed.scheme not in ("http", "https") or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None):
+            raise MusicLibraryError("电台地址必须是 HTTP(S) 音频流")
+        with self._lock:
+            previous = self._processes.get(track_id)
+            if previous is not None and previous.poll() is None:
+                return self._sources[track_id]
+            self._processes.pop(track_id, None)
+            self._last_errors.pop(track_id, None)
+            self._paused.discard(track_id)
+            if source is None:
+                token = uuid.uuid4().hex[:12]
+                fifo = self.fifo_root / f"radio-{track_id[6:]}-{token}.pcm"
+                source = self._format_source_uri(fifo, f"radio-{track_id[6:]}-{token}")
+            else:
+                fifo = self._fifo_from_source(track_id, source)
+            if fifo.is_symlink() or (fifo.exists() and not stat.S_ISFIFO(fifo.lstat().st_mode)):
+                raise MusicLibraryError(f"电台音源出口不是 FIFO，拒绝覆盖: {fifo}")
+            if not fifo.exists():
+                os.mkfifo(fifo, 0o600)
+            else:
+                os.chmod(fifo, 0o600)
+            self._sources[track_id] = source
+            log = open(self.fifo_root / f"{fifo.stem}.ffmpeg.log", "ab", buffering=0)
+            command = [self.radio_ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "warning",
+                       "-i", url, "-vn", "-acodec", "pcm_s16le", "-ar", "48000",
+                       "-ac", "2", "-f", "s16le", "-y", str(fifo)]
+            try:
+                process = self._popen(command, stdin=subprocess.DEVNULL,
+                                      stdout=subprocess.DEVNULL, stderr=log,
+                                      start_new_session=True, close_fds=True)
+            except OSError as exc:
+                log.close()
+                self._unlink_fifo_source(track_id, source)
+                self._sources.pop(track_id, None)
+                raise MusicLibraryError(f"无法启动电台解码器: {exc}") from exc
+            log.close()
+            self._processes[track_id] = process
+            return source
+
     def start(self, track_id, source=None):
         track, audio_path = self.get_track(track_id)
         with self._lock:
@@ -522,8 +573,7 @@ class MusicLibrary:
         active = {}
         for session in sessions:
             track_id = session.get("track_id")
-            if (track_id and not track_id.startswith("radio:")
-                    and session.get("state") in ("playing", "paused")
+            if (track_id and session.get("state") in ("playing", "paused")
                     and track_id not in active):
                 active[track_id] = session
         ended = []
@@ -547,7 +597,11 @@ class MusicLibrary:
                         ended.append(session["session_id"])
                     continue
                 if process is None:
-                    self.start(track_id, source=session.get("source"))
+                    if track_id.startswith("radio:"):
+                        self.start_radio(track_id, session.get("source_url"),
+                                         source=session.get("source"))
+                    else:
+                        self.start(track_id, source=session.get("source"))
                 if session.get("state") == "paused":
                     self.pause(track_id)
                 else:
@@ -590,6 +644,15 @@ class MusicLibrary:
             query = urllib.parse.parse_qs(parsed.query)
             fifo = pathlib.Path(urllib.parse.unquote(parsed.path))
             name = query.get("name", [""])[0]
+            radio = re.fullmatch(r"radio:([a-f0-9]{32})", track_id or "")
+            if radio:
+                expected = (fifo.parent.resolve() == self.fifo_root
+                            and fifo.name.startswith(f"radio-{radio.group(1)}-")
+                            and fifo.name.endswith(".pcm")
+                            and re.fullmatch(r"radio-" + radio.group(1) + r"-[a-f0-9]{12}", name))
+                if parsed.scheme != "pipe" or parsed.netloc or not fifo.is_absolute() or not expected:
+                    raise ValueError("invalid radio source URI")
+                return fifo
             legacy = fifo.name == f"{track_id}.pcm" and name == f"music-{track_id}"
             current = (fifo.name.startswith(track_id + "-") and fifo.name.endswith(".pcm")
                        and re.fullmatch(r"music-" + re.escape(track_id) + r"-[a-f0-9]{12}", name))
@@ -629,14 +692,14 @@ class MusicLibrary:
     def _reap_orphaned_writers(self):
         """After a controller crash, kill only our exact ffmpeg->private-FIFO jobs."""
         proc_root = pathlib.Path("/proc")
-        expected_exe = os.path.realpath(self.ffmpeg)
+        expected_exes = {os.path.realpath(self.ffmpeg), os.path.realpath(self.radio_ffmpeg)}
         fifo_prefix = str(self.fifo_root) + os.sep
         for entry in proc_root.iterdir():
             if not entry.name.isdigit():
                 continue
             try:
                 argv = [os.fsdecode(arg) for arg in (entry / "cmdline").read_bytes().split(b"\0") if arg]
-                if not argv or os.path.realpath(argv[0]) != expected_exe:
+                if not argv or os.path.realpath(argv[0]) not in expected_exes:
                     continue
                 outputs = [arg for arg in argv[1:] if arg.startswith(fifo_prefix)
                            and arg.endswith(".pcm")]

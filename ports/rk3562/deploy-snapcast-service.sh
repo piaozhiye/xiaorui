@@ -146,7 +146,15 @@ if [ "$ROLE" = server-client ]; then
         adb -s "$SERIAL" shell "chmod 644 '$REMOTE/.install/pyqrcode/$file.new' && mv '$REMOTE/.install/pyqrcode/$file.new' '$REMOTE/music-app/pyqrcode/$file'"
     done
     adb -s "$SERIAL" push "$LOCAL_FFMPEG" "$REMOTE/.install/ffmpeg.new" >/dev/null
-    adb -s "$SERIAL" shell "chmod 755 '$REMOTE/.install/ffmpeg.new' && mv '$REMOTE/.install/ffmpeg.new' '$REMOTE/ffmpeg-local/ffmpeg'"
+    adb -s "$SERIAL" shell "chmod 755 '$REMOTE/.install/ffmpeg.new'"
+    # Check the target binary itself before installing it. The local music
+    # library can contain PCM WAV files; WAV demuxing without pcm_s16le
+    # decoding only fails later when that track is selected.
+    if ! adb -s "$SERIAL" shell "'$REMOTE/.install/ffmpeg.new' -decoders 2>/dev/null | grep -q 'pcm_s16le'"; then
+        echo "local music ffmpeg lacks the pcm_s16le decoder required for PCM WAV tracks" >&2
+        exit 2
+    fi
+    adb -s "$SERIAL" shell "mv '$REMOTE/.install/ffmpeg.new' '$REMOTE/ffmpeg-local/ffmpeg'"
     if [ -x "$LOCAL_FFPROBE" ]; then
         adb -s "$SERIAL" push "$LOCAL_FFPROBE" "$REMOTE/.install/ffprobe.new" >/dev/null
         adb -s "$SERIAL" shell "chmod 755 '$REMOTE/.install/ffprobe.new' && mv '$REMOTE/.install/ffprobe.new' '$REMOTE/ffmpeg-local/ffprobe'"

@@ -15,7 +15,7 @@ typedef struct {
     xr_music_action_t action;
     xr_vol_op_t volume_op;
     int value;
-    char text[256];   /* XR_MUSIC_FORWARD: 剥掉唤醒词后的正文 */
+    char text[256];   /* XR_MUSIC_FORWARD 正文 */
 } xr_music_command_t;
 typedef struct {
     long (*read)(void *context, int16_t *pcm, size_t samples);

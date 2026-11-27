@@ -178,6 +178,37 @@ class MusicLibraryTests(unittest.TestCase):
         self.assertIn("48000", command)
         self.assertEqual(kwargs["start_new_session"], True)
 
+    def test_radio_source_decodes_http_input_to_private_snapcast_pcm_fifo(self):
+        track_id = "radio:" + "c" * 32
+        url = "https://radio.example/live.m3u8?token=a%2Fb"
+        source = self.library.start_radio(track_id, url)
+        fifo = pathlib.Path(urllib.parse.unquote(urllib.parse.urlsplit(source).path))
+        self.assertTrue(source.startswith("pipe:///"))
+        self.assertTrue(stat.S_ISFIFO(fifo.lstat().st_mode))
+        self.assertEqual(stat.S_IMODE(fifo.lstat().st_mode), 0o600)
+        _process, command, kwargs = self.processes[-1]
+        self.assertEqual(command[command.index("-i") + 1], url)
+        self.assertEqual(command[command.index("-ar") + 1], "48000")
+        self.assertEqual(command[-4:-2], ["-f", "s16le"])
+        self.assertEqual(command[-1], str(fifo))
+        self.assertEqual(kwargs["start_new_session"], True)
+        with mock.patch("music_library.os.killpg"):
+            self.library.stop(track_id)
+        self.assertFalse(fifo.exists())
+
+    def test_radio_sync_recovery_restarts_writer_on_persisted_fifo(self):
+        track_id = "radio:" + "d" * 32
+        url = "http://radio.example/live.mp3"
+        source = self.library.start_radio(track_id, url)
+        fifo = pathlib.Path(urllib.parse.unquote(urllib.parse.urlsplit(source).path))
+        with mock.patch("music_library.os.killpg"):
+            self.library.close()
+        self.library = MusicLibrary(self.root, self.base / "pipes", ffmpeg="/usr/bin/ffmpeg",
+                                    popen=lambda *a, **k: FakeProcess())
+        self.library.sync_sessions([{"session_id": "radio-session", "track_id": track_id,
+                                     "source": source, "source_url": url, "state": "playing"}])
+        self.assertTrue(stat.S_ISFIFO(fifo.lstat().st_mode))
+
     def test_each_replay_gets_a_distinct_snapcast_stream_and_fifo(self):
         track_id = self.library.list_tracks()[0]["id"]
         first = self.library.source_uri(track_id)

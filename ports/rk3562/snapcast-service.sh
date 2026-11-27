@@ -35,6 +35,7 @@ MUSIC_ROOT=${XR_MUSIC_LIBRARY:-/data/xiaorui/music-library}
 MUSIC_UPLOAD_ROOT=${XR_MUSIC_UPLOAD_ROOT:-/userdata/xiaorui/music-uploads}
 MUSIC_FIFO_ROOT=${XR_MUSIC_FIFO_ROOT:-$BASE/music-pipes}
 MUSIC_FFMPEG=${XR_MUSIC_FFMPEG:-$BASE/ffmpeg-local/ffmpeg}
+MUSIC_RADIO_FFMPEG=${XR_MUSIC_RADIO_FFMPEG:-/usr/bin/ffmpeg}
 MUSIC_UI_PORT=${XR_MUSIC_UI_PORT:-8765}
 MUSIC_VOICE_CONTROL_PORT=${XR_MUSIC_VOICE_CONTROL_PORT:-8766}
 MUSIC_UI_BIND=${XR_MUSIC_UI_BIND:-127.0.0.1}
@@ -224,6 +225,7 @@ start_music_ui() {
     }
     [ -d "$MUSIC_ROOT" ] || { log "music library missing: $MUSIC_ROOT"; return 1; }
     [ -x "$MUSIC_FFMPEG" ] || { log "local music ffmpeg missing: $MUSIC_FFMPEG"; return 1; }
+    [ -x "$MUSIC_RADIO_FFMPEG" ] || MUSIC_RADIO_FFMPEG=$MUSIC_FFMPEG
     case "$MUSIC_UPLOAD_ROOT" in
         /userdata/*)
             if ! awk '$2 == "/userdata" { found=1 } END { exit !found }' /proc/mounts; then
@@ -250,7 +252,8 @@ start_music_ui() {
         --queue-state-file "$BASE/music-state/queue.json" \
         --music-root "$MUSIC_ROOT" --music-fifo-root "$MUSIC_FIFO_ROOT" \
         --music-upload-root "$MUSIC_UPLOAD_ROOT" \
-        --music-active-file "$BASE/music.active" --ffmpeg "$MUSIC_FFMPEG"
+        --music-active-file "$BASE/music.active" --ffmpeg "$MUSIC_FFMPEG" \
+        --radio-ffmpeg "$MUSIC_RADIO_FFMPEG"
     [ -z "$MUSIC_UI_TLS_CERT" ] || set -- "$@" --tls-cert "$MUSIC_UI_TLS_CERT"
     [ -z "$MUSIC_UI_TLS_KEY" ] || set -- "$@" --tls-key "$MUSIC_UI_TLS_KEY"
     [ -z "$MUSIC_UI_PASSWORD_FILE" ] || set -- "$@" --access-password-file "$MUSIC_UI_PASSWORD_FILE"

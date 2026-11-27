@@ -75,6 +75,10 @@ class FakeLibrary:
         self.started.append(track_id)
         return self.track
 
+    def start_radio(self, track_id, url, source=None):
+        self.started.append((track_id, url))
+        return source or f"pipe:///tmp/{track_id.replace(':', '-')}.pcm?name=radio-test"
+
     def source_uri(self, track_id):
         return f"pipe:///tmp/{track_id}.pcm?name=music-{track_id}"
 
@@ -150,7 +154,7 @@ class MusicUiHttpTests(unittest.TestCase):
         self.assertIn('rel="manifest" href="/manifest.webmanifest"', page)
         self.assertIn('id="install-panel"', page)
         self.assertIn('role="tablist" aria-label="主导航"', page)
-        for page_id in ("play", "library", "devices", "settings"):
+        for page_id in ("play", "library", "devices", "radio", "settings"):
             self.assertIn(f'id="tab-{page_id}"', page)
             self.assertIn(f'id="page-{page_id}"', page)
         self.assertIn("localStorage.setItem('xiaorui-music-page',page)", page)
@@ -204,6 +208,18 @@ class MusicUiHttpTests(unittest.TestCase):
         self.assertIn("grid-template-columns:7em minmax(0,1fr) 3.5em", page)
         self.assertIn('for="bulk-volume"', page)
         self.assertIn('for="voice-volume"', page)
+        self.assertIn('id="radio-presets"', page)
+        self.assertIn("const CNR_PRESETS=", page)
+        self.assertIn('id="radio-search"', page)
+        self.assertIn('id="radio-now"', page)
+        self.assertIn('id="radio-select-players"', page)
+        self.assertIn("async function playRadioStation(station)", page)
+        self.assertIn("添加并播放", page)
+        self.assertIn("已收藏", page)
+        self.assertIn("播放控制和音量在“播放”和“设备”页面统一管理", page)
+        for station in ("中国之声", "经济之声", "音乐之声", "经典音乐广播", "文艺之声"):
+            self.assertIn(station, page)
+        self.assertIn("添加自定义电台", page)
         self.assertIn("text.textContent='音乐音量'", page)
 
     def test_voice_gain_endpoint_is_separate_and_validated(self):
@@ -265,7 +281,7 @@ class MusicUiHttpTests(unittest.TestCase):
     def test_serves_installable_mobile_app_assets(self):
         cases = {
             "/manifest.webmanifest": ("application/manifest+json", '"display": "standalone"'),
-            "/service-worker.js": ("text/javascript", 'xiaorui-music-shell-v9'),
+            "/service-worker.js": ("text/javascript", 'xiaorui-music-shell-v11'),
             "/icon.svg": ("image/svg+xml", "<svg"),
             "/icon-192.png": ("image/png", ""),
             "/icon-512.png": ("image/png", ""),
@@ -527,6 +543,29 @@ class MusicUiHttpTests(unittest.TestCase):
         self.assertEqual(self.httpd.library.paused, [self.httpd.library.track["id"]])
         self.assertEqual(self.httpd.library.resumed, [self.httpd.library.track["id"]])
 
+    def test_voice_radio_uses_pcm_fifo_and_can_pause_resume(self):
+        self.transport.status["server"]["groups"][0]["clients"][0]["config"]["volume"]["percent"] = 20
+        station = self.httpd.collections.station_create("测试电台", "https://radio.example/live.m3u8")
+
+        def post(action, query=None):
+            body = json.dumps({"action": action, "query": query}).encode()
+            request = urllib.request.Request(self.base + "/api/voice", data=body,
+                headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(request, timeout=2) as response:
+                return json.loads(response.read())
+
+        result = post("play", "测试电台")
+        self.assertTrue(result["ok"], result)
+        marker = "radio:" + station["id"]
+        self.assertIn((marker, station["url"]), self.httpd.library.started)
+        session = self.httpd.session.handle({"op": "sessions.list"})["sessions"][0]
+        self.assertTrue(session["source"].startswith("pipe:///"))
+        self.assertEqual(session["source_url"], station["url"])
+        self.assertTrue(post("pause")["ok"])
+        self.assertTrue(post("resume")["ok"])
+        self.assertEqual(self.httpd.library.paused, [marker])
+        self.assertEqual(self.httpd.library.resumed, [marker])
+
     def test_voice_start_obeys_safe_volume_limit(self):
         request = urllib.request.Request(self.base + "/api/voice",
             data=json.dumps({"action": "play", "query": "sample"}).encode(),
@@ -616,11 +655,17 @@ class MusicUiHttpTests(unittest.TestCase):
         self.assertTrue(started["ok"], started)
         self.assertEqual(started["queue"]["source_kind"], "radio")
         self.assertEqual(started["queue"]["tracks"], [])
+        marker = "radio:" + station["id"]
+        self.assertIn((marker, "http://192.168.1.2:8000/stream"), self.httpd.library.started)
         session_id = started["session_id"]
+        session_row = next(row for row in post({"op": "sessions.list"})["sessions"]
+                           if row["session_id"] == session_id)
+        self.assertTrue(session_row["source"].startswith("pipe:///"))
+        self.assertEqual(session_row["source_url"], station["url"])
         self.assertTrue(post({"op": "session.pause", "session_id": session_id})["ok"])
         self.assertTrue(post({"op": "session.resume", "session_id": session_id})["ok"])
-        self.assertEqual(self.httpd.library.paused, [])
-        self.assertEqual(self.httpd.library.resumed, [])
+        self.assertEqual(self.httpd.library.paused, [marker])
+        self.assertEqual(self.httpd.library.resumed, [marker])
 
     def test_radio_queue_is_restored_only_for_matching_session(self):
         station_id = "c" * 32

@@ -785,6 +785,7 @@ static void *xr_music_fifo_thread(void *arg) {
     int announced = 0;
     int music_started = 0;
     int have_signal = 0;
+    int writer_waiting = 0;
     struct timespec last_signal = {0};
     /* XR_MUSIC_TRACE=1: 每次 read 打一行累计字节+本次字节, 用来量供流节奏。
        板内核没开 /proc/<pid>/io, 只能在这里埋。默认关闭不影响行为。 */
@@ -811,8 +812,16 @@ static void *xr_music_fifo_thread(void *arg) {
              * (snapclient 每 ~50ms 才来一股, 凑 120ms 会让 80ms 的 ALSA 缓冲干转,
              * 实测持续 underrun)。read() 是"有多少读多少"。
              * open(O_RDONLY) 在 FIFO 上会等写端, 与客户端的 fopen("wb") 对称。 */
-            fd = open(path, O_RDONLY);
-            if (fd < 0) { sleep(1); continue; }
+            /* Nonblocking open lets us observe the controller's active marker
+             * while Snapclient briefly closes/reopens its FIFO writer (stream
+             * handoff/reconnect). A blocking open plus a fixed sleep made that
+             * transient look like the end of a music session. */
+            fd = open(path, O_RDONLY | O_NONBLOCK);
+            if (fd < 0) {
+                struct timespec retry = {.tv_nsec = 50000000};
+                nanosleep(&retry, NULL);
+                continue;
+            }
             if (reconnects > 0) MUSIC_TRACE_EVENT("writer_reopened", trace_total);
             if (!announced) {
                 fprintf(stderr, "[xr] music fifo: %s\n", path);
@@ -821,19 +830,56 @@ static void *xr_music_fifo_thread(void *arg) {
         }
         ssize_t n = read(fd, buf, sizeof(buf));
         if (n <= 0) {
-            if (n == 0 || (errno != EINTR && errno != EAGAIN)) {
-                MUSIC_TRACE_EVENT(n == 0 ? "writer_eof" : "read_error", trace_total);
-                close(fd); fd = -1;
-                if (music_started) {
-                    /* 音源写端断开，释放音乐持仓。 */
-                    xr_player_set_music(0);
-                    music_started = 0;
+            if (n < 0 && errno == EINTR) continue;
+            if (n == 0) {
+                if (!writer_waiting) {
+                    MUSIC_TRACE_EVENT("writer_eof", trace_total);
+                    reconnects++;
+                    writer_waiting = 1;
                 }
+            } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                MUSIC_TRACE_EVENT("read_error", trace_total);
+                close(fd); fd = -1;
                 reconnects++;
-                sleep(1);                       /* 写端断开: 等下一路音频 */
             }
+            /* FIFO writer absent is a normal short gap. Keep the playback
+             * session alive while the activity marker (or recent nonzero
+             * samples) says music is still active; expire it only after the
+             * same quiet grace used for streams without a local marker. */
+            const char *active_path = getenv("XR_MUSIC_ACTIVE_FILE");
+            if (!active_path || !*active_path)
+                active_path = "/data/xiaorui/snapcast/music.active";
+            struct stat active_stat;
+            time_t wall_now = time(NULL);
+            int active = stat(active_path, &active_stat) == 0
+                         && active_stat.st_mtime >= wall_now - 2
+                         && active_stat.st_mtime <= wall_now + 2;
+            if (have_signal) {
+                struct timespec mono_now;
+                clock_gettime(CLOCK_MONOTONIC, &mono_now);
+                long quiet_ms = (long)(mono_now.tv_sec - last_signal.tv_sec) * 1000L
+                              + (mono_now.tv_nsec - last_signal.tv_nsec) / 1000000L;
+                if (quiet_ms >= 0 && quiet_ms <= 3000) active = 1;
+            }
+            if (active && !music_started) {
+                MUSIC_TRACE_EVENT("music_session_start", trace_total);
+                xr_player_set_music(1);
+                if (xr_player_start() == 0) music_started = 1;
+                else {
+                    fprintf(stderr, "[xr] music fifo: 播放环起不来\n");
+                    xr_player_set_music(0);
+                }
+            } else if (!active && music_started) {
+                MUSIC_TRACE_EVENT("music_session_idle", trace_total);
+                xr_player_set_music(0);
+                music_started = 0;
+                have_signal = 0;
+            }
+            struct timespec retry = {.tv_nsec = 20000000};
+            nanosleep(&retry, NULL);
             continue;
         }
+        writer_waiting = 0;
         /* Snapclient 的 file player 在空闲流期间也会持续输出静音 PCM，因此不能
          * 把 FIFO 收到字节当作“正在播放”。本机音乐控制器的短时 music.active 心跳
          * 优先；其他客户端没有这个本地文件时，用非零 PCM + 3s 静音宽限识别音频。
@@ -1854,12 +1900,20 @@ utterance_ready:
             continue;
         }
         if (route == XR_SPEECH_UPLOAD) {
+            /* During music, the local acoustic KWS is already the wake gate.
+             * Requiring the cloud ASR to hear the wake phrase a second time
+             * rejects short commands when ASR trims the prefix (observed on
+             * the 4G board: KWS hit, then server returned silent/no-wake).
+             * Keep the server wake check for cold-start/non-music turns. */
+            int music_kws_wake = xr_player_music_active() && kws_wake_this_utt;
             backend_audio_request_t request = {
                 .pcm = utt, .samples = utt_n,
                 .transcribe = config->local_asr ? transcribe_followup : NULL,
-                .wake_required = !follow || kws_wake_this_utt,
+                .wake_required = music_kws_wake ? 0 : (!follow || kws_wake_this_utt),
             };
-            if (!config->local_asr && kws_wake_this_utt)
+            if (music_kws_wake)
+                fprintf(stderr, "[xr] music KWS acoustic gate accepted; cloud ASR supplies command text\n");
+            else if (!config->local_asr && kws_wake_this_utt)
                 fprintf(stderr, "[xr] cloud-only KWS hit: server confirms wake\n");
             kws_wake_this_utt = 0;
             if (be_submit_audio(be, &request)) goto restart;

@@ -50,7 +50,24 @@ int main(void) {
     assert(command.action == XR_MUSIC_STOP);
     assert(xr_music_command_parse("小瑞小瑞闭嘴", &command));
     assert(command.action == XR_MUSIC_STOP);
-    assert(command.action == XR_MUSIC_STOP);
+    assert(xr_music_command_parse("小瑞小瑞暂停播放。", &command));
+    assert(command.action == XR_MUSIC_FORWARD && !strcmp(command.text, "暂停播放"));
+    assert(xr_music_command_parse("停一下", &command));
+    assert(command.action == XR_MUSIC_FORWARD && !strcmp(command.text, "停一下"));
+    assert(xr_music_command_parse("小瑞小瑞，暂停一下。", &command));
+    assert(command.action == XR_MUSIC_FORWARD && !strcmp(command.text, "暂停一下"));
+    assert(xr_music_command_parse("小瑞小瑞，暂停播放。", &command));
+    assert(command.action == XR_MUSIC_FORWARD && !strcmp(command.text, "暂停播放"));
+    assert(xr_music_command_parse("继续播放", &command));
+    assert(command.action == XR_MUSIC_FORWARD && !strcmp(command.text, "继续播放"));
+    assert(xr_music_command_parse("小瑞小瑞下一首", &command));
+    assert(command.action == XR_MUSIC_FORWARD && !strcmp(command.text, "下一首"));
+    assert(xr_music_command_parse("上一曲", &command));
+    assert(command.action == XR_MUSIC_FORWARD && !strcmp(command.text, "上一曲"));
+    assert(xr_music_command_parse("小瑞小瑞播放音乐", &command));
+    assert(command.action == XR_MUSIC_FORWARD && !strcmp(command.text, "播放音乐"));
+    assert(xr_music_command_parse("小瑞小瑞播放音乐之声", &command));
+    assert(command.action == XR_MUSIC_FORWARD && !strcmp(command.text, "播放音乐之声"));
     /* 声学门兜底: 唤醒音节掉出预滚窗, 转写整句无唤醒词 */
     assert(xr_music_command_parse("声音小一点", &command));
     assert(command.action == XR_MUSIC_VOLUME);

@@ -268,7 +268,14 @@ class Handler(BaseHTTPRequestHandler):
                     self.server.session.handle({"op": "session.stop", "session_id": session_id})
                     queue = self.server.music_queue
                     if queue.get("session_id") == session_id:
-                        if queue["index"] + 1 < len(queue["track_ids"]):
+                        if queue.get("source_kind") == "radio":
+                            queue["session_id"] = None
+                            station_id = queue.get("station_id")
+                            error = (self.server.library.last_error("radio:" + station_id)
+                                     if station_id and hasattr(self.server.library, "last_error") else None)
+                            queue["state"] = "error"
+                            queue["error"] = error or "电台流已结束或解码失败"
+                        elif queue["index"] + 1 < len(queue["track_ids"]):
                             queue["index"] += 1
                             self._start_queued_track(enforce_start_limit=False)
                         else:
@@ -285,6 +292,11 @@ class Handler(BaseHTTPRequestHandler):
         return {"track_ids": [], "players": [], "index": 0, "session_id": None,
                 "state": "stopped", "error": None, "source_kind": "tracks",
                 "current_title": None, "station_id": None}
+
+    def _stop_radio_source(self, queue):
+        station_id = queue.get("station_id") if queue.get("source_kind") == "radio" else None
+        if isinstance(station_id, str):
+            self.server.library.stop("radio:" + station_id)
 
     def _save_queue(self):
         path = getattr(self.server, "queue_state_file", None)
@@ -560,6 +572,7 @@ class Handler(BaseHTTPRequestHandler):
                          else None)
         if old_session:
             self.server.session.handle({"op": "session.stop", "session_id": old_session})
+        self._stop_radio_source(queue)
         if old_track:
             self.server.library.stop(old_track)
         queue["index"] = index
@@ -844,6 +857,7 @@ class Handler(BaseHTTPRequestHandler):
                         old = self.server.music_queue
                         if old.get("session_id"):
                             self.server.session.handle({"op": "session.stop", "session_id": old["session_id"]})
+                        self._stop_radio_source(old)
                         for old_track in old.get("track_ids", []):
                             self.server.library.stop(old_track)
                         self.server.music_queue = {"track_ids": list(ids), "players": list(dict.fromkeys(players)),
@@ -905,19 +919,15 @@ class Handler(BaseHTTPRequestHandler):
                         old = self.server.music_queue
                         if old.get("session_id"):
                             self.server.session.handle({"op": "session.stop", "session_id": old["session_id"]})
+                        self._stop_radio_source(old)
                         for old_track in old.get("track_ids", []):
                             self.server.library.stop(old_track)
                         marker = "radio:" + station["id"]
-                        parsed_url = urllib.parse.urlsplit(station["url"])
-                        stream_query = [(key, value) for key, value in
-                                        urllib.parse.parse_qsl(parsed_url.query, keep_blank_values=True)
-                                        if key.casefold() != "name"]
-                        stream_query.append(("name", "radio-" + station["id"][:20]))
-                        source = urllib.parse.urlunsplit((parsed_url.scheme, parsed_url.netloc,
-                                                          parsed_url.path, urllib.parse.urlencode(stream_query), ""))
+                        source = self.server.library.start_radio(marker, station["url"])
                         play = self.server.session.handle({"op": "session.play", "source": source,
                                                            "players": players, "track_id": marker,
-                                                           "track_title": station["name"]})
+                                                           "track_title": station["name"],
+                                                           "source_url": station["url"]})
                         if play.get("ok"):
                             self.server.music_queue = {"track_ids": [], "players": list(dict.fromkeys(players)),
                                                        "index": 0, "session_id": play["session_id"],
@@ -927,6 +937,7 @@ class Handler(BaseHTTPRequestHandler):
                             self._save_queue()
                             play["queue"] = self._queue_snapshot()
                         else:
+                            self.server.library.stop(marker)
                             self.server.music_queue = {"track_ids": [], "players": list(players), "index": 0,
                                                        "session_id": None, "state": "error",
                                                        "error": play.get("error", "电台流启动失败"),
@@ -937,6 +948,8 @@ class Handler(BaseHTTPRequestHandler):
             except MusicVolumeError as exc:
                 result = {"ok": False, "code": "volume_too_high", "error": str(exc),
                           "players": exc.players, "max_start_volume": exc.maximum}
+            except MusicLibraryError as exc:
+                result = {"ok": False, "error": str(exc)}
             except CollectionError as exc:
                 result = {"ok": False, "error": str(exc)}
         elif request.get("op") == "library.delete_upload":
@@ -1000,6 +1013,7 @@ class Handler(BaseHTTPRequestHandler):
                     if old.get("session_id"):
                         self.server.session.handle({"op": "session.stop",
                                                     "session_id": old["session_id"]})
+                    self._stop_radio_source(old)
                     for old_track in old.get("track_ids", []):
                         self.server.library.stop(old_track)
                     self.server.music_queue = {"track_ids": list(track_ids),
@@ -1093,6 +1107,7 @@ class Handler(BaseHTTPRequestHandler):
                 if queue.get("session_id"):
                     self.server.session.handle({"op": "session.stop",
                                                 "session_id": queue["session_id"]})
+                self._stop_radio_source(queue)
                 for track_id in queue.get("track_ids", []):
                     self.server.library.stop(track_id)
                 self.server.music_queue = self._empty_queue()
@@ -1131,8 +1146,7 @@ class Handler(BaseHTTPRequestHandler):
             session_id = request.get("session_id")
             sessions = self.server.session.handle({"op": "sessions.list"}).get("sessions", [])
             session = next((row for row in sessions if row.get("session_id") == session_id), None)
-            if (session and session.get("track_id")
-                    and not session.get("track_id", "").startswith("radio:")):
+            if session and session.get("track_id"):
                 try:
                     action = "pause" if request["op"] == "session.pause" else "resume"
                     getattr(self.server.library, action)(session["track_id"])
@@ -1153,6 +1167,7 @@ class Handler(BaseHTTPRequestHandler):
                 with self.server.music_queue_lock:
                     queue = self.server.music_queue
                     if queue.get("session_id") == request.get("session_id"):
+                        self._stop_radio_source(queue)
                         for track_id in queue.get("track_ids", []):
                             self.server.library.stop(track_id)
                         self.server.music_queue = self._empty_queue()
@@ -1242,16 +1257,12 @@ class Handler(BaseHTTPRequestHandler):
                         stopped = self._voice_stop_current()
                         if not stopped.get("ok"):
                             return stopped
-                        url = urllib.parse.urlsplit(station["url"])
-                        args = [(k, v) for k, v in urllib.parse.parse_qsl(url.query, keep_blank_values=True)
-                                if k.casefold() != "name"]
-                        args.append(("name", "radio-" + station["id"][:20]))
-                        source = urllib.parse.urlunsplit((url.scheme, url.netloc, url.path,
-                                                         urllib.parse.urlencode(args), ""))
                         marker = "radio:" + station["id"]
+                        source = self.server.library.start_radio(marker, station["url"])
                         result = self.server.session.handle({"op": "session.play", "source": source,
                                                             "players": targets, "track_id": marker,
-                                                            "track_title": station["name"]})
+                                                            "track_title": station["name"],
+                                                            "source_url": station["url"]})
                         if result.get("ok"):
                             self.server.music_queue = {"track_ids": [], "players": targets,
                                 "index": 0, "session_id": result["session_id"], "state": "playing",
@@ -1260,6 +1271,7 @@ class Handler(BaseHTTPRequestHandler):
                             self._save_queue()
                             self._sync_music_activity()
                             return {"ok": True, "response": f"正在同步播放电台：{station['name']}"}
+                        self.server.library.stop(marker)
                         return {"ok": False, "error": result.get("error", "电台启动失败")}
                     if len(station_matches) > 1:
                         names = "、".join(row["name"] for row in station_matches[:3])
@@ -1312,7 +1324,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not session_id or queue.get("state") not in ("playing", "paused"):
                     return {"ok": False, "error": "当前没有可控制的音乐会话"}
                 if action in ("pause", "resume"):
-                    if queue.get("source_kind") != "radio" and queue.get("track_ids"):
+                    if queue.get("source_kind") == "radio" and queue.get("station_id"):
+                        track_id = "radio:" + queue["station_id"]
+                        getattr(self.server.library, action)(track_id)
+                    elif queue.get("track_ids"):
                         track_id = queue["track_ids"][queue["index"]]
                         getattr(self.server.library, action)(track_id)
                     result = self.server.session.handle({
@@ -1370,6 +1385,7 @@ class Handler(BaseHTTPRequestHandler):
             result = self.server.session.handle({"op": "session.stop", "session_id": queue["session_id"]})
             if not result.get("ok"):
                 return {"ok": False, "error": result.get("error", "停止当前音乐失败")}
+        self._stop_radio_source(queue)
         for track_id in queue.get("track_ids", []):
             self.server.library.stop(track_id)
         return {"ok": True}
@@ -1478,6 +1494,8 @@ def main():
     parser.add_argument("--music-active-file", default=os.environ.get(
         "XR_MUSIC_ACTIVE_FILE", "/data/xiaorui/snapcast/music.active"))
     parser.add_argument("--ffmpeg", default=os.environ.get("XR_FFMPEG"))
+    parser.add_argument("--radio-ffmpeg", default=os.environ.get("XR_RADIO_FFMPEG"),
+                        help="支持 HTTPS 的 ffmpeg；未指定时使用 PATH 中的 ffmpeg")
     parser.add_argument("--music-max-start-volume", type=int,
                         default=int(os.environ.get("XR_MUSIC_MAX_START_VOLUME", "35")),
                         help="音乐启动前允许的最高 Snapcast 软件音量百分比")
@@ -1608,7 +1626,7 @@ def main():
     client = SnapcastClient(args.snapcast_host, args.snapcast_port)
     session = MusicSession(control=client, state_file=args.state_file)
     library = MusicLibrary(args.music_root, args.music_fifo_root, args.ffmpeg,
-                           upload_root=args.music_upload_root)
+                           upload_root=args.music_upload_root, radio_ffmpeg=args.radio_ffmpeg)
     Handler.protocol_version = "HTTP/1.1"
     server = ThreadingHTTPServer((args.bind, args.port), Handler)
     server.music_access_password = password
