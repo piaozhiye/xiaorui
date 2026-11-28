@@ -40,13 +40,12 @@ play_music_function_desc = {
 @register_function("play_music", play_music_function_desc, ToolType.SYSTEM_CTL)
 async def play_music(conn: "ConnectionHandler", song_name: str):
     try:
-        from core.utils.snapcast_music import control as snapcast_control, enabled as snapcast_enabled
+        from core.utils.snapcast_music import control_async as snapcast_control, enabled as snapcast_enabled
         if snapcast_enabled(conn):
-            result = snapcast_control(conn, "play", query=song_name)
+            result = await snapcast_control(conn, "play", query=song_name)
             if result.get("ok"):
-                return ActionResponse(action=Action.RESPONSE,
-                                      result=result.get("response", "指令已接收"),
-                                      response=result.get("response", "好的"))
+                return ActionResponse(action=Action.RECORD,
+                                      result=result.get("response", "音乐播放已开始"))
             return ActionResponse(action=Action.RESPONSE,
                                   result=result.get("error", "音乐控制失败"),
                                   response=result.get("error", "音乐控制失败"))

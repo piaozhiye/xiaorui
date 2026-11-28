@@ -22,20 +22,12 @@ def match_next_query(text) -> bool:
 
 
 async def handle_next_intent(conn, text) -> bool:
-    from core.utils.snapcast_music import control as snapcast_control, enabled as snapcast_enabled
+    from core.utils.snapcast_music import enabled as snapcast_enabled
     if snapcast_enabled(conn):
-        from core.handle.sendAudioHandle import send_stt_message
-        from core.handle.intentHandler import speak_txt
-        import uuid
-
         action = "previous" if text.strip().strip("，。！？；,.!?; \t") in {
             "上一首", "上一曲", "前一首", "前一曲"} else "next"
-        await send_stt_message(conn, text)
-        conn.sentence_id = str(uuid.uuid4().hex)
-        result = snapcast_control(conn, action)
-        speak_txt(conn, result.get("response") if result.get("ok")
-                  else result.get("error", "音乐控制失败"))
-        return True
+        from core.handle.intentHandler import _h_music_control
+        return await _h_music_control(conn, text, {"action": action})
 
     from plugins_func.functions.play_music import (_LAST_MEDIA,
                                                     _load_online_playlist,

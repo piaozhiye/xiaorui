@@ -315,7 +315,7 @@ async def _h_music(conn, text, m):
     这条路没有 LLM 的正文, 收尾的 FIRST/LAST 动作标记得自己发,
     否则客户端收不到 stop, 整轮挂住。
     """
-    from core.utils.snapcast_music import control as snapcast_control, enabled as snapcast_enabled
+    from core.utils.snapcast_music import control_async as snapcast_control, enabled as snapcast_enabled
     from plugins_func.functions.play_music import (
         _genre_like, handle_music_command, try_radio_intent)
     from core.providers.tts.dto.dto import TTSMessageDTO, SentenceType, ContentType
@@ -326,9 +326,11 @@ async def _h_music(conn, text, m):
     if snapcast_enabled(conn):
         await send_stt_message(conn, text)
         conn.sentence_id = str(uuid.uuid4().hex)
-        result = snapcast_control(conn, "play", query=song)
-        speak_txt(conn, result.get("response") if result.get("ok")
-                  else result.get("error", "音乐控制失败"))
+        result = await snapcast_control(conn, "play", query=song)
+        if result.get("ok"):
+            _finish_silent_music_turn(conn)
+        else:
+            speak_txt(conn, result.get("error", "音乐控制失败"))
         return True
     # 风格词("轻音乐"/"爵士")当电台走: 硬搜歌名只会拿到几秒试听
     if song and _genre_like(song):
@@ -350,7 +352,7 @@ async def _h_music(conn, text, m):
 async def _h_music_control(conn, text, matched):
     from core.handle.sendAudioHandle import send_stt_message
     from core.handle.intentHandler import speak_txt
-    from core.utils.snapcast_music import control, enabled
+    from core.utils.snapcast_music import control_async, enabled
     import uuid
 
     if not enabled(conn):
@@ -363,10 +365,27 @@ async def _h_music_control(conn, text, matched):
     if matched["action"] == "invalid_volume":
         speak_txt(conn, "音乐音量请设置在0到100之间")
         return True
-    result = control(conn, matched["action"], volume=matched.get("volume"))
-    reply = result.get("response") if result.get("ok") else result.get("error", "音乐控制失败")
-    speak_txt(conn, reply)
+    result = await control_async(conn, matched["action"], volume=matched.get("volume"))
+    if result.get("ok") and matched["action"] != "status":
+        _finish_silent_music_turn(conn)
+    else:
+        reply = result.get("response") if result.get("ok") else result.get("error", "音乐控制失败")
+        speak_txt(conn, reply)
     return True
+
+
+def _finish_silent_music_turn(conn):
+    """结束音乐操作轮次，不合成成功确认语音。"""
+    from core.providers.tts.dto.dto import TTSMessageDTO, SentenceType, ContentType
+
+    # LAST 会向客户端发送 stop 来结束本轮；标记该 stop，避免配置的
+    # enable_stop_tts_notify 提示音被误当成音乐控制的语音回复。
+    conn._silent_music_turn_sid = conn.sentence_id
+    conn.tts.tts_text_queue.put(TTSMessageDTO(
+        conn.sentence_id, SentenceType.LAST, ContentType.ACTION))
+    logger = getattr(conn, "logger", None)
+    if logger is not None:
+        logger.bind(tag=TAG).info("音乐控制已执行，静默结束语音轮次")
 
 
 async def _h_timer_list(conn, text, m):

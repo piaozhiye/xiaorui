@@ -22,7 +22,7 @@ def fetch_state(base_url, cookie):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--url", required=True, help="Controller base URL, e.g. https://192.168.1.40:8765")
+    parser.add_argument("--url", required=True, help="Controller base URL, e.g. https://controller.example:8765")
     parser.add_argument("--cookie-file", help="file containing the Cookie header value")
     parser.add_argument("--players", required=True, help="Comma-separated Snapcast player IDs that must remain online")
     parser.add_argument("--minutes", type=float, default=60, help="Long-play observation duration (default: 60 minutes)")

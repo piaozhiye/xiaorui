@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 """Narrow parsing tests for voice commands that control multiroom music."""
 import sys
+import queue
 import unittest
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "board-server" / "pkg"))
 
 from core.handle.musicControlIntent import match_music_control  # noqa: E402
-from core.handle.intentHandler import _local_intents  # noqa: E402
+from core.handle.intentHandler import _h_music, _h_music_control, _local_intents  # noqa: E402
+from core.handle.nextIntent import handle_next_intent  # noqa: E402
+from core.handle.sendAudioHandle import send_tts_message  # noqa: E402
 from core.utils.snapcast_music import control, enabled  # noqa: E402
+from core.providers.tts.dto.dto import ContentType, SentenceType  # noqa: E402
+from plugins_func.functions.control_music import control_music  # noqa: E402
+from plugins_func.functions.play_music import play_music  # noqa: E402
+from plugins_func.register import Action  # noqa: E402
 
 
 class MusicControlIntentTests(unittest.TestCase):
@@ -77,7 +84,7 @@ class MusicControlIntentTests(unittest.TestCase):
 
     def test_voice_client_uses_only_loopback_controller(self):
         conn = SimpleNamespace(config={"plugins": {"snapcast_music": {
-            "enabled": True, "base_url": "http://192.168.1.40:8765"}}})
+            "enabled": True, "base_url": "http://192.0.2.40:8765"}}})
         self.assertTrue(enabled(conn))
         with patch("core.utils.snapcast_music.urllib.request.urlopen") as urlopen:
             result = control(conn, "pause")
@@ -118,6 +125,120 @@ class MusicControlIntentTests(unittest.TestCase):
                 "ok": False, "error": "音乐服务暂时不可用"}):
             from core.utils.snapcast_music import music_active
             self.assertIsNone(music_active(conn))
+
+
+class MusicControlReplyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_non_stop_tts_state_is_still_sent(self):
+        conn = SimpleNamespace(
+            sentence_id="sentence", session_id="session", config={},
+            websocket=SimpleNamespace(send=AsyncMock()),
+        )
+        await send_tts_message(conn, "sentence_start", "测试")
+        conn.websocket.send.assert_awaited_once()
+
+    async def test_successful_controls_end_turn_without_tts_speech(self):
+        actions = ("play", "pause", "resume", "stop", "next", "previous",
+                   "volume_set", "volume_up", "volume_down")
+        for action in actions:
+            with self.subTest(action=action):
+                conn = SimpleNamespace(
+                    config={}, sentence_id=None,
+                    tts=SimpleNamespace(tts_text_queue=queue.Queue()),
+                )
+                with patch("core.handle.sendAudioHandle.send_stt_message",
+                           new_callable=AsyncMock), \
+                     patch("core.utils.snapcast_music.enabled", return_value=True), \
+                     patch("core.utils.snapcast_music.control_async", new_callable=AsyncMock,
+                           return_value={"ok": True, "response": "音乐已暂停"}), \
+                     patch("core.handle.intentHandler.speak_txt") as speak:
+                    handled = await _h_music_control(conn, "控制音乐", {"action": action})
+
+                self.assertTrue(handled)
+                speak.assert_not_called()
+                messages = [conn.tts.tts_text_queue.get_nowait()]
+                self.assertEqual([m.sentence_type for m in messages], [SentenceType.LAST])
+                self.assertTrue(all(m.content_type == ContentType.ACTION for m in messages))
+
+    async def test_failed_control_still_speaks_error(self):
+        conn = SimpleNamespace(config={}, sentence_id=None)
+        with patch("core.handle.sendAudioHandle.send_stt_message", new_callable=AsyncMock), \
+             patch("core.utils.snapcast_music.enabled", return_value=True), \
+             patch("core.utils.snapcast_music.control_async", new_callable=AsyncMock,
+                   return_value={"ok": False, "error": "音乐服务暂时不可用"}), \
+             patch("core.handle.intentHandler.speak_txt") as speak:
+            handled = await _h_music_control(conn, "暂停音乐", {"action": "pause"})
+
+        self.assertTrue(handled)
+        speak.assert_called_once_with(conn, "音乐服务暂时不可用")
+
+    async def test_snapcast_play_intent_ends_without_success_speech(self):
+        conn = SimpleNamespace(
+            config={}, sentence_id=None,
+            tts=SimpleNamespace(tts_text_queue=queue.Queue()),
+        )
+        with patch("core.handle.sendAudioHandle.send_stt_message", new_callable=AsyncMock), \
+             patch("core.utils.snapcast_music.enabled", return_value=True), \
+             patch("core.utils.snapcast_music.control_async", new_callable=AsyncMock,
+                   return_value={"ok": True, "response": "正在播放歌曲"}), \
+             patch("core.handle.intentHandler.speak_txt") as speak:
+            handled = await _h_music(conn, "播放歌曲", "歌曲")
+
+        self.assertTrue(handled)
+        speak.assert_not_called()
+        messages = [conn.tts.tts_text_queue.get_nowait()]
+        self.assertEqual([m.sentence_type for m in messages], [SentenceType.LAST])
+        self.assertTrue(all(m.content_type == ContentType.ACTION for m in messages))
+
+    async def test_next_intent_routes_snapcast_next_through_silent_control_handler(self):
+        conn = SimpleNamespace()
+        with patch("core.utils.snapcast_music.enabled", return_value=True), \
+             patch("core.handle.intentHandler._h_music_control", new_callable=AsyncMock,
+                   return_value=True) as control_handler:
+            handled = await handle_next_intent(conn, "下一首")
+
+        self.assertTrue(handled)
+        control_handler.assert_awaited_once_with(conn, "下一首", {"action": "next"})
+
+    async def test_music_control_tool_records_success_without_tts_response(self):
+        conn = SimpleNamespace(config={})
+        with patch("plugins_func.functions.control_music.enabled", return_value=True), \
+             patch("plugins_func.functions.control_music.control_async", new_callable=AsyncMock,
+                   return_value={"ok": True, "response": "音乐已暂停"}):
+            result = await control_music(conn, "pause")
+
+        self.assertEqual(result.action, Action.RECORD)
+        self.assertIsNone(result.response)
+
+    async def test_play_music_tool_records_success_without_tts_response(self):
+        conn = SimpleNamespace(config={})
+        with patch("core.utils.snapcast_music.enabled", return_value=True), \
+             patch("core.utils.snapcast_music.control_async", new_callable=AsyncMock,
+                   return_value={"ok": True, "response": "正在播放歌曲"}):
+            result = await play_music(conn, "歌曲")
+
+        self.assertEqual(result.action, Action.RECORD)
+        self.assertIsNone(result.response)
+
+    async def test_silent_music_turn_suppresses_configured_stop_audio(self):
+        conn = SimpleNamespace(
+            sentence_id="music-turn", session_id="session",
+            _silent_music_turn_sid="music-turn",
+            config={"enable_stop_tts_notify": True},
+            audio_rate_controller=None, clearSpeakStatus=lambda: None,
+            client_abort=False,
+            websocket=SimpleNamespace(send=AsyncMock()),
+            session_coordinator=None,
+        )
+        with patch("core.handle.sendAudioHandle._wait_for_audio_completion",
+                   new_callable=AsyncMock), \
+             patch("core.handle.sendAudioHandle.audio_to_data",
+                   new_callable=AsyncMock) as audio_to_data, \
+             patch("core.ha_audit.completed"):
+            await send_tts_message(conn, "stop", None)
+
+        audio_to_data.assert_not_awaited()
+        self.assertIsNone(conn._silent_music_turn_sid)
+        conn.websocket.send.assert_awaited_once()
 
 
 if __name__ == "__main__":

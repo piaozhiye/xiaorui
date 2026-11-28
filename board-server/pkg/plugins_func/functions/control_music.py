@@ -1,5 +1,6 @@
 """Voice controls for the Snapcast multiroom player."""
-from core.utils.snapcast_music import control, enabled
+from core.utils.snapcast_music import control_async, enabled
+from core.handle.musicControlIntent import MUSIC_ACTIONS_SILENT_ON_SUCCESS
 from plugins_func.register import register_function, ToolType, ActionResponse, Action
 
 
@@ -30,8 +31,11 @@ async def control_music(conn, action: str, query: str = None, volume: int = None
     if not enabled(conn):
         return ActionResponse(Action.RESPONSE, result="多设备音乐语音控制未启用",
                               response="多设备音乐控制还没有配置好")
-    result = control(conn, action, query=query, volume=volume)
+    result = await control_async(conn, action, query=query, volume=volume)
     if result.get("ok"):
+        if action in MUSIC_ACTIONS_SILENT_ON_SUCCESS:
+            return ActionResponse(Action.RECORD,
+                                  result=result.get("response", "音乐控制已执行"))
         return ActionResponse(Action.RESPONSE, result=result.get("response", "指令已完成"),
                               response=result.get("response", "好的"))
     return ActionResponse(Action.RESPONSE, result=result.get("error", "音乐控制失败"),

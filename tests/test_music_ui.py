@@ -682,14 +682,14 @@ class MusicUiHttpTests(unittest.TestCase):
             urllib.request.urlopen(request, timeout=2)
         self.assertEqual(getattr(raised.exception, "code", None), 400)
         body = json.dumps({"op": "radio.add", "name": "局域网电台",
-                           "url": "http://192.168.1.2:8000/stream"}).encode()
+                           "url": "http://192.0.2.1:8000/stream"}).encode()
         request = urllib.request.Request(self.base + "/api", data=body,
                                          headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(request, timeout=2) as response:
             result = json.loads(response.read())
         self.assertTrue(result["ok"])
         self.assertEqual(self.httpd.collections.list()["stations"][0]["url"],
-                         "http://192.168.1.2:8000/stream")
+                         "http://192.0.2.1:8000/stream")
 
     def test_radio_playback_is_separate_from_file_queue_and_pause_resume_works(self):
         player_id = STATUS["server"]["groups"][0]["clients"][0]["id"]
@@ -701,13 +701,13 @@ class MusicUiHttpTests(unittest.TestCase):
             with urllib.request.urlopen(req, timeout=2) as response:
                 return json.loads(response.read())
 
-        station = post({"op": "radio.add", "name": "测试电台", "url": "http://192.168.1.2:8000/stream"})["station"]
+        station = post({"op": "radio.add", "name": "测试电台", "url": "http://192.0.2.1:8000/stream"})["station"]
         started = post({"op": "radio.play", "id": station["id"], "players": [player_id]})
         self.assertTrue(started["ok"], started)
         self.assertEqual(started["queue"]["source_kind"], "radio")
         self.assertEqual(started["queue"]["tracks"], [])
         marker = "radio:" + station["id"]
-        self.assertIn((marker, "http://192.168.1.2:8000/stream"), self.httpd.library.started)
+        self.assertIn((marker, "http://192.0.2.1:8000/stream"), self.httpd.library.started)
         session_id = started["session_id"]
         session_row = next(row for row in post({"op": "sessions.list"})["sessions"]
                            if row["session_id"] == session_id)
@@ -1096,7 +1096,7 @@ class MusicUiHttpTests(unittest.TestCase):
         self.assertTrue(is_loopback_bind("::1"))
         self.assertTrue(is_loopback_bind("localhost"))
         self.assertFalse(is_loopback_bind("0.0.0.0"))
-        self.assertFalse(is_loopback_bind("192.168.1.20"))
+        self.assertFalse(is_loopback_bind("192.0.2.10"))
         self.assertFalse(Handler._local_hostname("0.0.0.0"))
         self.assertFalse(Handler._local_hostname("music-room.example"))
         self.assertTrue(Handler._local_hostname("localhost:8765"))
