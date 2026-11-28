@@ -5,6 +5,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "audio_player.h"
+#include "audio_mix.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -225,61 +226,95 @@ static void test_direct_device_yield_and_restore(void) {
 }
 
 int main(void) {
+    int16_t mixed[4];
+    const int16_t music_samples[] = {1000, -1000, 30000, -30000};
+    const int16_t voice_samples[] = {2000, -2000, 10000, -10000};
+    xr_audio_gain_ramp_t gain;
+    xr_audio_gain_ramp_init(&gain, 100);
+    xr_audio_mix_s16_ramped(mixed, music_samples, voice_samples, 4, 25, 0, &gain);
+    assert(mixed[0] == 2250 && mixed[1] == -2250);
+    assert(mixed[2] == 17500 && mixed[3] == -17500);
+    xr_audio_mix_s16_ramped(mixed, music_samples, voice_samples, 4, 100, 0, &gain);
+    assert(mixed[0] == 3000 && mixed[1] == -3000);
+    const int16_t hot_music[] = {32767, -32768};
+    const int16_t hot_voice[] = {20000, -20000};
+    xr_audio_mix_s16_ramped(mixed, hot_music, hot_voice, 2, 100, 0, &gain);
+    assert(mixed[0] == INT16_MAX && mixed[1] == INT16_MIN);
+
+    /* Duck/restore transitions reach target over 20ms without a sample jump. */
+    int16_t music_tone[480], silence[480] = {0}, ramped[480];
+    for (size_t i = 0; i < 480; ++i) music_tone[i] = 20000;
+    xr_audio_gain_ramp_init(&gain, 100);
+    xr_audio_mix_s16_ramped(ramped, music_tone, silence, 480, 25, 480, &gain);
+    assert(ramped[0] < 20000 && ramped[0] > 19000);
+    assert(ramped[479] == 5000 && gain.current_q16 == gain.target_q16);
+    for (size_t i = 1; i < 480; ++i)
+        assert(ramped[i - 1] >= ramped[i]);
+    xr_audio_mix_s16_ramped(ramped, music_tone, silence, 480, 100, 480, &gain);
+    assert(ramped[0] > 5000 && ramped[0] < 5100);
+    assert(ramped[479] == 20000 && gain.current_q16 == gain.target_q16);
+    for (size_t i = 1; i < 480; ++i)
+        assert(ramped[i - 1] <= ramped[i]);
+
     test_direct_device_yield_and_restore();
     memset(buf, 0, sizeof(buf));
 
     /* 无音乐会话时: voice_begin/end 都无动作(不改让位态) */
     xr_player_voice_begin();
-    assert(!xr_player_music_paused());
+    assert(!xr_player_music_ducked());
     xr_player_voice_end();
-    assert(!xr_player_music_paused());
+    assert(!xr_player_music_ducked());
 
     /* 音乐会话在位 */
     xr_player_set_music(1);
     assert(xr_player_music_active());
-    assert(!xr_player_music_paused());
+    assert(!xr_player_music_ducked());
 
     /* 音乐入环 */
     xr_player_push_music_pcm(buf, 1000);
-    assert(xr_player_queued_samples() == 1000);
+    assert(xr_player_music_queued_samples() == 1000);
 
-    /* 语音开始(回合级): 清掉环里音乐 -> 语音独占 */
+    /* 语音开始: 只 duck 音乐；两路都保留并可进入混音。 */
     xr_player_voice_begin();
-    assert(xr_player_music_paused());
+    assert(xr_player_music_ducked());
     assert(xr_player_queued_samples() == 0);
+    assert(xr_player_music_queued_samples() == 1000);
 
     /* 语音入环走通用 push_pcm, 不再自动让位(已验证) */
     xr_player_push_pcm(buf, 500);
     assert(xr_player_queued_samples() == 500);
 
-    /* 语音期间音乐被丢弃: 不入环、不破坏语音余量(防 FIFO 堆积/追播) */
+    /* 语音期间音乐仍然推进，不能停 Snapcast 时间线。 */
     xr_player_push_music_pcm(buf, 800);
     assert(xr_player_queued_samples() == 500);
+    assert(xr_player_music_queued_samples() == 1800);
 
-    /* 语音结束: 清语音尾巴, 音乐恢复(等重新预滚) */
+    /* 语音结束: 清未排空的语音尾巴，音乐队列不断档并恢复原增益。 */
     xr_player_voice_end();
-    assert(!xr_player_music_paused());
+    assert(!xr_player_music_ducked());
     assert(xr_player_queued_samples() == 0);
+    assert(xr_player_music_queued_samples() == 1800);
 
     /* 恢复后音乐重新入环 */
     xr_player_push_music_pcm(buf, 700);
-    assert(xr_player_queued_samples() == 700);
+    assert(xr_player_music_queued_samples() == 2500);
 
     /* voice_end 幂等: 未暂停时不清环 */
     xr_player_voice_end();
-    assert(xr_player_queued_samples() == 700);
+    assert(xr_player_music_queued_samples() == 2500);
 
     /* voice_begin 幂等 */
     xr_player_voice_begin();
-    assert(xr_player_music_paused());
-    assert(xr_player_queued_samples() == 0);
+    assert(xr_player_music_ducked());
+    assert(xr_player_music_queued_samples() == 2500);
     xr_player_voice_begin();
-    assert(xr_player_music_paused());
+    assert(xr_player_music_ducked());
 
     /* 结束音乐会话: 清让位态 */
     xr_player_set_music(0);
     assert(!xr_player_music_active());
-    assert(!xr_player_music_paused());
+    assert(!xr_player_music_ducked());
+    assert(xr_player_music_queued_samples() == 0);
 
     printf("yield state machine tests passed\n");
     return 0;

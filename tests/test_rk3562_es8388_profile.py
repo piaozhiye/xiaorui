@@ -1,12 +1,8 @@
-"""RK3562 + ES8388 (AIOT DEMO LP4X V10) 小瑞移植 profile 的约束测试。
+"""Guard the RK3562 AIOT DEMO ES8388 base profile and its optional VQE overlay.
 
-这块板与 ports/rk3562 的 RK809 + PDM + VQE 板完全不同:
-  - codec 是 ES8388(模拟麦/喇叭), 没有 PDM 阵列, 没有回采 ref
-  - 采集走前端 es8388 直采(48k/2ch -> FIR ÷3 -> 16k mono), 不装 VQE
-  - 前端设备名不能含 xr_vqe / rkaudio_vqe
-  - 开机自启脚本与旧板(RK809 控件)必须分开
-
-本文件守住这些约束, 防止把旧板配置误用到新板上。
+The direct-capture profile remains separate from the 2mic+2ref VQE profile.
+The latter routes microphones through SAI1 SDI0 and playback references through
+SDI1; it must not enable the unsupported software-DLP mode.
 """
 
 import importlib.util
@@ -272,6 +268,7 @@ def run_mixer_script(tmp_path, monkeypatch, card_override):
         "import json, os, sys\n"
         "with open(os.environ['MIXER_CALLS'], 'a') as f:\n"
         "    f.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "if len(sys.argv) > 2 and sys.argv[2] == 'cget': print(': values=on')\n"
     )
     amixer.chmod(0o755)
     awk = bindir / "awk"
@@ -300,34 +297,40 @@ def test_mixer_script_applies_measured_gains_and_switches(tmp_path, monkeypatch)
         ["-c", "7", "sset", "Main Mic", "on"],
         ["-c", "7", "sset", "Speaker", "on"],
         ["-c", "7", "sset", "spk switch", "on"],
+        ["-c", "7", "cget", "name=spk switch"],
         ["-c", "7", "cset", "name=Output 1 Playback Volume", "15"],
         ["-c", "7", "cset", "name=Output 2 Playback Volume", "15"],
         # 2026-11-20: DAC 数字音量是出声闸门(0=静音, 流卡 SETUP 不出声),
         # S42 早期 cset 失败被吞 -> 每次重启复发, 所以这里兜底设一遍。
         ["-c", "7", "cset", "name=PCM Volume", "184,184"],
-        ["-c", "7", "cset", "numid=62", "2CH: 1 Mic + 1 Loopback"],
+        ["-c", "7", "cset", "name=SAI1 SDI0 Loopback Src Select", "From SDO0"],
+        ["-c", "7", "cset", "name=SAI1 SDI0 Loopback Switch", "Disable"],
+        ["-c", "7", "cset", "name=SAI1 SDI1 Loopback Src Select", "From SDO0"],
+        ["-c", "7", "cset", "name=SAI1 SDI1 Loopback Switch", "Enable"],
     ]
 
 
-def test_mixer_script_sets_dlp_before_any_stream_opens(tmp_path, monkeypatch):
-    """DLP 模式必须在开流前设, 否则驱动的 dlp_mode_put 会返回 -EPERM。"""
+def test_mixer_script_routes_two_mics_and_two_sai_references(tmp_path, monkeypatch):
+    """4G VQE profile keeps SDI0 as MIC and routes SDO0 refs through SDI1."""
     result, calls = run_mixer_script(tmp_path, monkeypatch, "7")
     assert result.returncode == 0, result.stderr
-    dlp = [i for i, call in enumerate(calls) if call[:3] == ["-c", "7", "cset"] and call[3] == "numid=62"]
-    assert dlp, calls
-    # 它必须是最后一步(前端还没开流), 且不能夹在别的 amixer 调用中间
-    assert dlp[-1] == len(calls) - 1, calls
+    assert [c[3:] for c in calls if c[2:3] == ["cset"] and c[3].startswith("name=SAI1 ")] == [
+        ["name=SAI1 SDI0 Loopback Src Select", "From SDO0"],
+        ["name=SAI1 SDI0 Loopback Switch", "Disable"],
+        ["name=SAI1 SDI1 Loopback Src Select", "From SDO0"],
+        ["name=SAI1 SDI1 Loopback Switch", "Enable"],
+    ]
+    assert not any("numid=62" in c for c in calls)
 
 
 def test_mixer_script_resolves_numeric_card_when_not_overridden(tmp_path, monkeypatch):
     result, calls = run_mixer_script(tmp_path, monkeypatch, None)
     assert result.returncode == 0, result.stderr
     assert calls and all(call[1] == "7" for call in calls)
-    # DLP 数字回环现在是有意打开的(1 Mic + 1 Loopback), 但不能去动旧板的
-    # SAI 数字回环控件(numid 22/18 那种) —— 那是 VQE 4ch 用的。
-    dlp = [c for c in calls if "numid=62" in c]
-    assert len(dlp) == 1, calls
-    assert not any(c[3:5] == ["numid=22", "on"] or c[3:5] == ["numid=18", "on"] for c in calls)
+    # The product profile uses SAI1 SDI1 hardware loopback; software DLP is
+    # unsupported on this board and must remain untouched.
+    assert not any("numid=62" in c for c in calls)
+    assert any("name=SAI1 SDI1 Loopback Switch" in c and "Enable" in c for c in calls)
 
 
 
@@ -1162,14 +1165,14 @@ def test_vqe_config_is_1mic1ref():
     assert s["aibf"]["status"] == "disable"
 
 
-def test_vqe_alsa_config_uses_2ch_slave_and_1_ref():
-    """硬件只有 2ch: ch0=mic, ch1=DLP 播放参考; 不能再写 4ch。"""
+def test_vqe_alsa_config_uses_4ch_slave_and_2_refs():
+    """4G profile captures SDI0 dual MIC and SDI1 dual SAI loopback refs."""
     text = (ES8388 / "asound-vqe.conf").read_text()
     conf = strip_comments(text)
-    assert "channels 2" in conf
-    assert "ref_channels 1" in conf
+    assert "channels 4" in conf
+    assert "ref_channels 2" in conf
     assert "out_channels 1" in conf
-    assert "hw:rockchipes8388,0" in conf  # 用卡名而非数字卡号
+    assert "hw:CARD=rockchipes8388,DEV=0" in conf
     # 48k->16k 必须带限重采样(plug 自带的是线性插值, 会把高频折回语音带)
     assert 'converter "samplerate_best"' in conf
 
@@ -1182,8 +1185,8 @@ def test_vqe_frontend_env_uses_vqe_mic():
     assert "XR_ES8388_CHANNELS=2" not in env
 
 
-def test_vqe_patch_rejects_bad_package_config(tmp_path):
-    """坏插件包(aec 关闭/阵列麦数错)必须被拒, 不能部署出一个静默失效的 AEC。"""
+def test_vqe_patch_enables_two_mic_aec_bf_and_disables_duplicate_wake(tmp_path):
+    """Prepare the supplied package config for the selected 2mic+2ref profile."""
     import importlib.util
     import json as _json
 
@@ -1193,37 +1196,57 @@ def test_vqe_patch_rejects_bad_package_config(tmp_path):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
-    good = _json.loads((ES8388 / "config_aivqe_new1mic1ref.json").read_text())
+    good = {"skv_configs": {
+        "aec": {"status": "disable"},
+        "bf": {"status": "disable", "num_channel": 1,
+               "param_path": "/package/config/2mic_2ref/wopt_2mic_linear_test.bin"},
+        "anr": {"status": "disable"},
+        "wakeup": {"status": "enable"}, "unkws": {"status": "enable"},
+        "command": {"status": "enable"}, "doa": {"status": "enable"},
+    }}
     src = tmp_path / "good.json"
     src.write_text(_json.dumps(good))
     dst = tmp_path / "out.json"
     patched = mod.patch(str(src), str(dst))
     assert patched["skv_configs"]["wakeup"]["status"] == "disable"
     assert patched["skv_configs"]["aec"]["status"] == "enable"
+    assert "num_array_mic" not in patched["skv_configs"]["aec"]
+    assert patched["skv_configs"]["bf"]["num_channel"] == 2
+    assert patched["skv_configs"]["anr"]["status"] == "enable"
+    assert patched["skv_configs"]["bf"]["param_path"] == "/usr/share/rkaudio/wopt_2mic_linear_test.bin"
+    for name in ("wakeup", "unkws", "command", "doa"):
+        assert patched["skv_configs"][name]["status"] == "disable"
 
-    for bad_key, bad_val in (("aec", "disable"), ("bf", 4)):
-        broken = _json.loads((ES8388 / "config_aivqe_new1mic1ref.json").read_text())
-        if bad_key == "aec":
-            broken["skv_configs"]["aec"]["status"] = bad_val
-        else:
-            broken["skv_configs"]["bf"]["num_array_mic"] = bad_val
-        bad = tmp_path / f"bad-{bad_key}.json"
-        bad.write_text(_json.dumps(broken))
-        try:
-            mod.patch(str(bad), str(dst))
-        except ValueError as error:
-            assert "VQE 配置不合格" in str(error)
-        else:
-            raise AssertionError(f"坏配置({bad_key})竟然通过了")
+    broken = _json.loads(_json.dumps(good))
+    broken["skv_configs"]["bf"]["param_path"] = "/package/config/1mic/wopt_bad.bin"
+    bad = tmp_path / "bad.json"
+    bad.write_text(_json.dumps(broken))
+    try:
+        mod.patch(str(bad), str(dst))
+    except ValueError as error:
+        assert "2mic BF weight path" in str(error)
+    else:
+        raise AssertionError("unexpected BF weight path was accepted")
 
 
-def test_deploy_vqe_checks_new_log_and_pid_after_restart():
-    """部署后不能用旧日志/旧 PID 冒充本次 VQE 链就绪。"""
+def test_deploy_vqe_smoke_tests_alsa_and_checks_new_frontend_log():
+    """VQE deployment runs ALSA smoke capture and requires a fresh frontend log."""
     script = (ES8388 / "deploy-vqe.sh").read_text()
     assert "MARK=$(" in script and "wc -l < /data/xiaorui/frontend.log" in script
     assert "tail -n +$((MARK+1))" in script
-    assert "OLD_PID" in script and "NEW_PID" in script
-    assert '[ "$NEW_PID" = "$OLD_PID" ]' in script
+    assert "arecord -D xr_vqe_16k" in script
+    assert "VQE ALSA smoke test failed" in script
+    assert "Missing SAI1 mixer control" in script
+    assert "awk '/rockchipes8388/ {print $1; exit}'" in script
+    assert "cat /proc/asound/cards" in script
+
+
+def test_music_deploy_rejects_ffmpeg_without_pcm_wav_decoder():
+    """Do not install an ffmpeg that advertises WAV but cannot decode PCM WAV."""
+    deploy = (REPO / "ports/rk3562/deploy-snapcast-service.sh").read_text()
+    build = (REPO / "tools/build-ffmpeg-min.sh").read_text()
+    assert "-decoders 2>/dev/null | grep -q 'pcm_s16le'" in deploy
+    assert "pcm_s16le" in build.split("--enable-decoder=", 1)[1].splitlines()[0]
 
 
 # --------------------------------------------------------------------------

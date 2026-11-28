@@ -136,6 +136,9 @@ adb -s SERIAL shell 'sh /etc/init.d/S99xiaorui-ui status'
 UI 使用进程独有的 abstract socket，每 100ms 向 `XR_UI_SOCKET` 请求状态；
 只采纳该路径返回的完整合法状态包。服务端目录须限制为语音进程/UI 用户可访问。
 UI 不建立、删除或覆盖服务端 socket。
+追加的 TTS 音量消息沿用相同 v1 包结构：type 6 设置增益(通过 `volume` 字段)，
+type 7 查询、type 8 返回当前增益。旧 UI 会忽略这两个新状态消息，既有音乐/语音总音量
+控制和字幕状态包不变。
 
 前端只在最近 2 秒内有 UI 客户端问过状态时才把云端轮询降到 50ms，
 没有 UI 时回到 1000ms（UI 出现之前的行为），回答期不必 20Hz 空转。

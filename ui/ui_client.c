@@ -12,7 +12,9 @@
 static int descriptor = -1;
 static struct sockaddr_un server;
 static uint64_t last_query;
+static uint64_t last_tts_query;
 static uint64_t last_reply;
+static int tts_gain = -1;
 static bool received;
 static xr_ui_message_t status;
 
@@ -45,10 +47,15 @@ int xr_ui_client_open(const char *path) {
 }
 
 int xr_ui_client_command(enum xr_ui_message_type type, unsigned int value) {
-    if (descriptor < 0 || (type != XR_UI_QUERY && type != XR_UI_VOLUME &&
+    if (descriptor < 0 || (type != XR_UI_QUERY && type != XR_UI_TTS_QUERY &&
+                           type != XR_UI_VOLUME && type != XR_UI_TTS_GAIN &&
                            type != XR_UI_STOP && type != XR_UI_RESET))
         return -1;
     if (type == XR_UI_VOLUME && (value < 10 || value > 100))
+        return -1;
+    if (type == XR_UI_TTS_GAIN && (value < 1 || value > 100))
+        return -1;
+    if (type == XR_UI_TTS_QUERY && value != 0)
         return -1;
     xr_ui_message_t message = {.magic = XR_UI_MAGIC, .version = XR_UI_VERSION,
                                .type = (uint32_t)type, .volume = value};
@@ -68,6 +75,13 @@ void xr_ui_client_tick(uint64_t now_ms) {
             errno != ENOENT && errno != ECONNREFUSED && errno != EAGAIN)
             fprintf(stderr, "[ui] status query failed: %s\n", strerror(errno));
     }
+    if (now_ms - last_tts_query >= 1000)
+    {
+        last_tts_query = now_ms;
+        if (xr_ui_client_command(XR_UI_TTS_QUERY, 0) != 0 &&
+            errno != ENOENT && errno != ECONNREFUSED && errno != EAGAIN)
+            fprintf(stderr, "[ui] tts gain query failed: %s\n", strerror(errno));
+    }
     for (int index = 0; index < 8; index++)
     {
         xr_ui_message_t message;
@@ -78,6 +92,15 @@ void xr_ui_client_tick(uint64_t now_ms) {
         if (size < 0)
             break;
         if (peer.sun_family == AF_UNIX && !memcmp(peer.sun_path, server.sun_path,
+                                                sizeof(server.sun_path)) &&
+            size == (ssize_t)sizeof(message) && message.magic == XR_UI_MAGIC &&
+            message.version == XR_UI_VERSION && message.type == XR_UI_TTS_STATUS &&
+            message.volume >= 10 && message.volume <= 100)
+        {
+            tts_gain = (int)message.volume;
+            last_reply = now_ms;
+        }
+        else if (peer.sun_family == AF_UNIX && !memcmp(peer.sun_path, server.sun_path,
                                                 sizeof(server.sun_path)) &&
             xr_ui_message_valid(&message, (unsigned int)size))
         {
@@ -96,13 +119,17 @@ const xr_ui_message_t *xr_ui_client_status(void) {
     return &status;
 }
 
+int xr_ui_client_tts_gain(void) { return tts_gain; }
+
 void xr_ui_client_close(void) {
     if (descriptor >= 0)
         close(descriptor);
     descriptor = -1;
     received = false;
     last_query = 0;
+    last_tts_query = 0;
     last_reply = 0;
+    tts_gain = -1;
     memset(&server, 0, sizeof(server));
     memset(&status, 0, sizeof(status));
 }

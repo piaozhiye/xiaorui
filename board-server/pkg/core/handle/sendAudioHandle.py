@@ -351,7 +351,13 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None):
         # 保存当前的 sentence_id，用于后续判断是否是当前轮次
         current_sentence_id = conn.sentence_id
         # 播放提示音
-        tts_notify = conn.config.get("enable_stop_tts_notify", False)
+        silent_music_turn = (
+            getattr(conn, "_silent_music_turn_sid", None) == current_sentence_id
+        )
+        tts_notify = (
+            conn.config.get("enable_stop_tts_notify", False)
+            and not silent_music_turn
+        )
         if tts_notify:
             stop_tts_notify_voice = conn.config.get(
                 "stop_tts_notify_voice", "config/assets/tts_notify.mp3"
@@ -373,6 +379,8 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None):
     # 发送消息到客户端
     await conn.websocket.send(json.dumps(message))
     if state == "stop":
+        if getattr(conn, "_silent_music_turn_sid", None) == current_sentence_id:
+            conn._silent_music_turn_sid = None
         from core.ha_audit import completed
         completed(conn, current_sentence_id)
         owner = getattr(conn, "session_coordinator", None)

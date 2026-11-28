@@ -4,7 +4,7 @@
 set -eu
 
 usage() {
-    echo "usage: $0 <adb-serial> <client|server-client> <server-host> <server-bind-or-dash> [snapserver-bundle-root] [music-root] [local-ffmpeg]" >&2
+    echo "usage: XR_SNAPCLIENT_BINARY=<aarch64-snapclient> $0 <adb-serial> <client|server-client> <server-host> <server-bind-or-dash> [snapserver-bundle-root] [music-root] [local-ffmpeg]" >&2
     echo "server bundle root must contain snapserver and lib/ (Snapcast v0.35.0 aarch64)" >&2
     echo "Use server-host=auto on clients for mDNS discovery of the unique LAN music server." >&2
     exit 2
@@ -18,6 +18,14 @@ SERVER_BIND=$4
 BUNDLE=${5:-}
 MUSIC_ROOT=${6:-}
 LOCAL_FFMPEG=${7:-}
+LOCAL_FFPROBE=${XR_FFPROBE_BIN:-}
+LOCAL_SNAPCLIENT=${XR_SNAPCLIENT_BINARY:-}
+if [ -z "$LOCAL_FFPROBE" ]; then
+    case "$LOCAL_FFMPEG" in
+        */*) LOCAL_FFPROBE=${LOCAL_FFMPEG%/*}/ffprobe ;;
+        *) LOCAL_FFPROBE=ffprobe ;;
+    esac
+fi
 case "$ROLE" in client|server-client) ;; *) usage ;; esac
 case "$SERVER_HOST" in *[!A-Za-z0-9._-]*|'') echo "invalid server host: $SERVER_HOST" >&2; exit 2;; esac
 case "$SERVER_BIND" in -) ;; *[!0-9.]*|'') echo "invalid bind IPv4: $SERVER_BIND" >&2; exit 2;; esac
@@ -39,6 +47,15 @@ REMOTE=/data/xiaorui/snapcast
 DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+
+if [ -n "$LOCAL_SNAPCLIENT" ]; then
+    [ -x "$LOCAL_SNAPCLIENT" ] || { echo "Snapclient is not executable: $LOCAL_SNAPCLIENT" >&2; exit 2; }
+    MACHINE=$(readelf -h "$LOCAL_SNAPCLIENT" 2>/dev/null | sed -n 's/.*Machine:[[:space:]]*//p')
+    case "$MACHINE" in *AArch64*) ;; *) echo "Snapclient is not AArch64: $MACHINE" >&2; exit 2;; esac
+elif ! adb -s "$SERIAL" shell "test -x '$REMOTE/snapclient'"; then
+    echo "Snapclient binary is missing; set XR_SNAPCLIENT_BINARY to an AArch64 executable" >&2
+    exit 2
+fi
 
 cat >"$TMP/service.env" <<EOF_CFG
 XR_SNAPCAST_ROLE=$ROLE
@@ -90,6 +107,10 @@ echo "== staging Snapcast service on $SERIAL (role=$ROLE, server=$SERVER_HOST:17
 adb -s "$SERIAL" shell "mkdir -p '$REMOTE' '$REMOTE/.install' '$REMOTE/log' '$REMOTE/run'"
 adb -s "$SERIAL" push "$DIR/snapcast-service.sh" "$REMOTE/.install/service.sh.new" >/dev/null
 adb -s "$SERIAL" shell "chmod 755 '$REMOTE/.install/service.sh.new' && mv '$REMOTE/.install/service.sh.new' '$REMOTE/service.sh'"
+if [ -n "$LOCAL_SNAPCLIENT" ]; then
+    adb -s "$SERIAL" push "$LOCAL_SNAPCLIENT" "$REMOTE/.install/snapclient.new" >/dev/null
+    adb -s "$SERIAL" shell "chmod 755 '$REMOTE/.install/snapclient.new' && mv '$REMOTE/.install/snapclient.new' '$REMOTE/snapclient'"
+fi
 adb -s "$SERIAL" push "$DIR/init-S98zzxiaorui-snapcast" "$REMOTE/.install/init-S98zzxiaorui-snapcast.new" >/dev/null
 adb -s "$SERIAL" shell "chmod 755 '$REMOTE/.install/init-S98zzxiaorui-snapcast.new' && mv '$REMOTE/.install/init-S98zzxiaorui-snapcast.new' '$REMOTE/init-S98zzxiaorui-snapcast'"
 adb -s "$SERIAL" push "$DIR/../../tools/snapcast-fifo-channel.py" "$REMOTE/.install/snapcast-fifo-product.py.new" >/dev/null
@@ -115,7 +136,7 @@ if [ "$ROLE" = server-client ]; then
         adb -s "$SERIAL" shell "chmod 755 '$REMOTE/.install/server-v0.35.0/snapserver' && mv '$REMOTE/.install/server-v0.35.0' '$REMOTE/server-v0.35.0'"
     fi
     adb -s "$SERIAL" shell "mkdir -p '$REMOTE/music-app' '$REMOTE/ffmpeg-local' '$REMOTE/music-state' /data/xiaorui/music-library"
-    for file in server.py music_library.py music_session.py snapcast_control.py pairing_auth.py music_ui.html music_manifest.webmanifest music_service_worker.js music_icon.svg music_icon_192.png music_icon_512.png; do
+    for file in server.py music_library.py music_collections.py music_session.py snapcast_control.py pairing_auth.py voice_volume.py music_ui.html music_manifest.webmanifest music_service_worker.js music_icon.svg music_icon_192.png music_icon_512.png; do
         adb -s "$SERIAL" push "$DIR/../../tools/snapcast_center/$file" "$REMOTE/.install/$file.new" >/dev/null
         adb -s "$SERIAL" shell "chmod 644 '$REMOTE/.install/$file.new' && mv '$REMOTE/.install/$file.new' '$REMOTE/music-app/$file'"
     done
@@ -125,7 +146,21 @@ if [ "$ROLE" = server-client ]; then
         adb -s "$SERIAL" shell "chmod 644 '$REMOTE/.install/pyqrcode/$file.new' && mv '$REMOTE/.install/pyqrcode/$file.new' '$REMOTE/music-app/pyqrcode/$file'"
     done
     adb -s "$SERIAL" push "$LOCAL_FFMPEG" "$REMOTE/.install/ffmpeg.new" >/dev/null
-    adb -s "$SERIAL" shell "chmod 755 '$REMOTE/.install/ffmpeg.new' && mv '$REMOTE/.install/ffmpeg.new' '$REMOTE/ffmpeg-local/ffmpeg'"
+    adb -s "$SERIAL" shell "chmod 755 '$REMOTE/.install/ffmpeg.new'"
+    # Check the target binary itself before installing it. The local music
+    # library can contain PCM WAV files; WAV demuxing without pcm_s16le
+    # decoding only fails later when that track is selected.
+    if ! adb -s "$SERIAL" shell "'$REMOTE/.install/ffmpeg.new' -decoders 2>/dev/null | grep -q 'pcm_s16le'"; then
+        echo "local music ffmpeg lacks the pcm_s16le decoder required for PCM WAV tracks" >&2
+        exit 2
+    fi
+    adb -s "$SERIAL" shell "mv '$REMOTE/.install/ffmpeg.new' '$REMOTE/ffmpeg-local/ffmpeg'"
+    if [ -x "$LOCAL_FFPROBE" ]; then
+        adb -s "$SERIAL" push "$LOCAL_FFPROBE" "$REMOTE/.install/ffprobe.new" >/dev/null
+        adb -s "$SERIAL" shell "chmod 755 '$REMOTE/.install/ffprobe.new' && mv '$REMOTE/.install/ffprobe.new' '$REMOTE/ffmpeg-local/ffprobe'"
+    else
+        echo "warning: ffprobe not found at $LOCAL_FFPROBE; artist/album tags, duration metadata, and embedded covers may be unavailable"
+    fi
     if ! adb -s "$SERIAL" shell "test -f /data/xiaorui/music-library/.xr-library-installed"; then
         tar -C "$MUSIC_ROOT" -cf - . | adb -s "$SERIAL" shell "tar -xf - -C /data/xiaorui/music-library"
         adb -s "$SERIAL" shell "touch /data/xiaorui/music-library/.xr-library-installed"

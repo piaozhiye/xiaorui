@@ -25,7 +25,7 @@ def interface(tmp_path):
     api.xr_ui_server_open.restype = ctypes.c_void_p
     api.xr_ui_server_close.argtypes = [ctypes.c_void_p]
     api.xr_ui_server_turn_begin.argtypes = [ctypes.c_void_p]
-    api.xr_ui_server_state.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint]
+    api.xr_ui_server_state.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint, ctypes.c_uint]
     api.xr_ui_server_text.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_char_p]
     api.xr_ui_server_poll.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint)]
     api.xr_ui_server_client_active.argtypes = [ctypes.c_void_p, ctypes.c_uint]
@@ -53,7 +53,7 @@ def test_status_controls_and_captions(interface, tmp_path):
             # 再看状态 —— 真实流程也是 UI 先连上, 才有后续问答。
             assert send(query) == 0
             peer.recv(8192)
-            interface.xr_ui_server_state(server, 3, 80)
+            interface.xr_ui_server_state(server, 3, 80, 40)
             interface.xr_ui_server_text(server, True, "现在几点了？".encode())
             for sentence in ["现在是", "上午十一点。"]:
                 interface.xr_ui_server_text(server, False, sentence.encode())
@@ -66,6 +66,12 @@ def test_status_controls_and_captions(interface, tmp_path):
             assert send(Message(magic=0x58525549, version=1, type=3, volume=70)) == 3
             assert volume.value == 70
             assert send(Message(magic=0x58525549, version=1, type=3, volume=101)) == 0
+            assert send(Message(magic=0x58525549, version=1, type=6, volume=32)) == 6
+            assert volume.value == 32
+            assert send(Message(magic=0x58525549, version=1, type=7)) == 0
+            status = Message.from_buffer_copy(peer.recv(8192))
+            assert status.type == 8 and status.volume == 40
+            assert send(Message(magic=0x58525549, version=1, type=6, volume=0)) == 0
             assert send(Message(magic=0x58525549, version=1, type=4)) == 4
             assert send(Message(magic=0, version=1, type=4)) == 0
             peer.sendto(bytes(query) + b"oversized", str(path))

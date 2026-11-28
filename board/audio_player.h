@@ -33,25 +33,23 @@ void xr_player_finish(void);
 int xr_player_finish_with_poll(int (*poll_callback)(void *), void *context);
 void xr_player_drop(void);
 void xr_player_push_pcm(const int16_t *pcm, size_t samples);
-/* 音乐 PCM 入环(FIFO 线程专用)。语音期间丢弃, 不与语音抢环、不让 FIFO 堆积。 */
+/* Snapcast PCM 与语音分开排队，由同一播放线程按 ALSA 时钟混合。 */
 void xr_player_push_music_pcm(const int16_t *pcm, size_t samples);
-/* FIFO 路径的音乐让位(整轮): 语音开始/结束由前端显式调用。
- *  - begin: 清音乐余量、置 paused(音乐生产者丢弃), 语音独占环(不套音乐预滚)
- *  - end  : 清语音尾巴、清 paused、置 music_prerolled=0 -> 重新预滚后再接回
- * 幂等; 没音乐会话时无动作。由前端在**第一句 TTS 音频到达**时 begin、
- * **离开 RESPOND** 时 end(思考期不暂停音乐)。 */
+size_t xr_player_music_queued_samples(void);
+/* KWS/语音回合期间只压低本机音乐，不停 Snapclient、不改变 Snapcast 组状态。
+ * voice_begin 在声学唤醒/TTS 开始时调用，voice_end 在回合结束时恢复音乐增益。 */
 void xr_player_voice_begin(void);
 void xr_player_voice_end(void);
-int  xr_player_music_paused(void);
+int  xr_player_music_ducked(void);
+int  xr_player_music_duck_percent(void);
 int xr_player_push_opus(const unsigned char *packet, size_t size);
 size_t xr_player_queued_samples(void);
-/* 音乐会话在位开关(Snapcast FIFO -> 播放环 用)。
+/* 音乐会话在位开关(Snapcast FIFO -> 独立音乐环 -> 同步混音 用)。
  *
  * 置 1 后:
  *   - xr_player_start() 不清环、不重开声卡(音乐还在环里, 线程还在跑)
  *   - xr_player_finish() 只表示"这一句语音说完了", 不置 eof、不 join(否则把音乐一起收掉)
- *   - xr_player_drop()   只清环里的余量(音乐最多断 ~100ms, 随后由音乐生产者补上),
- *                        线程与声卡保持
+ *   - xr_player_drop()   只清语音环余量，音乐环/播放线程/声卡保持
  * 置 0 后恢复原来的行为。线程安全。
  */
 void xr_player_set_music(int on);
@@ -66,4 +64,6 @@ void xr_player_release_device(void);
 /* 软件音量(1-100; -1/0=直通)。线程安全, 下一批 writei(≤120ms)生效。 */
 void xr_player_set_volume(int pct);
 int xr_player_volume(void);
+/* 独立语音通道增益(1-100%), 不改变 Snapcast 音乐电平或总音量设置。 */
+void xr_player_set_voice_gain(int pct);
 #endif

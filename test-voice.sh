@@ -36,6 +36,12 @@ CC="${HOST_CC:-cc}"
     "$DIR/board/xr_vad.c" "$DIR/board/xr_vad_test.c" -lm -o "$TEST_DIR/vad"
 "$TEST_DIR/vad"
 
+# 外部 FIFO 麦克风短暂断开时补静音并等待写端恢复, 不重启整个前端/音乐播放栈.
+"$CC" -std=c11 -O2 -Wall -Wextra -Werror -I"$DIR/board" \
+    "$DIR/board/xr_fifo_pcm.c" "$DIR/board/xr_fifo_pcm_test.c" \
+    -pthread -o "$TEST_DIR/fifo_pcm"
+"$TEST_DIR/fifo_pcm"
+
 # 瑞芯微 VQE 内置唤醒: 状态文件解析 + 唤醒边沿检测
 "$CC" -std=c11 -O2 -Wall -Wextra -Werror -I"$DIR/board" \
     "$DIR/board/xr_vqe_wake.c" "$DIR/board/xr_vqe_wake_test.c" \

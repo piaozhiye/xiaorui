@@ -10,7 +10,7 @@ int main(int argc, char **argv) {
                           "XR_CLOUD_PING_FAILURES", "XR_ACCEPTED_SILENCE_S",
                           "XR_RESPONSE_TIMEOUT_S", "XR_VAD_PREROLL", "XR_VAD_TRIGGER_DB",
                           "XR_VAD_SUSTAIN_DB", "XR_FOLLOW_WINDOW_S", "XR_ACK_COOL_MS",
-                          "XR_FINISH_COOL_MS", "XR_ABANDON_COOL_MS", "XR_ECHO_GUARD_S", "XR_ECHO_MIN_CMD_CHARS", "XR_VOLUME_CONTROL"};
+                          "XR_FINISH_COOL_MS", "XR_ABANDON_COOL_MS", "XR_ECHO_GUARD_S", "XR_ECHO_MIN_CMD_CHARS", "XR_VOLUME_CONTROL", "XR_TTS_GAIN_PERCENT"};
     for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
         assert(unsetenv(names[i]) == 0);
     assert(unsetenv("XR_CLOUD_ASR") == 0);
@@ -55,6 +55,7 @@ int main(int argc, char **argv) {
         assert(setenv(names[13], "6", 1) == 0);
         assert(setenv(names[14], "2", 1) == 0);
         assert(setenv(names[15], "0", 1) == 0);
+        assert(setenv(names[16], "40", 1) == 0);
     } else if (!strcmp(argv[1], "invalid")) {
         assert(setenv("XR_CLOUD_ASR", "2", 1) == 0);
         assert(setenv(names[0], "1200junk", 1) == 0);
@@ -95,6 +96,7 @@ int main(int argc, char **argv) {
     assert(c->echo_guard_s == (custom ? 6 : 4));
     assert(c->echo_min_cmd_chars == (custom ? 2 : 3));
     assert(c->volume_control == (custom ? 0 : 1));
+    assert(c->tts_gain_percent == (custom ? 40 : 100));
     /* 环境改变不会在运行中改变已加载的策略。 */
     assert(setenv(names[0], "9000", 1) == 0);
     assert(xr_runtime_config() == c && c->cloud_conn_ms == (custom ? 1200 : 5000));

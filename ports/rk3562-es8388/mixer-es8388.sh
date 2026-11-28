@@ -4,8 +4,8 @@
 # 本板与旧 RK809 板、与旧 RK3576 ES8388 板的三点不同:
 #   1. amixer 只认 **数字卡号**(amixer -c rockchipes8388 会报 Invalid card number),
 #      所以卡号在运行时从 /proc/asound/cards 解析, 不写死。
-#   2. 不用 SAI 数字回环(numid 22/18): 那是 VQE 4ch(2mic+2ref) 用的,
-#      本板是 2ch 直采, 开了反而会串扰。
+#   2. VQE 使用 SAI1 硬件回采: SDI0=两路麦克风, SDI1=SDO0 两路参考。
+#      不设置 Software Digital Loopback Mode(numid=62), 也不启用 SDI0 loopback。
 #   3. 没有 RK809 的 "ADC Capture Volume"/"Playback Path" 之类控件。
 #
 # 采集增益: Left/Right Channel Capture Volume = 8 (0..8 档, 每档 3dB -> +24dB)。
@@ -28,12 +28,12 @@ fi
 #   整数型控件: cset name="Left Channel Capture Volume" 8   (name= 必须带)
 #   开关型控件: sset "Speaker" on                              (用 sset, 不能用 name=)
 #
-# DLP(数字回环)模式: 采集变 2ch = [麦克风, 播放数据]。
-#   必须在**任何 PCM 打开之前**设置 —— 驱动 dlp_mode_put 在有流运行时会返回
-#   -EPERM("Should set this mode before pcm open")。本脚本在开机自启里跑在
-#   前端启动之前, 正好满足。
-#   依赖设备树给 SAI1 加 rockchip,digital-loopback(见 README 的"设备树/DLP"一节)。
 set_control() {  # set_control <名称> <值>  (整数型控件)
+    amixer -c "$CARD" cset name="$1" "$2" >/dev/null 2>&1 \
+        || { echo "mixer 设置失败: $1 = $2" >&2; exit 1; }
+}
+
+set_enum() {      # set_enum <名称> <选项标签>
     amixer -c "$CARD" cset name="$1" "$2" >/dev/null 2>&1 \
         || { echo "mixer 设置失败: $1 = $2" >&2; exit 1; }
 }
@@ -41,17 +41,6 @@ set_control() {  # set_control <名称> <值>  (整数型控件)
 set_switch() {   # set_switch <名称> <on|off>  (开关型控件)
     amixer -c "$CARD" sset "$1" "$2" >/dev/null 2>&1 \
         || { echo "mixer 开关设置失败: $1 = $2" >&2; exit 1; }
-}
-
-# DLP 模式: "2CH: 1 Mic + 1 Loopback" -> ch0=麦克风, ch1=播放数据(数字参考)。
-# 控件名带 DAI 前缀: "SAI1 Software Digital Loopback Mode"。
-# 没这个控件(设备树没开 DLP)就跳过, 不影响纯麦克风链路。
-set_dlp_mode() {
-    if amixer -c "$CARD" cset numid=62 "2CH: 1 Mic + 1 Loopback" >/dev/null 2>&1; then
-        echo "DLP: 采集 = 1 Mic(ch0) + 1 Loopback(ch1)"
-    else
-        echo "DLP: 控件不可用(设备树未开 rockchip,digital-loopback?), 采集按纯麦克风"
-    fi
 }
 
 # 采集: 板载麦 PGA
@@ -62,6 +51,27 @@ set_switch "Main Mic" on
 # 播放: 板载喇叭
 set_switch "Speaker" on
 set_switch "spk switch" on
+# AIOT DEMO LP4X V10 的外置功放由 GPIO1_C1/GPIO49 高电平使能。当前 6.1
+# DTB 若漏了 spk-con-gpio，内核控件写入会成功但读回仍为 off，GPIO 也不会被驱动。
+# 优先使用内核控件；读回未开时用板级 GPIO 兜底，避免“脚本成功、功放仍关”的假象。
+if ! amixer -c "$CARD" cget name="spk switch" 2>/dev/null | grep -q ': values=on'; then
+    GPIO_ROOT=${XR_GPIO_SYSFS_ROOT:-/sys/class/gpio}
+    if [ -d "$GPIO_ROOT" ] && [ -w "$GPIO_ROOT/export" ]; then
+        if [ ! -d "$GPIO_ROOT/gpio49" ]; then
+            echo 49 > "$GPIO_ROOT/export" 2>/dev/null || true
+        fi
+        if [ -d "$GPIO_ROOT/gpio49" ] && [ -w "$GPIO_ROOT/gpio49/direction" ] \
+            && [ -w "$GPIO_ROOT/gpio49/value" ]; then
+            echo out > "$GPIO_ROOT/gpio49/direction"
+            echo 1 > "$GPIO_ROOT/gpio49/value"
+            echo "功放备用使能: GPIO1_C1/GPIO49=high (DTB 未提供有效 spk-con 控件)"
+        else
+            echo "警告: spk switch 未读回 on，且 GPIO49 不能导出；请在 DTS 配置 spk-con-gpio" >&2
+        fi
+    else
+        echo "警告: spk switch 未读回 on，GPIO sysfs 不可用；请在 DTS 配置 spk-con-gpio" >&2
+    fi
+fi
 set_control "Output 1 Playback Volume" 15
 set_control "Output 2 Playback Volume" 15
 # ★ DAC 数字音量 + bit7 解 mute(2026-11-20 实机事故):
@@ -74,7 +84,12 @@ set_control "Output 2 Playback Volume" 15
 #   所以这里(S98 跑, 晚于 S42 且前端启动之前)再设一遍, 幂等且失败即报错。
 set_control "PCM Volume" 184,184
 
-# 数字回环参考: 必须在开流之前设置(驱动不允许运行中改)
-set_dlp_mode
+# 4-channel capture routing: SDI0 carries the two mic lanes; SDI1 carries
+# the two SAI loopback reference lanes sourced from SDO0.
+set_enum "SAI1 SDI0 Loopback Src Select" "From SDO0"
+set_enum "SAI1 SDI0 Loopback Switch" "Disable"
+set_enum "SAI1 SDI1 Loopback Src Select" "From SDO0"
+set_enum "SAI1 SDI1 Loopback Switch" "Enable"
 
-echo "ES8388 mixer 就绪 (card$CARD): 麦 PGA=8(+24dB), 喇叭开, 输出=15/33(-21dB), DAC=184(解mute)"
+echo "ES8388 mixer 就绪 (card$CARD): SDI0=2 MIC, SDI1=2 SDO0 ref; 不使用软件 DLP"
+echo "麦 PGA=8(+24dB), 喇叭开, 输出=15/33(-21dB), DAC=184(解mute)"

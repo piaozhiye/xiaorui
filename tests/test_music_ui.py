@@ -9,6 +9,7 @@ import tempfile
 import subprocess
 import unittest
 import urllib.request
+import urllib.error
 from types import SimpleNamespace
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -19,8 +20,11 @@ sys.path.insert(0, str(ROOT / "tools" / "snapcast_center"))
 from music_session import MusicSession  # noqa: E402
 from music_library import MusicLibraryError  # noqa: E402
 from server import (Handler, _rotate_pairing_from_screen, _sync_pairing_display,
-                    is_loopback_bind, normalize_host)  # noqa: E402
+                    create_loopback_voice_server, is_loopback_bind,
+                    normalize_host)  # noqa: E402
+import server as music_server_module  # noqa: E402
 from pairing_auth import PairingAuth  # noqa: E402
+from music_collections import MusicCollections  # noqa: E402
 from snapcast_control import SnapcastClient  # noqa: E402
 from test_snapcast_control import FakeTransport, STATUS  # noqa: E402
 
@@ -54,6 +58,8 @@ class FakeLibrary:
         self.resumed = []
         self.ended = []
         self.position_seconds = 0.55
+        self.uploaded = []
+        self.deleted = []
 
     def list_tracks(self):
         return [self.track]
@@ -68,6 +74,10 @@ class FakeLibrary:
             raise MusicLibraryError("unknown track")
         self.started.append(track_id)
         return self.track
+
+    def start_radio(self, track_id, url, source=None):
+        self.started.append((track_id, url))
+        return source or f"pipe:///tmp/{track_id.replace(':', '-')}.pcm?name=radio-test"
 
     def source_uri(self, track_id):
         return f"pipe:///tmp/{track_id}.pcm?name=music-{track_id}"
@@ -91,6 +101,24 @@ class FakeLibrary:
     def duration(self, track_id):
         return self.get_track(track_id)[0]["duration_seconds"]
 
+    def import_upload(self, filename, chunks, size_bytes):
+        payload = b"".join(chunks)
+        self.uploaded.append((filename, payload, size_bytes))
+        track = {"id": "b" * 20, "title": filename, "size_bytes": size_bytes,
+                 "duration_seconds": 2.0, "relative_path": "uploads/opaque.wav"}
+        self.track = track
+        return track
+
+    def upload_usage(self):
+        return {"used_bytes": sum(row[2] for row in self.uploaded),
+                "max_bytes": 512 * 1024 * 1024, "available_bytes": 500 * 1024 * 1024}
+
+    def delete_upload(self, track_id):
+        if track_id != self.track["id"] or not self.track["relative_path"].startswith("uploads/"):
+            raise MusicLibraryError("只能删除手机上传的曲目")
+        self.deleted.append(track_id)
+        return self.upload_usage()
+
 
 class MusicUiHttpTests(unittest.TestCase):
     def setUp(self):
@@ -102,10 +130,11 @@ class MusicUiHttpTests(unittest.TestCase):
         self.httpd.session = MusicSession(SnapcastClient(transport=self.transport),
                                          state_file=self.session_state_file)
         self.httpd.library = FakeLibrary()
-        self.httpd.music_max_start_volume = 35
+        self.httpd.voice_ui_socket = "/tmp/fake-voice.sock"
         self.httpd.music_queue = Handler._empty_queue()
         self.httpd.music_queue_lock = threading.RLock()
         self.httpd.queue_state_file = Path(self.tempdir.name) / "queue.json"
+        self.httpd.collections = MusicCollections(Path(self.tempdir.name) / "collections.json")
         self.httpd.music_active_file = Path(self.tempdir.name) / "music.active"
         self.httpd.pairing_auth = None
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
@@ -123,6 +152,12 @@ class MusicUiHttpTests(unittest.TestCase):
         self.assertIn("小瑞音乐", page)
         self.assertIn('rel="manifest" href="/manifest.webmanifest"', page)
         self.assertIn('id="install-panel"', page)
+        self.assertIn('role="tablist" aria-label="主导航"', page)
+        for page_id in ("play", "library", "devices", "radio", "settings"):
+            self.assertIn(f'id="tab-{page_id}"', page)
+            self.assertIn(f'id="page-{page_id}"', page)
+        self.assertIn("localStorage.setItem('xiaorui-music-page',page)", page)
+        self.assertIn("switchPage('play')", page)
         self.assertIn('id="install-app" class="primary">添加到手机主屏幕', page)
         self.assertIn("Safari：点底部", page)
         self.assertIn('id="pairing-qr"', page)
@@ -132,6 +167,13 @@ class MusicUiHttpTests(unittest.TestCase):
         self.assertNotIn('id="queue-pause"', page)
         self.assertNotIn('id="queue-resume"', page)
         self.assertIn('id="select-all-tracks"', page)
+        self.assertIn('id="library-pagination"', page)
+        self.assertIn('id="library-prev"', page)
+        self.assertIn('id="library-next"', page)
+        self.assertIn("const LIBRARY_PAGE_SIZE=20,MAX_QUEUE_TRACKS=20", page)
+        self.assertIn("function renderLibraryPage()", page)
+        self.assertIn("队列最多选择 ${MAX_QUEUE_TRACKS} 首", page)
+        self.assertIn("全选本页", page)
         self.assertIn("播放勾选队列", page)
         self.assertIn('id="select-all-players"', page)
         self.assertIn('id="clear-player-selection"', page)
@@ -147,12 +189,100 @@ class MusicUiHttpTests(unittest.TestCase):
         self.assertIn('id="connection-banner"', page)
         self.assertIn("navigator.mediaSession", page)
         self.assertIn("正在播放", page)
-        self.assertIn("安全音量上限", page)
+        self.assertIn("const visible=sessions.filter(s=>['playing','paused','starting','unknown'].includes(s.state)", page)
+        self.assertIn("async function cleanupOrphanSessions(sessions,queue)", page)
+        self.assertIn("session.state!=='unknown'||(session.players||[]).length", page)
+        self.assertNotIn("清理旧会话", page)
+        self.assertIn("启播时不会自动限幅或修改音量", page)
+        self.assertNotIn("安全音量上限", page)
+        self.assertNotIn("volume-dialog", page)
+        self.assertIn('id="upload-audio"', page)
+        self.assertIn("/api/upload?filename=", page)
+        self.assertIn("上传并播放", page)
+        self.assertIn("删除上传", page)
+        self.assertIn("512 MB", page)
+        self.assertIn("library.delete_upload", page)
+        self.assertIn('id="voice-volume"', page)
+        self.assertIn("本机“我在”、回答和提示音", page)
+        self.assertIn("统一音乐音量", page)
+        self.assertEqual(page.count('class="volume-control"'), 2)
+        self.assertIn("grid-template-columns:7em minmax(0,1fr) 3.5em", page)
+        self.assertIn('for="bulk-volume"', page)
+        self.assertIn('for="voice-volume"', page)
+        self.assertIn('id="radio-presets"', page)
+        self.assertIn("const CNR_PRESETS=", page)
+        self.assertIn('id="radio-search"', page)
+        self.assertIn('id="radio-now"', page)
+        self.assertIn('id="radio-select-players"', page)
+        self.assertIn("async function playRadioStation(station)", page)
+        self.assertIn("添加并播放", page)
+        self.assertIn("已收藏", page)
+        self.assertIn("播放控制和音量在“播放”和“设备”页面统一管理", page)
+        for station in ("中国之声", "经济之声", "音乐之声", "经典音乐广播", "文艺之声"):
+            self.assertIn(station, page)
+        self.assertIn("添加自定义电台", page)
+        self.assertIn("text.textContent='音乐音量'", page)
+
+    def test_voice_gain_endpoint_is_separate_and_validated(self):
+        original_get, original_set = music_server_module.get_voice_gain, music_server_module.set_voice_gain
+        self.addCleanup(setattr, music_server_module, "get_voice_gain", original_get)
+        self.addCleanup(setattr, music_server_module, "set_voice_gain", original_set)
+        saved = {"gain": 40}
+        music_server_module.get_voice_gain = lambda path: saved["gain"]
+
+        def set_gain(path, gain):
+            if isinstance(gain, bool) or not isinstance(gain, int) or not 10 <= gain <= 100:
+                raise music_server_module.VoiceVolumeError("语音音量必须是 10 到 100 的整数")
+            saved["gain"] = gain
+            return gain
+
+        music_server_module.set_voice_gain = set_gain
+        with urllib.request.urlopen(self.base + "/api/voice-volume", timeout=2) as response:
+            self.assertEqual(json.loads(response.read())["gain"], 40)
+        request = urllib.request.Request(self.base + "/api/voice-volume", data=b'{"gain":32}',
+                                         method="POST", headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=2) as response:
+            self.assertEqual(json.loads(response.read())["gain"], 32)
+        request = urllib.request.Request(self.base + "/api/voice-volume", data=b'{"gain":101}',
+                                         method="POST", headers={"Content-Type": "application/json"})
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request, timeout=2)
+        self.assertEqual(raised.exception.code, 400)
+        self.assertEqual(saved["gain"], 32)
+
+    def test_upload_endpoint_streams_file_and_returns_library_track(self):
+        payload = b"fake audio body"
+        request = urllib.request.Request(
+            self.base + "/api/upload?filename=%E6%B5%8B%E8%AF%95.wav", data=payload,
+            method="POST", headers={"Content-Type": "application/octet-stream"})
+        with urllib.request.urlopen(request, timeout=2) as response:
+            result = json.loads(response.read())
+            self.assertEqual(response.status, 201)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["track"]["id"], "b" * 20)
+        self.assertEqual(self.httpd.library.uploaded, [("测试.wav", payload, len(payload))])
+
+    def test_upload_endpoint_rejects_non_audio_content_type(self):
+        request = urllib.request.Request(self.base + "/api/upload?filename=x.wav", data=b"body",
+                                         method="POST", headers={"Content-Type": "text/plain"})
+        with self.assertRaises(Exception) as raised:
+            urllib.request.urlopen(request, timeout=2)
+        self.assertEqual(getattr(raised.exception, "code", None), 415)
+
+    def test_upload_endpoint_enforces_size_limit_before_reading_body(self):
+        from music_library import MAX_UPLOAD_BYTES
+        request = urllib.request.Request(self.base + "/api/upload?filename=x.wav", data=b"x",
+                                         method="POST", headers={"Content-Type": "application/octet-stream"})
+        request.add_header("Content-Length", str(MAX_UPLOAD_BYTES + 1))
+        with self.assertRaises(Exception) as raised:
+            urllib.request.urlopen(request, timeout=2)
+        self.assertEqual(getattr(raised.exception, "code", None), 413)
+        self.assertEqual(self.httpd.library.uploaded, [])
 
     def test_serves_installable_mobile_app_assets(self):
         cases = {
             "/manifest.webmanifest": ("application/manifest+json", '"display": "standalone"'),
-            "/service-worker.js": ("text/javascript", 'xiaorui-music-shell-v3'),
+            "/service-worker.js": ("text/javascript", 'xiaorui-music-shell-v11'),
             "/icon.svg": ("image/svg+xml", "<svg"),
             "/icon-192.png": ("image/png", ""),
             "/icon-512.png": ("image/png", ""),
@@ -342,15 +472,295 @@ class MusicUiHttpTests(unittest.TestCase):
         self.assertEqual(len(state["players"]), 2)
         self.assertIn("reconcile", state)
 
+    def test_loopback_voice_endpoint_stays_separate_from_paired_browser_api(self):
+        self.httpd.pairing_auth = PairingAuth(Path(self.tempdir.name) / "voice-pair-state.json",
+                                              Path(self.tempdir.name) / "voice-pair-code.json")
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(self.base + "/api/state", timeout=2)
+        self.assertEqual(raised.exception.code, 401)
+
+        request = urllib.request.Request(self.base + "/api/voice",
+            data=json.dumps({"action": "status"}).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=2) as response:
+            result = json.loads(response.read())
+        self.assertEqual(result, {"ok": True, "response": "当前没有正在播放的音乐"})
+
+        request = urllib.request.Request(self.base + "/api/voice",
+            data=json.dumps({"action": "arbitrary.snapcast.op"}).encode(),
+            headers={"Content-Type": "application/json"})
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request, timeout=2)
+        self.assertEqual(raised.exception.code, 400)
+        self.assertIn("不支持", json.loads(raised.exception.read())["error"])
+
+    def test_dedicated_voice_listener_is_loopback_only_and_shares_music_state(self):
+        self.httpd.pairing_auth = PairingAuth(Path(self.tempdir.name) / "voice-pair-state.json",
+                                              Path(self.tempdir.name) / "voice-pair-code.json")
+        voice_server = create_loopback_voice_server(self.httpd, 0)
+        voice_thread = threading.Thread(target=voice_server.serve_forever, daemon=True)
+        voice_thread.start()
+        self.addCleanup(voice_server.server_close)
+        self.addCleanup(voice_server.shutdown)
+        self.assertEqual(voice_server.server_address[0], "127.0.0.1")
+        base = f"http://127.0.0.1:{voice_server.server_address[1]}"
+
+        request = urllib.request.Request(base + "/api/voice",
+            data=json.dumps({"action": "status"}).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=2) as response:
+            self.assertEqual(json.loads(response.read()),
+                             {"ok": True, "response": "当前没有正在播放的音乐"})
+
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(base + "/api/state", timeout=2)
+        self.assertEqual(raised.exception.code, 404)
+
+    def test_voice_play_uses_shared_queue_and_only_online_players(self):
+        self.transport.status["server"]["groups"][0]["clients"][0]["config"]["volume"]["percent"] = 20
+        request = urllib.request.Request(self.base + "/api/voice",
+            data=json.dumps({"action": "play", "query": "sample"}).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=2) as response:
+            result = json.loads(response.read())
+        self.assertTrue(result["ok"], result)
+        self.assertIn("同步播放", result["response"])
+        self.assertEqual(self.httpd.music_queue["state"], "playing")
+        self.assertEqual(self.httpd.music_queue["track_ids"], [self.httpd.library.track["id"]])
+        self.assertEqual(self.httpd.music_queue["players"], ["aa:bb:cc:dd:ee:01"])
+        self.assertEqual(self.httpd.library.started, [self.httpd.library.track["id"]])
+
+        def post(action):
+            body = json.dumps({"action": action}).encode()
+            req = urllib.request.Request(self.base + "/api/voice", data=body,
+                                         headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=2) as response:
+                return json.loads(response.read())
+
+        self.assertTrue(post("pause")["ok"])
+        self.assertEqual(self.httpd.music_queue["state"], "paused")
+        self.assertTrue(post("resume")["ok"])
+        self.assertEqual(self.httpd.music_queue["state"], "playing")
+        self.assertEqual(self.httpd.library.paused, [self.httpd.library.track["id"]])
+        self.assertEqual(self.httpd.library.resumed, [self.httpd.library.track["id"]])
+
+    def test_voice_play_partial_genre_asr_falls_back_to_random_track(self):
+        self.transport.status["server"]["groups"][0]["clients"][0]["config"]["volume"]["percent"] = 20
+        request = urllib.request.Request(self.base + "/api/voice",
+            data=json.dumps({"action": "play", "query": "轻音"}).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=2) as response:
+            result = json.loads(response.read())
+        self.assertTrue(result["ok"], result)
+        self.assertIn("先随机播放：sample.wav", result["response"])
+        self.assertEqual(self.httpd.music_queue["state"], "playing")
+        self.assertEqual(self.httpd.library.started, [self.httpd.library.track["id"]])
+
+    def test_voice_radio_uses_pcm_fifo_and_can_pause_resume(self):
+        self.transport.status["server"]["groups"][0]["clients"][0]["config"]["volume"]["percent"] = 20
+        station = self.httpd.collections.station_create("测试电台", "https://radio.example/live.m3u8")
+
+        def post(action, query=None):
+            body = json.dumps({"action": action, "query": query}).encode()
+            request = urllib.request.Request(self.base + "/api/voice", data=body,
+                headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(request, timeout=2) as response:
+                return json.loads(response.read())
+
+        result = post("play", "测试电台")
+        self.assertTrue(result["ok"], result)
+        marker = "radio:" + station["id"]
+        self.assertIn((marker, station["url"]), self.httpd.library.started)
+        session = self.httpd.session.handle({"op": "sessions.list"})["sessions"][0]
+        self.assertTrue(session["source"].startswith("pipe:///"))
+        self.assertEqual(session["source_url"], station["url"])
+        self.assertTrue(post("pause")["ok"])
+        self.assertTrue(post("resume")["ok"])
+        self.assertEqual(self.httpd.library.paused, [marker])
+        self.assertEqual(self.httpd.library.resumed, [marker])
+
+    def test_voice_start_preserves_current_device_volume(self):
+        request = urllib.request.Request(self.base + "/api/voice",
+            data=json.dumps({"action": "play", "query": "sample"}).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=2) as response:
+            result = json.loads(response.read())
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self.httpd.library.started, ["a" * 20])
+        self.assertFalse(any(method == "Client.SetVolume" for method, _ in self.transport.calls))
+
+    def test_voice_set_music_volume_uses_supported_per_player_operation(self):
+        player = self.transport.status["server"]["groups"][0]["clients"][0]
+        player["config"]["volume"] = {"muted": True, "percent": 66}
+        request = urllib.request.Request(self.base + "/api/voice",
+            data=json.dumps({"action": "volume_set", "volume": 60}).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=2) as response:
+            result = json.loads(response.read())
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["volume"], 60)
+        self.assertEqual(player["config"]["volume"], {"muted": True, "percent": 60})
+
+    def test_voice_transport_controls_pause_resume_next_previous_stop(self):
+        player_id = "aa:bb:cc:dd:ee:01"
+
+        def post(path, payload):
+            request = urllib.request.Request(self.base + path,
+                data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(request, timeout=2) as response:
+                return json.loads(response.read())
+
+        started = post("/api", {"op": "queue.play", "track_ids": ["a" * 20, "a" * 20],
+                                 "players": [player_id]})
+        self.assertTrue(started["ok"], started)
+        paused = post("/api/voice", {"action": "pause"})
+        self.assertTrue(paused["ok"], paused)
+        self.assertEqual(self.httpd.music_queue["state"], "paused")
+        resumed = post("/api/voice", {"action": "resume"})
+        self.assertTrue(resumed["ok"], resumed)
+        self.assertEqual(self.httpd.music_queue["state"], "playing")
+        next_track = post("/api/voice", {"action": "next"})
+        self.assertTrue(next_track["ok"], next_track)
+        self.assertEqual(self.httpd.music_queue["index"], 1)
+        previous_track = post("/api/voice", {"action": "previous"})
+        self.assertTrue(previous_track["ok"], previous_track)
+        self.assertEqual(self.httpd.music_queue["index"], 0)
+        stopped = post("/api/voice", {"action": "stop"})
+        self.assertTrue(stopped["ok"], stopped)
+        self.assertEqual(self.httpd.music_queue["state"], "stopped")
     def test_library_endpoint_hides_absolute_and_relative_file_paths(self):
         with urllib.request.urlopen(self.base + "/api/library", timeout=2) as response:
             result = json.loads(response.read())
         self.assertTrue(result["ok"])
         self.assertEqual(result["tracks"][0]["title"], "sample.wav")
         self.assertNotIn("relative_path", result["tracks"][0])
+        self.assertFalse(result["tracks"][0]["uploaded"])
+        self.assertIn("upload_usage", result)
+
+    def test_library_query_uses_server_side_search_and_pagination(self):
+        with urllib.request.urlopen(self.base + "/api/library?q=sample&page=0&page_size=1&sort=artist", timeout=2) as response:
+            result = json.loads(response.read())
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["page_size"], 1)
+        self.assertEqual(len(result["tracks"]), 1)
+        with urllib.request.urlopen(self.base + "/api/library?q=does-not-exist", timeout=2) as response:
+            empty = json.loads(response.read())
+        self.assertEqual(empty["total"], 0)
+        with urllib.request.urlopen(self.base + "/api/library?folder=__root__", timeout=2) as response:
+            root_folder = json.loads(response.read())
+        self.assertEqual(root_folder["total"], 1)
+
+    def test_collections_endpoint_and_favorite_toggle(self):
+        track_id = "a" * 20
+        body = json.dumps({"op": "favorite.toggle", "track_id": track_id}).encode()
+        request = urllib.request.Request(self.base + "/api", data=body,
+                                         headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=2) as response:
+            self.assertTrue(json.loads(response.read())["favorite"])
+        with urllib.request.urlopen(self.base + "/api/collections", timeout=2) as response:
+            self.assertIn(track_id, json.loads(response.read())["favorites"])
+
+    def test_playlist_create_rejects_malformed_track_list_without_server_error(self):
+        request = urllib.request.Request(
+            self.base + "/api", data=json.dumps({"op": "playlist.create", "name": "bad",
+                                                  "track_ids": None}).encode(),
+            headers={"Content-Type": "application/json"})
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request, timeout=2)
+        self.assertEqual(raised.exception.code, 400)
+        result = json.loads(raised.exception.read())
+        self.assertFalse(result["ok"])
+        self.assertIn("曲目", result["error"])
+
+    def test_radio_source_validation_and_collection_persistence(self):
+        body = json.dumps({"op": "radio.add", "name": "测试电台",
+                           "url": "file:///etc/passwd"}).encode()
+        request = urllib.request.Request(self.base + "/api", data=body,
+                                         headers={"Content-Type": "application/json"})
+        with self.assertRaises(Exception) as raised:
+            urllib.request.urlopen(request, timeout=2)
+        self.assertEqual(getattr(raised.exception, "code", None), 400)
+        body = json.dumps({"op": "radio.add", "name": "局域网电台",
+                           "url": "http://192.168.1.2:8000/stream"}).encode()
+        request = urllib.request.Request(self.base + "/api", data=body,
+                                         headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=2) as response:
+            result = json.loads(response.read())
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.httpd.collections.list()["stations"][0]["url"],
+                         "http://192.168.1.2:8000/stream")
+
+    def test_radio_playback_is_separate_from_file_queue_and_pause_resume_works(self):
+        player_id = STATUS["server"]["groups"][0]["clients"][0]["id"]
+        self.transport.status["server"]["groups"][0]["clients"][0]["config"]["volume"]["percent"] = 20
+
+        def post(payload):
+            req = urllib.request.Request(self.base + "/api", data=json.dumps(payload).encode(),
+                                          headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=2) as response:
+                return json.loads(response.read())
+
+        station = post({"op": "radio.add", "name": "测试电台", "url": "http://192.168.1.2:8000/stream"})["station"]
+        started = post({"op": "radio.play", "id": station["id"], "players": [player_id]})
+        self.assertTrue(started["ok"], started)
+        self.assertEqual(started["queue"]["source_kind"], "radio")
+        self.assertEqual(started["queue"]["tracks"], [])
+        marker = "radio:" + station["id"]
+        self.assertIn((marker, "http://192.168.1.2:8000/stream"), self.httpd.library.started)
+        session_id = started["session_id"]
+        session_row = next(row for row in post({"op": "sessions.list"})["sessions"]
+                           if row["session_id"] == session_id)
+        self.assertTrue(session_row["source"].startswith("pipe:///"))
+        self.assertEqual(session_row["source_url"], station["url"])
+        self.assertTrue(post({"op": "session.pause", "session_id": session_id})["ok"])
+        self.assertTrue(post({"op": "session.resume", "session_id": session_id})["ok"])
+        self.assertEqual(self.httpd.library.paused, [marker])
+        self.assertEqual(self.httpd.library.resumed, [marker])
+
+    def test_radio_queue_is_restored_only_for_matching_session(self):
+        station_id = "c" * 32
+        session_row = {"session_id": "radio-session", "state": "playing",
+                       "track_id": "radio:" + station_id}
+        fake_session = SimpleNamespace(handle=lambda request: {"sessions": [session_row]})
+        payload = {"source_kind": "radio", "station_id": station_id,
+                   "session_id": "radio-session", "players": ["player"],
+                   "state": "playing", "current_title": "电台"}
+        path = Path(self.tempdir.name) / "queue.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        restored = Handler._load_queue(path, self.httpd.library, fake_session)
+        self.assertEqual(restored["state"], "playing")
+        self.assertEqual(restored["source_kind"], "radio")
+        payload["session_id"] = "stale-session"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        self.assertEqual(Handler._load_queue(path, self.httpd.library, fake_session)["state"], "stopped")
+
+    def test_library_delete_upload_refuses_tracks_still_queued(self):
+        self.httpd.library.track = {"id": "b" * 20, "title": "phone.wav",
+                                    "relative_path": "uploads/phone.wav", "size_bytes": 32,
+                                    "duration_seconds": 1.0}
+        self.httpd.music_queue = {"track_ids": ["b" * 20], "players": [], "index": 0,
+                                  "session_id": None, "state": "playing", "error": None}
+        request = urllib.request.Request(self.base + "/api", data=json.dumps({
+            "op": "library.delete_upload", "track_id": "b" * 20}).encode(),
+            headers={"Content-Type": "application/json"})
+        with self.assertRaises(Exception) as raised:
+            urllib.request.urlopen(request, timeout=2)
+        self.assertEqual(getattr(raised.exception, "code", None), 400)
+        self.assertEqual(self.httpd.library.deleted, [])
+
+    def test_library_delete_upload_removes_unqueued_uploaded_track(self):
+        self.httpd.library.track = {"id": "b" * 20, "title": "phone.wav",
+                                    "relative_path": "uploads/phone.wav", "size_bytes": 32,
+                                    "duration_seconds": 1.0}
+        request = urllib.request.Request(self.base + "/api", data=json.dumps({
+            "op": "library.delete_upload", "track_id": "b" * 20}).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=2) as response:
+            self.assertTrue(json.loads(response.read())["ok"])
+        self.assertEqual(self.httpd.library.deleted, ["b" * 20])
 
     def test_library_play_uses_opaque_track_id(self):
-        self.httpd.music_max_start_volume = 100
         body = json.dumps({"op": "library.play", "track_id": "a" * 20,
                            "players": ["aa:bb:cc:dd:ee:01"]}).encode()
         req = urllib.request.Request(self.base + "/api", data=body,
@@ -363,50 +773,42 @@ class MusicUiHttpTests(unittest.TestCase):
         sessions = self.httpd.session.handle({"op": "sessions.list"})["sessions"]
         self.assertEqual(sessions[0]["track_title"], "sample.wav")
 
-    def test_music_play_is_blocked_above_safe_start_volume(self):
+    def test_music_play_uses_existing_volume_without_startup_cap(self):
+        player = self.transport.status["server"]["groups"][0]["clients"][0]
+        player["config"]["volume"]["percent"] = 100
         body = json.dumps({"op": "library.play", "track_id": "a" * 20,
                            "players": ["aa:bb:cc:dd:ee:01"]}).encode()
-        req = urllib.request.Request(self.base + "/api", data=body,
-                                     headers={"Content-Type": "application/json"})
-        with self.assertRaises(Exception) as raised:
-            urllib.request.urlopen(req, timeout=2)
-        self.assertEqual(getattr(raised.exception, "code", None), 409)
-        body = json.loads(raised.exception.read())
-        self.assertEqual(body["code"], "volume_too_high")
-        self.assertEqual(body["max_start_volume"], 35)
-        self.assertEqual(body["players"][0]["volume"], 100)
-        self.assertEqual(self.httpd.library.started, [])
-
-    def test_confirmed_safe_volume_lowers_selected_players_and_starts(self):
-        first = self.transport.status["server"]["groups"][0]["clients"][0]
-        first["config"]["volume"] = {"muted": True, "percent": 100}
-        second_id = "aa:bb:cc:dd:ee:01"
-        body = json.dumps({"op": "library.play", "track_id": "a" * 20,
-                           "players": [second_id], "startup_volume": 24}).encode()
         req = urllib.request.Request(self.base + "/api", data=body,
                                      headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=2) as response:
             result = json.loads(response.read())
         self.assertTrue(result["ok"], result)
-        volume_call = next(params for method, params in self.transport.calls
-                           if method == "Client.SetVolume")
-        self.assertEqual(volume_call["volume"], {"muted": True, "percent": 24})
         self.assertEqual(self.httpd.library.started, ["a" * 20])
-        self.assertTrue(self.httpd.music_active_file.exists())
-
-    def test_confirmed_volume_rejects_values_above_safe_limit(self):
+        self.assertEqual(player["config"]["volume"]["percent"], 100)
+        self.assertFalse(any(method == "Client.SetVolume" for method, _ in self.transport.calls))
+    def test_legacy_startup_volume_is_ignored_and_never_changes_device_volume(self):
+        player = self.transport.status["server"]["groups"][0]["clients"][0]
+        player["config"]["volume"] = {"muted": True, "percent": 100}
         body = json.dumps({"op": "library.play", "track_id": "a" * 20,
-                           "players": ["aa:bb:cc:dd:ee:01"],
-                           "startup_volume": 36}).encode()
+                           "players": ["aa:bb:cc:dd:ee:01"], "startup_volume": 24}).encode()
         req = urllib.request.Request(self.base + "/api", data=body,
                                      headers={"Content-Type": "application/json"})
-        with self.assertRaises(Exception) as raised:
-            urllib.request.urlopen(req, timeout=2)
-        self.assertEqual(getattr(raised.exception, "code", None), 400)
-        self.assertIn("0~35%", raised.exception.read().decode())
-        self.assertEqual(self.httpd.library.started, [])
-
-    def test_queue_play_can_confirm_safe_volume(self):
+        with urllib.request.urlopen(req, timeout=2) as response:
+            result = json.loads(response.read())
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(player["config"]["volume"], {"muted": True, "percent": 100})
+        self.assertFalse(any(method == "Client.SetVolume" for method, _ in self.transport.calls))
+    def test_legacy_startup_volume_above_old_cap_is_ignored(self):
+        body = json.dumps({"op": "library.play", "track_id": "a" * 20,
+                           "players": ["aa:bb:cc:dd:ee:01"], "startup_volume": 100}).encode()
+        req = urllib.request.Request(self.base + "/api", data=body,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=2) as response:
+            result = json.loads(response.read())
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self.httpd.library.started, ["a" * 20])
+        self.assertFalse(any(method == "Client.SetVolume" for method, _ in self.transport.calls))
+    def test_queue_play_does_not_apply_legacy_startup_volume(self):
         track_id = "a" * 20
         body = json.dumps({"op": "queue.play", "track_ids": [track_id],
                            "players": ["aa:bb:cc:dd:ee:01"],
@@ -417,10 +819,7 @@ class MusicUiHttpTests(unittest.TestCase):
             result = json.loads(response.read())
         self.assertTrue(result["ok"], result)
         self.assertEqual(self.httpd.music_queue["state"], "playing")
-        self.assertTrue(any(method == "Client.SetVolume"
-                            and params["volume"]["percent"] == 20
-                            for method, params in self.transport.calls))
-
+        self.assertFalse(any(method == "Client.SetVolume" for method, _ in self.transport.calls))
     def test_music_play_rejects_offline_device_before_starting_writer(self):
         body = json.dumps({"op": "library.play", "track_id": "a" * 20,
                            "players": ["aa:bb:cc:dd:ee:ff"]}).encode()
@@ -433,7 +832,6 @@ class MusicUiHttpTests(unittest.TestCase):
         self.assertEqual(self.httpd.library.started, [])
 
     def test_queue_play_next_and_clear(self):
-        self.httpd.music_max_start_volume = 35
         players = ["aa:bb:cc:dd:ee:01"]
         track_id = "a" * 20
         client = self.transport.status["server"]["groups"][0]["clients"][0]
@@ -476,7 +874,6 @@ class MusicUiHttpTests(unittest.TestCase):
         self.assertFalse(self.httpd.music_active_file.exists())
 
     def test_queue_previous_jump_and_remove_are_index_based(self):
-        self.httpd.music_max_start_volume = 100
         player = "aa:bb:cc:dd:ee:01"
         self.transport.status["server"]["groups"][0]["clients"][0]["config"]["volume"]["percent"] = 20
 
@@ -502,7 +899,6 @@ class MusicUiHttpTests(unittest.TestCase):
         self.assertNotEqual(started["queue"]["session_id"], removed_current["queue"]["session_id"])
 
     def test_queue_snapshot_reports_estimated_progress_and_duration(self):
-        self.httpd.music_max_start_volume = 100
         self.transport.status["server"]["groups"][0]["clients"][0]["config"]["volume"]["percent"] = 20
         req = urllib.request.Request(self.base + "/api", data=json.dumps({
             "op": "queue.play", "track_ids": ["a" * 20],
@@ -518,7 +914,6 @@ class MusicUiHttpTests(unittest.TestCase):
         self.assertEqual(queue["current_track_id"], "a" * 20)
 
     def test_queue_completion_is_kept_for_ui_and_can_be_replayed(self):
-        self.httpd.music_max_start_volume = 100
         self.transport.status["server"]["groups"][0]["clients"][0]["config"]["volume"]["percent"] = 20
         track_id = "a" * 20
         req = urllib.request.Request(self.base + "/api", data=json.dumps({
@@ -558,7 +953,6 @@ class MusicUiHttpTests(unittest.TestCase):
         self.assertIn(("Group.SetMute", {"id": group_id, "mute": False}), self.transport.calls)
 
     def test_queue_automatically_advances_when_track_ends(self):
-        self.httpd.music_max_start_volume = 35
         track_id = "a" * 20
         client = self.transport.status["server"]["groups"][0]["clients"][0]
         client["config"]["volume"]["percent"] = 20
@@ -581,7 +975,6 @@ class MusicUiHttpTests(unittest.TestCase):
         self.assertEqual(len(self.httpd.library.started), 2)
 
     def test_failed_queue_is_restored_and_can_be_retried_explicitly(self):
-        self.httpd.music_max_start_volume = 35
         self.transport.status["server"]["groups"][0]["clients"][0]["config"]["volume"]["percent"] = 20
         track_id = "a" * 20
         payload = {"track_ids": [track_id, track_id],
@@ -605,38 +998,25 @@ class MusicUiHttpTests(unittest.TestCase):
         self.assertEqual(result["queue"]["index"], 1)
         self.assertEqual(self.httpd.library.started, [track_id])
 
-    def test_queue_retry_enforces_safe_start_volume(self):
+    def test_queue_retry_preserves_current_volume_above_old_cap(self):
         track_id = "a" * 20
-        self.httpd.music_max_start_volume = 35
         self.httpd.music_queue = {
             "track_ids": [track_id], "players": ["aa:bb:cc:dd:ee:01"],
             "index": 0, "session_id": None, "state": "error",
             "error": "之前启动失败",
         }
         client = self.transport.status["server"]["groups"][0]["clients"][0]
-        client["config"]["volume"]["percent"] = 61
-
+        client["config"]["volume"]["percent"] = 100
         req = urllib.request.Request(self.base + "/api", data=json.dumps(
             {"op": "queue.retry"}).encode(),
-            headers={"Content-Type": "application/json"})
-        with self.assertRaises(urllib.error.HTTPError) as caught:
-            urllib.request.urlopen(req, timeout=2)
-        self.assertEqual(caught.exception.code, 409)
-        result = json.loads(caught.exception.read())
-        self.assertEqual(result["code"], "volume_too_high")
-        self.assertEqual(self.httpd.library.started, [])
-
-        req = urllib.request.Request(self.base + "/api", data=json.dumps(
-            {"op": "queue.retry", "startup_volume": 24}).encode(),
             headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=2) as response:
             result = json.loads(response.read())
         self.assertTrue(result["ok"], result)
         self.assertEqual(self.httpd.library.started, [track_id])
-        self.assertEqual(client["config"]["volume"]["percent"], 24)
-
+        self.assertEqual(client["config"]["volume"]["percent"], 100)
+        self.assertFalse(any(method == "Client.SetVolume" for method, _ in self.transport.calls))
     def test_queue_state_restores_only_when_matching_session_is_active(self):
-        self.httpd.music_max_start_volume = 100
         track_id = "a" * 20
         payload = {"op": "queue.play", "track_ids": [track_id, track_id],
                    "players": ["aa:bb:cc:dd:ee:01"]}

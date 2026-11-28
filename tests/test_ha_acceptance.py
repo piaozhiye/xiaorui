@@ -291,7 +291,7 @@ class AcceptanceTests(unittest.TestCase):
             path = Path(directory)
             stub = path / "amixer"
             stub.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$AMIXER_TRACE"\n'
-                            'case "$*" in *numid=22*) exit 4;; esac\n')
+                            'case "$*" in *"name=SAI1 SDI0 Loopback Switch"*) exit 4;; esac\n')
             stub.chmod(0o755)
             env = dict(os.environ, PATH=directory + ":" + os.environ["PATH"],
                        AMIXER_TRACE=str(path / "calls"))
