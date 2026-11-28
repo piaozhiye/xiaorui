@@ -9,6 +9,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <spawn.h>
+#include <sys/wait.h>
 
 #include <lvgl/src/extra/libs/freetype/lv_freetype.h>
 #include "third_party/lvgl/include/lvgl/src/extra/libs/qrcode/qrcodegen.h"
@@ -18,6 +20,8 @@
 
 static volatile sig_atomic_t interrupted;
 static volatile sig_atomic_t dump_requested;
+static pid_t music_ui_launcher_pid = -1;
+extern char **environ;
 static lv_ft_info_t body_font;
 static lv_ft_info_t title_font;
 static lv_ft_info_t large_font;
@@ -166,6 +170,32 @@ static void navigation(lv_event_t *event) {
         lv_obj_add_flag(settings_page, LV_OBJ_FLAG_HIDDEN);
     }
     fprintf(stderr, "[ui] page=%s\n", settings_visible ? "settings" : "conversation");
+}
+
+/* Music Assistant runs in a separate kiosk window. Closing it reveals the
+ * still-running LVGL assistant underneath. */
+static void open_music_ui(lv_event_t *event) {
+    (void)event;
+    if (music_ui_launcher_pid > 0) {
+        lv_label_set_text(connection_label, "音乐界面已打开；关闭它即可返回小瑞");
+        return;
+    }
+    const char *launcher = getenv("XR_MA_KIOSK_SCRIPT");
+    if (!launcher || !*launcher) launcher = "/data/xiaorui-ui/ma-kiosk.sh";
+    char *const argv[] = {(char *)"/bin/sh", (char *)launcher,
+                          (char *)"launch", NULL};
+    pid_t child = -1;
+    int error = posix_spawn(&child, "/bin/sh", NULL, NULL, argv, environ);
+    if (error != 0) {
+        char message[128];
+        snprintf(message, sizeof(message), "音乐界面启动失败：%s", strerror(error));
+        lv_label_set_text(connection_label, message);
+        fprintf(stderr, "[ui] Music Assistant launch failed: %s\n", strerror(error));
+        return;
+    }
+    music_ui_launcher_pid = child;
+    lv_label_set_text(connection_label, "正在打开音乐界面…");
+    fprintf(stderr, "[ui] Music Assistant launcher pid=%ld\n", (long)child);
 }
 
 static lv_obj_t *button(lv_obj_t *parent, const char *text, int position_x, int position_y,
@@ -561,10 +591,11 @@ static void build_ui(void) {
     build_settings(screen);
     connection_label = label(screen, "语音 IPC 未连接，控制暂不可用", 76, 1660, 930,
                              body_font.font, 0x7b989e);
-    button(screen, "对话", 64, 1750, 285, navigation, NULL);
-    stop_button = button(screen, "停止回答", 369, 1750, 342, stop_answer, NULL);
+    button(screen, "对话", 32, 1750, 244, navigation, NULL);
+    stop_button = button(screen, "停止回答", 286, 1750, 244, stop_answer, NULL);
     lv_obj_add_state(stop_button, LV_STATE_DISABLED);
-    button(screen, "设置", 731, 1750, 285, navigation, (void *)1);
+    button(screen, "设置", 540, 1750, 244, navigation, (void *)1);
+    button(screen, "音乐", 794, 1750, 244, open_music_ui, NULL);
     label(screen, "ON DEVICE / PRIVATE BY DESIGN", 76, 1870, 900,
           &lv_font_montserrat_16, 0x4a6970);
 }
@@ -572,6 +603,19 @@ static void build_ui(void) {
 static void refresh(lv_timer_t *timer) {
     (void)timer;
     uint64_t now_ms = monotonic_ms();
+    if (music_ui_launcher_pid > 0) {
+        int status = 0;
+        pid_t exited = waitpid(music_ui_launcher_pid, &status, WNOHANG);
+        if (exited == music_ui_launcher_pid) {
+            music_ui_launcher_pid = -1;
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+                lv_label_set_text(connection_label, "已返回小瑞");
+            else
+                lv_label_set_text(connection_label,
+                                  "音乐未打开，请在 /data/xiaorui-ui/ma-kiosk.env 设置 XR_MA_URL");
+            fprintf(stderr, "[ui] Music Assistant browser closed\n");
+        }
+    }
     xr_ui_client_tick(now_ms);
     if (exit_armed && (uint32_t)now_ms - exit_armed_at > 3000)
     {

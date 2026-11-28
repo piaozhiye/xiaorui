@@ -4,15 +4,35 @@ import ipaddress
 import urllib.error
 import urllib.parse
 import urllib.request
+import os
+
+
+def _music_assistant_enabled(conn):
+    plugins = conn.config.get("plugins", {})
+    config = plugins.get("music_assistant", {}) if isinstance(plugins, dict) else {}
+    if isinstance(config, dict) and config.get("enabled") is True:
+        return True
+    return os.environ.get("XR_MA_CONTROL", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def music_assistant_enabled(conn):
+    """Expose the selected backend for intent routing and tests."""
+    return _music_assistant_enabled(conn)
 
 
 def enabled(conn):
-    config = conn.config.get("plugins", {}).get("snapcast_music", {})
-    return isinstance(config, dict) and config.get("enabled", False) is True
+    plugins = conn.config.get("plugins", {})
+    config = plugins.get("snapcast_music", {}) if isinstance(plugins, dict) else {}
+    return ((isinstance(config, dict) and config.get("enabled", False) is True)
+            or _music_assistant_enabled(conn))
 
 
 def control(conn, action, *, query=None, volume=None):
-    """Call the local controller with a small, validated voice command."""
+    """Control MA when enabled; otherwise keep the legacy local controller."""
+    if _music_assistant_enabled(conn):
+        from core.utils.music_assistant import control as ma_control
+        return ma_control(conn, action, query=query, volume=volume)
+
     config = conn.config.get("plugins", {}).get("snapcast_music", {})
     base_url = str(config.get("base_url", "http://127.0.0.1:8765")).rstrip("/")
     parsed = urllib.parse.urlsplit(base_url)

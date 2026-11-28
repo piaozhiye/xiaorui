@@ -120,6 +120,11 @@ plugins:
     # The voice gateway runs beside the Snapcast music controller on the
     # server board. The controller accepts this endpoint only over loopback.
     base_url: "http://127.0.0.1:8766"
+  # Enable via the root-only /data/xiaorui-gateway/data/ma-voice.env after
+  # MA is reachable. Keep the access token out of this shared deployment YAML.
+  music_assistant:
+    enabled: false
+    player_name: "rk3562-buildroot"
   play_music:
     music_dir: "/data/xiaorui-gateway/server/music"
     music_ext:

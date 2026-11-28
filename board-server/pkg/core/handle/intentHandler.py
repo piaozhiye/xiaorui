@@ -426,7 +426,12 @@ def _local_intents(conn=None):
                 or not is_unqualified_music_control_candidate(text)):
             return matched
         from core.handle.musicControlIntent import match_music_control as match
-        from core.utils.snapcast_music import music_active
+        from core.utils.snapcast_music import music_active, music_assistant_enabled
+        if music_assistant_enabled(conn):
+            # MA playback may have been started from its web UI or another
+            # controller, so do not require a synchronous network status probe
+            # while ASR is dispatching this utterance.
+            return match(text, music_active=True)
         active = music_active(conn)
         if active is True:
             return match(text, music_active=True)

@@ -22,7 +22,7 @@ play_music_function_desc = {
     "type": "function",
     "function": {
         "name": "play_music",
-        "description": "当用户要求播放音乐、歌曲时调用。",
+        "description": "当用户要求播放音乐或指定歌曲时调用；启用 Music Assistant 时从 MA 已配置的音乐源搜索并播放。",
         "parameters": {
             "type": "object",
             "properties": {

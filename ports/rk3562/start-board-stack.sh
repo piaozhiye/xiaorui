@@ -19,6 +19,22 @@ GW=/data/xiaorui-gateway
 SRV=/data/xiaorui-server
 PY=/data/gwvenv/bin/python
 MODEL=${XR_RKLLM_MODEL:-$SRV/qwen2.5-0.5b-instruct-rk3562-w8a8.rkllm}
+# MA 的网页入口已有独立环境文件;语音控制凭据放在网关私有目录,不进仓库。
+# 两个文件必须由 root 持有且权限为 600。ma-voice.env 可覆盖 XR_MA_URL,
+# 以便 MA Server 从 PC 迁到本机后只改 endpoint,不改代码。
+for MA_ENV in /data/xiaorui-ui/ma-kiosk.env "$GW/data/ma-voice.env"; do
+    if [ -r "$MA_ENV" ]; then
+        MA_OWNER=$(stat -c %u "$MA_ENV" 2>/dev/null || echo -1)
+        MA_MODE=$(stat -c %a "$MA_ENV" 2>/dev/null || echo 777)
+        if [ "$MA_OWNER" = 0 ] && { [ "$MA_MODE" = 600 ] || [ "$MA_MODE" = 400 ]; }; then
+            set -a
+            . "$MA_ENV"
+            set +a
+        else
+            echo "[board-stack] 跳过不安全的 MA 环境文件: $MA_ENV (owner=$MA_OWNER mode=$MA_MODE)" >&2
+        fi
+    fi
+done
 # librkllmrt.so 的 NEEDED 里有 libgomp.so.1, 部分板端镜像(比如 RK3562 AIOT
 # LP4X V10 / Buildroot 2026.02) 没自带, 要用 /data/xiaorui-server/lib 里那份。
 # 目录不存在时这个赋值无害(动态链接器会忽略不存在的路径)。

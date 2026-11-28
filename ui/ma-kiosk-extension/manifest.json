@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "XiaoRui Music Kiosk Return",
+  "version": "1.0.0",
+  "description": "Adds a touch target to return from Music Assistant to XiaoRui.",
+  "permissions": ["tabs"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "background": {"service_worker": "background.js"},
+  "content_scripts": [{
+    "matches": ["http://*/*", "https://*/*"],
+    "js": ["content.js"],
+    "run_at": "document_idle"
+  }]
+}

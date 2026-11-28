@@ -32,6 +32,9 @@ weston 16 判 `transform=90` 为 Invalid，且不会交换逻辑几何。
 ## 功能边界
 
 - 表情、时间、对话字幕卡片、对话/设置页、触摸导航。
+- “音乐”入口以独立 Chromium kiosk 窗口打开 Music Assistant Web UI；关闭音乐页上的
+  “返回小瑞”按钮即可回到仍在运行的 LVGL 界面。Chromium 使用独立用户配置目录，
+  不会占用语音 UI 或停止语音服务。
 - `--demo` 明确标为预览，所有语音控制禁用，不冒充真实状态。
 - 正常模式等待本机语音 IPC；未连接或超过 2.5 秒无状态回包，停止/音量控件禁用。
 - 前端启用 `XR_UI_SOCKET=/run/xiaorui/frontend.sock` 后，显示真实会话状态、
@@ -98,6 +101,32 @@ adb -s SERIAL push ui/build/aarch64/lib/liblvgl.so /data/xiaorui-ui/lib/
 adb -s SERIAL push ui/run.sh /data/xiaorui-ui/
 adb -s SERIAL shell 'sh /data/xiaorui-ui/run.sh'
 ```
+
+## Music Assistant 屏幕入口
+
+板端镜像需提供 `/usr/bin/chromium`，Music Assistant Server 则运行在局域网某台常开主机
+或家庭服务器上。此入口只负责在屏幕上打开 MA 的 Web UI；服务器部署、音乐源配置和
+Snapcast 输出仍由 MA Server 负责。不要把测试电脑地址写入固件或源码。
+
+部署入口脚本和返回按钮扩展：
+
+```bash
+adb -s SERIAL push ui/ma-kiosk.sh /data/xiaorui-ui/ma-kiosk.sh
+adb -s SERIAL push ui/ma-kiosk-extension /data/xiaorui-ui/ma-kiosk-extension
+adb -s SERIAL shell 'chmod 755 /data/xiaorui-ui/ma-kiosk.sh'
+```
+
+在板端创建 `/data/xiaorui-ui/ma-kiosk.env`，设置可从板子访问的 MA 地址：
+
+```sh
+XR_MA_URL=http://music-assistant-server.local:8095
+```
+
+也可参考仓库里的 `ma-kiosk.env.example`。配置文件只包含服务器地址；首次打开时在 MA
+登录页面正常登录。浏览器数据保存在 `/userdata/xiaorui/music-assistant/profile`，目录权限
+为 0700，登录状态在重启后保留。点击 LVGL 底栏“音乐”打开页面，触摸右上角“返回小瑞”
+关闭 Chromium 窗口并回到小瑞界面。MA 服务暂不可达时由浏览器显示连接错误；入口不会改变
+Snapserver、Snapclient 或语音服务状态。
 
 ## 开机自启与退出
 

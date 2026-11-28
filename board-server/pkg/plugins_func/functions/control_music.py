@@ -1,4 +1,4 @@
-"""Voice controls for the Snapcast multiroom player."""
+"""Voice controls for Music Assistant and its Snapcast player."""
 from core.utils.snapcast_music import control_async, enabled
 from core.handle.musicControlIntent import MUSIC_ACTIONS_SILENT_ON_SUCCESS
 from plugins_func.register import register_function, ToolType, ActionResponse, Action
@@ -8,7 +8,7 @@ control_music_function_desc = {
     "type": "function",
     "function": {
         "name": "control_music",
-        "description": "控制小瑞多设备音乐播放器。用户要播放/暂停/继续/停止、上一首/下一首、询问播放状态或调整音乐音量时调用。播放指定曲目只从当前小瑞音乐曲库或已配置电台中选择。",
+        "description": "控制小瑞音乐播放器。启用 Music Assistant 时，播放指定歌曲会在 MA 已配置的音乐源（如 QQ 音乐）中搜索，并通过 Snapcast 播放；也可暂停、继续、停止、切换歌曲、查询状态和调整音量。",
         "parameters": {
             "type": "object",
             "properties": {
