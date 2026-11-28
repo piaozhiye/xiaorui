@@ -84,7 +84,7 @@ class MusicControlIntentTests(unittest.TestCase):
 
     def test_voice_client_uses_only_loopback_controller(self):
         conn = SimpleNamespace(config={"plugins": {"snapcast_music": {
-            "enabled": True, "base_url": "http://192.168.1.40:8765"}}})
+            "enabled": True, "base_url": "http://192.0.2.40:8765"}}})
         self.assertTrue(enabled(conn))
         with patch("core.utils.snapcast_music.urllib.request.urlopen") as urlopen:
             result = control(conn, "pause")

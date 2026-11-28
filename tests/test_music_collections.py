@@ -44,8 +44,8 @@ class MusicCollectionsTests(unittest.TestCase):
                     "http://example.com:99999/stream", "https://example.com/stream#fragment"):
             with self.subTest(url=url), self.assertRaises(CollectionError):
                 self.store.station_create("bad", url)
-        station = self.store.station_create("电台", "http://192.168.1.2:8000/stream")
-        self.assertEqual(station["url"], "http://192.168.1.2:8000/stream")
+        station = self.store.station_create("电台", "http://192.0.2.1:8000/stream")
+        self.assertEqual(station["url"], "http://192.0.2.1:8000/stream")
 
     def test_device_group_validates_members_and_order(self):
         one = self.store.device_group_create("客厅", ["player-a", "player-b"])
