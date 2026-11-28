@@ -4,10 +4,10 @@
   "version": "1.0.0",
   "description": "Adds a touch target to return from Music Assistant to XiaoRui.",
   "permissions": ["tabs"],
-  "host_permissions": ["http://*/*", "https://*/*"],
+  "host_permissions": ["__XR_MA_ORIGIN__/*"],
   "background": {"service_worker": "background.js"},
   "content_scripts": [{
-    "matches": ["http://*/*", "https://*/*"],
+    "matches": ["__XR_MA_ORIGIN__/*"],
     "js": ["content.js"],
     "run_at": "document_idle"
   }]
