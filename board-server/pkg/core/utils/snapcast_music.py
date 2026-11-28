@@ -55,6 +55,12 @@ def control(conn, action, *, query=None, volume=None):
     return result
 
 
+async def control_async(conn, action, *, query=None, volume=None):
+    """Keep network control I/O off the ASR/TTS event loop."""
+    import asyncio
+    return await asyncio.to_thread(control, conn, action, query=query, volume=volume)
+
+
 def music_active(conn):
     """Return True/False for a known queue state, or None if status is unavailable."""
     if not enabled(conn):

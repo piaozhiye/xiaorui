@@ -1,4 +1,11 @@
 """Narrow local rules for explicit Snapcast music controls."""
+
+MUSIC_ACTIONS_SILENT_ON_SUCCESS = frozenset({
+    "play", "pause", "resume", "stop", "next", "previous",
+    "volume_set", "volume_up", "volume_down",
+})
+
+
 def is_unqualified_music_control_candidate(text):
     if not text:
         return False
